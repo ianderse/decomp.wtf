@@ -26,16 +26,20 @@ log = logging.getLogger("decomp.wtf")
 NEAR = 0.06  # a near miss: at most this much of the function differs (best_score <= 6% of n_insns * 100)
 SECONDS = 60  # per function per turn
 MAX_TURNS = 4  # turns per function before it's left to agents
+NO_REWRITE = 200  # rewrites in a row that change nothing: this source has nothing left to rewrite, next function
+GIVE_UP = 25  # turns in a row without a single improvement: rewrites aren't what these functions need; stop
 
 
 @dataclass
 class State:
     state: str = "running"
     tried: int = 0  # functions permuted
-    variants: int = 0
+    variants: int = 0  # rewrites that compiled and were judged
+    rejected: int = 0  # rewrites that didn't compile
     improved: int = 0
     matched: int = 0
     current: str = ""
+    why: str = ""  # why it stopped on its own
     started_at: float = field(default_factory=time.time)
     stop: threading.Event = field(default_factory=threading.Event)
 
@@ -57,6 +61,11 @@ class Permuter:
             return st
         if slug in self.net.links:  # a room member: the host's copy permutes, and its matches come back here
             return None
+        if self.net.out_of_process and not self.net.fork_slug(slug):  # a busy loop: its own process (worker.py)
+            from .worker import BackgroundProc, ProcStop
+            st = self.jobs[slug] = State()
+            st.stop = ProcStop(BackgroundProc("permuter", slug, self.net.store.path, self.net.workspace, st))
+            return st
         st = self.jobs[slug] = State()
         threading.Thread(target=self._loop, args=(slug, st), daemon=True, name=f"permuter-{slug}").start()
         return st
@@ -75,6 +84,7 @@ class Permuter:
     def _loop(self, slug: str, st: State) -> None:
         agent, _ = self.net.local_agent("permuter")
         idle = 0
+        fruitless = 0  # turns in a row that improved nothing
         try:
             while not st.stop.is_set():
                 try:
@@ -93,10 +103,16 @@ class Permuter:
                     if st.stop.is_set():
                         break
                     self._turns[fn["id"]] = self._turns.get(fn["id"], 0) + 1
+                    before = st.improved
                     try:
                         self._permute(agent, proj, fn, st)
                     except Exception as e:  # one odd function must not stop the rest
                         log.info("permuter: %s: %s", fn["name"], e)
+                    fruitless = 0 if st.improved > before else fruitless + 1
+                    if fruitless >= GIVE_UP:  # (starting agents starts it again, on the near misses they leave)
+                        st.why = f"{GIVE_UP} functions in a row without an improvement"
+                        log.info("permuter: stopping on %s: %s", slug, st.why)
+                        return
         finally:
             st.state = "stopped" if st.stop.is_set() else "done"
             st.current = ""
@@ -124,14 +140,20 @@ class Permuter:
             best_src = cur_src = fn["best_source"]
             best = cur = fn["best_score"]
             deadline = time.monotonic() + SECONDS
+            unchanged = 0
             while time.monotonic() < deadline and best > 0 and not st.stop.is_set():
                 cand = mutate(cur_src if rng.random() < 0.85 else best_src, rng)
-                if cand is None:
+                if cand is None:  # (no compile in between: without this, a pure-Python spin for the whole turn)
+                    unchanged += 1
+                    if unchanged >= NO_REWRITE:
+                        break
                     continue
-                st.variants += 1
+                unchanged = 0
                 score = self._score(agent, proj, fn, cand, best, fork)
                 if score is None:
+                    st.rejected += 1
                     continue
+                st.variants += 1
                 if score < best:
                     best, best_src = score, cand
                     st.improved += 1
@@ -150,7 +172,7 @@ class Permuter:
             res = self.net.forks.attempt(agent, fork, fn["name"], source, keep=False, quiet=best)
             return res.get("score")
         ctx = self.net._context(proj["id"], fn["unit"])
-        result = self.net._compile(proj, ctx["header"], source)
+        result = self.net._compile(proj, ctx["header"], source, fn)
         if not result.ok:
             return None
         cand, verdict, _ = self.net._evaluate(fn, proj, result.obj)

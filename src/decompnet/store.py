@@ -67,7 +67,10 @@ MIGRATIONS = [
 
 class Store:
     def __init__(self, path: str | Path):
-        self.conn = sqlite3.connect(str(path), check_same_thread=False, isolation_level=None)
+        self.path = str(path)
+        # timeout: the autopilot and the permuter write from their own processes; a writer waits its turn instead of
+        # failing with "database is locked"
+        self.conn = sqlite3.connect(self.path, check_same_thread=False, isolation_level=None, timeout=30)
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.execute("PRAGMA foreign_keys=ON")
@@ -104,23 +107,51 @@ class Store:
                 INSERT INTO settings(key, value) VALUES('abandons_recounted', '1');
                 COMMIT;""")
         self.lock = threading.RLock()
+        # reads go through one connection per thread (WAL: they see the last commit and never wait for a writer), so
+        # the GUI's polling doesn't queue behind every write. An in-memory database has only the one connection.
+        self._local = threading.local()
+        self._shared_only = self.path == ":memory:" or self.path.startswith("file:")
 
     @contextmanager
     def tx(self):
         """Serialized transaction. Never compile while holding this."""
         with self.lock:
-            self.conn.execute("BEGIN IMMEDIATE")
+            self._local.depth = getattr(self._local, "depth", 0) + 1
             try:
-                yield self.conn
-            except BaseException:
-                self.conn.execute("ROLLBACK")
-                raise
-            self.conn.execute("COMMIT")
+                self.conn.execute("BEGIN IMMEDIATE")
+                try:
+                    yield self.conn
+                except BaseException:
+                    self.conn.execute("ROLLBACK")
+                    raise
+                self.conn.execute("COMMIT")
+            finally:
+                self._local.depth -= 1
+
+    def _reader(self) -> sqlite3.Connection | None:
+        """This thread's read connection; None inside a transaction (its own writes are only visible there)."""
+        if self._shared_only or getattr(self._local, "depth", 0):
+            return None
+        conn = getattr(self._local, "conn", None)
+        if conn is None:
+            conn = sqlite3.connect(self.path, isolation_level=None, timeout=30)
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA query_only=1")
+            self._local.conn = conn
+        return conn
 
     def one(self, sql: str, *args) -> sqlite3.Row | None:
+        if (conn := self._reader()) is not None:
+            cur = conn.execute(sql, args)
+            try:
+                return cur.fetchone()
+            finally:
+                cur.close()  # ends the read, so the next one sees newer commits
         with self.lock:
             return self.conn.execute(sql, args).fetchone()
 
     def all(self, sql: str, *args) -> list[sqlite3.Row]:
+        if (conn := self._reader()) is not None:
+            return conn.execute(sql, args).fetchall()
         with self.lock:
             return self.conn.execute(sql, args).fetchall()

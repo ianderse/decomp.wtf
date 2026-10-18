@@ -153,7 +153,7 @@ def export_rom(net, slug: str, out: Path, log=print) -> dict:
             continue
         unit = net._effective_unit(row, units)
         hdr = net._context(proj["id"], unit)["header"]
-        compiled = net._compile(proj, hdr, row["matched_source"])
+        compiled = net._compile(proj, hdr, row["matched_source"], row)
         if not compiled.ok:
             as_fallback.append((f["name"], "doesn't compile any more"))
             f["kind"] = "asm"
@@ -180,6 +180,8 @@ def export_rom(net, slug: str, out: Path, log=print) -> dict:
         src.write_text(f'#include "{include}"\n\n{row["matched_source"].strip()}\n', encoding="utf-8")
         f["kind"] = "c"
         f["src"] = src.relative_to(out).as_posix()
+        if (own := net.fn_toolchain(row)):  # matched with another compiler version than the project's
+            f["toolchain"] = own
         f["obj"] = f"build/src/{f['seg']}/{f['name']}.o"
         private += [(f["obj"], section, base) for section, base in bases.items()]
 
@@ -248,6 +250,8 @@ def export_rom(net, slug: str, out: Path, log=print) -> dict:
         if f["kind"] == "c":
             entry["c"] = f["src"]
             entry["own"] = {sec: base for (obj, sec, base) in private if obj == f["obj"]}
+            if f.get("toolchain"):
+                entry["toolchain"] = f["toolchain"]
         fn_json.append(entry)
 
     # 5. build description, build script, objdiff, docs

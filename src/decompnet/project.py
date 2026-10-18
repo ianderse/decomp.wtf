@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import sys
 from concurrent.futures import ThreadPoolExecutor
 import time
 import tomllib
@@ -50,6 +51,19 @@ def load_config(root: Path) -> dict:
         return tomllib.load(f)
 
 
+def with_toolchain(compiler: dict, spec: str | None) -> dict:
+    """A project's compiler settings with another toolchain: an id, or id + ":gnu-as" for its plain command (GNU as
+    without the template's assembler step: PS1 library code that wasn't assembled by Sony's assembler)."""
+    if not spec:
+        return compiler
+    tid, _, variant = spec.partition(":")
+    out = {**compiler, "toolchain": tid}
+    out.pop("assembler", None)
+    if variant == "gnu-as":
+        out["assembler"] = "gnu"
+    return out
+
+
 def compiler_config(root: Path, cfg: dict) -> CompilerConfig:
     """Build the sandboxed compile command for a project.
 
@@ -71,16 +85,25 @@ def compiler_config(root: Path, cfg: dict) -> CompilerConfig:
         if "runtime-i386" in tc.requires and not linux:  # in WSL its programs bring the runtime themselves
             runtime32 = str(toolchains.require("runtime-i386"))
         flags = c.get("flags", tc.flags)
+        # a template that needs a tool with no build for this computer (an Intel Mac has no modern MIPS assembler for
+        # maspsx): the plain compiler command, if the toolchain has one
+        template = tc.cmd if tc.cmd and c.get("assembler") != "gnu" and (linux or not tc.cc or all(
+            toolchains.get(d).supported for d in tc.requires if d != "runtime-i386")) else []
         if c.get("cmd"):
             base = c["cmd"]
-        elif tc.cmd:  # a full template ({flags} expands to the flags)
-            base = [x for a in tc.cmd for x in (flags if a == "{flags}" else [a])]
+        elif template:  # a full template ({flags} expands to the flags)
+            base = [x for a in template for x in (flags if a == "{flags}" else [a])]
         else:
             base = [*tc.cc, *flags, "-I{include}", "{src}", "-o", "{obj}"]
         cmd = [a.replace("{tc}", tc_dir) for a in base]
-        for dep in tc.requires:  # {tc:<id>} is another toolchain this one needs
-            where = toolchains.path(dep, linux)
+        for dep in (tc.requires if template or c.get("cmd") else ["runtime-i386"] if "runtime-i386" in tc.requires else []):
+            where = toolchains.path(dep, linux)  # {tc:<id>} is another toolchain this one needs
             cmd = [a.replace(f"{{tc:{dep}}}", wsl.path(where) if linux else str(where)) for a in cmd]
+        if any("{python}" in a for a in cmd):  # a tool written in Python (maspsx): this interpreter, seen by the sandbox
+            cmd = [a.replace("{python}", "python3" if linux else sys.executable) for a in cmd]
+            if not linux:
+                ro_paths += sorted({str(Path(p).resolve()) for p in (sys.prefix, sys.base_prefix)})
+        cmd = [a.replace("{aspsx}", str(c.get("aspsx", "2.77"))) for a in cmd]
     else:
         cmd = list(c["cmd"])
     return CompilerConfig(

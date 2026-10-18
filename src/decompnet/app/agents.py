@@ -539,6 +539,16 @@ class Manager:
         self.on_stop = lambda: None  # set by the server: close tunnels when the app quits
         self.persist = lambda running: None  # set by the server: remember helpers to resume after a restart
 
+    def release_orphans(self) -> None:
+        """Functions still held by helpers of an earlier run (the app was killed mid-session): nobody works on them
+        any more, so they're free now instead of when the claims run out half an hour later."""
+        names = [r["name"] for r in self.net.store.all("SELECT name FROM agents WHERE origin='local'")
+                 if r["name"] in ("autopilot", "permuter") or re.fullmatch(rf"(?:{'|'.join(KINDS)})-\d+", r["name"])]
+        if names:
+            with self.net.store.tx() as db:
+                db.execute(f"DELETE FROM claims WHERE agent_id IN (SELECT id FROM agents WHERE origin='local' AND "
+                           f"name IN ({','.join('?' * len(names))}))", names)
+
     # -- control
 
     def start(self, kind: str, slug: str, count: int = 1, options: dict | None = None) -> list[str]:

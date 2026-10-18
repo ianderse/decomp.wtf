@@ -151,7 +151,14 @@ def runtime_dirs(tid: str) -> tuple[Path, ...]:
     """The toolchain plus everything it requires, for mounting into the sandbox (all Linux builds for WSL)."""
     tc = get(tid)
     linux = tc.via_wsl
-    return (require(tid, linux), *(require(dep, linux) for dep in tc.requires))
+    deps = []
+    for dep in tc.requires:
+        if not linux and not get(dep).supported:
+            continue  # no build for this computer: the toolchain compiles without it (see project.compiler_config)
+        if installed(dep, linux) is None and not linux and dep != "runtime-i386" and not get(dep).proprietary:
+            ensure(dep, log=lambda *_: None)  # a tool added to the toolchain after it was installed (maspsx)
+        deps.append(require(dep, linux))
+    return (require(tid, linux), *deps)
 
 
 # ---------------------------------------------------------------------------- install

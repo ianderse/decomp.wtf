@@ -17,6 +17,8 @@ from decompnet.app import updates
 @pytest.fixture(autouse=True)
 def data_home(tmp_path, monkeypatch):
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    # macOS and Windows ignore XDG_DATA_HOME: without this the tests wrote install.json into the real data folder
+    monkeypatch.setattr(updates.toolchains, "data_dir", lambda: tmp_path / "data" / "decompnet")
     return tmp_path / "data"
 
 

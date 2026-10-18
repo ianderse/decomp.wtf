@@ -260,6 +260,7 @@ def build(net: RomNetwork, home: Path, port: int, secret: str):
     mcp_url = f"http://127.0.0.1:{port}/mcp"
     build_id = (updates.installed().get("commit") or "")[:12]  # a branch install: the commit it came from
     manager = agents.Manager(net, home, mcp_url)
+    manager.release_orphans()  # before any helper resumes
     jobs = Jobs(home / "logs" / "decomp.log")
     settings = Settings(home / "settings.json")
     manager.budget = lambda: float(settings.data.get("budget_usd") or 0)
@@ -282,6 +283,17 @@ def build(net: RomNetwork, home: Path, port: int, secret: str):
     threading.Thread(target=collab.local_addresses, daemon=True).start()  # `tailscale status` can take seconds
     # rooms this computer belongs to reconnect (members keep their place; their agents wait while the host is away)
     net.restore_links()
+
+    # a project whose code is judged differently now (a new compiler step came with an update): the autopilot judges
+    # its best attempts again, in the background (free matches, and true scores)
+    if net.out_of_process and settings.data.get("autopilot", True):
+        for row in net.store.all("SELECT * FROM projects"):
+            if net.is_rom(row) and not net.fork_slug(row["slug"]) and row["slug"] not in net.links \
+                    and json.loads(row["config"]).get("judged_with") != net.judge_signature(row):
+                try:
+                    net.start_autopilot(row["slug"])
+                except NetworkError:
+                    pass
 
     # helpers that were working when the app last stopped carry on
     resume = [r for r in settings.data.get("running_agents", []) if isinstance(r, dict)]

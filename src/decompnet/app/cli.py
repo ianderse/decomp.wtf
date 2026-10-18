@@ -147,6 +147,7 @@ def run(args) -> int:
     except OSError:
         pass
     net = RomNetwork(internal / "decomp.db", home)
+    net.out_of_process = True  # the autopilot and the permuter in worker processes: the app stays responsive
     mcp, manager, security = build(net, internal, port, secret)
     app = mcp.streamable_http_app(transport_security=security, max_request_body_size=80 * 1024 * 1024, host="127.0.0.1")
     url = f"http://127.0.0.1:{port}/?k={secret}"

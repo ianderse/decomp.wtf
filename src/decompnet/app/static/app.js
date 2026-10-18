@@ -651,7 +651,7 @@ async function loadStats() {
 function workingAgents() {
   const running = S.sessions.filter((s) => ["starting", "working", "waiting"].includes(s.state));
   const own = new Set(S.sessions.map((s) => s.agent));
-  const outside = [...new Set(S.claims.filter((c) => !own.has(c.agent) && c.agent !== AUTO).map((c) => c.agent))];
+  const outside = [...new Set(S.claims.filter((c) => !own.has(c.agent) && !BACKGROUND.has(c.agent)).map((c) => c.agent))];
   return { running, outside, n: running.length + outside.length };
 }
 
@@ -1462,7 +1462,8 @@ function renderSessions(sessions) {
     const dot = s.state === "error" ? "err" : s.state === "working" ? "on" : s.state === "stopped" ? "" : "work";
     const live = ["starting", "working", "waiting"].includes(s.state);
     const b = board.get(s.agent);
-    const facts = [s.model ? esc(s.model) : "default model", s.runs ? `session ${s.runs}` : "", b && b.matched ? `<b class="ok">${b.matched} matched</b>` : "", b ? plural(b.compiles, "compile") : "",
+    const hour = b && b.compiles_hour ? `last hour: ${b.matched_hour || 0} matched from ${plural(b.compiles_hour, "compile")}` : "";
+    const facts = [s.model ? esc(s.model) : "default model", s.runs ? `session ${s.runs}` : "", b && b.matched ? `<b class="ok">${b.matched} matched</b>` : "", b ? plural(b.compiles, "compile") : "", hour,
       s.usd ? money(s.usd) : s.tokens ? `${(s.tokens / 1000).toFixed(0)}k tokens` : "", s.started_at ? `since ${clock(s.started_at).slice(0, 5)}` : ""].filter(Boolean);
     return `<div class="session"><div class="session-top"><span class="dot ${dot}"></span><b>${esc(s.label)}</b>
         <span class="state ${s.state === "error" ? "err" : ""}">${esc(STATE_TEXT[s.state] || s.state)}</span>
@@ -1472,7 +1473,7 @@ function renderSessions(sessions) {
       ${claim ? `<span class="last">on ${fnLink(claim.name)}</span>` : ""}</div>`;
   }).join("");
   const own = new Set(sessions.map((s) => s.agent));
-  const outside = [...new Set(S.claims.filter((c) => !own.has(c.agent) && c.agent !== AUTO).map((c) => c.agent))];
+  const outside = [...new Set(S.claims.filter((c) => !own.has(c.agent) && !BACKGROUND.has(c.agent)).map((c) => c.agent))];
   box.insertAdjacentHTML("beforeend", outside.map((a) => `<div class="session ext"><div class="session-top"><span class="dot on"></span><b>${esc(a)}</b><span class="tag">${a.startsWith("@") ? "in the room" : "connected agent"}</span></div>
       <span class="last">on ${S.claims.filter((c) => c.agent === a).map((c) => fnLink(c.name)).join(", ")}</span></div>`).join(""));
   box.querySelectorAll(".fn").forEach((x) => { x.onclick = () => openFn(x.dataset.fn); });
@@ -1725,6 +1726,7 @@ function touchGroup(agent, fn, t, change, first) {
 }
 
 const AUTO = "autopilot";
+const BACKGROUND = new Set([AUTO, "permuter"]);  // the app's own loops: shown in the autopilot box, not as agents
 function autopilotLine(t, first, done) {
   const a = S.apFeed || (S.apFeed = { tried: 0, matched: 0, li: null });
   const html = `<span class="who">autopilot</span> ${done ? esc(done) : `tried ${plural(a.tried, "machine draft")}${a.matched ? ` · <span class="ok">${a.matched} matched</span>` : ""}`}`;
@@ -2277,9 +2279,15 @@ function renderAutopilot(ov) {
   box.classList.toggle("on", !!(running || twinsRunning));
   $("apBar").hidden = !running || ap.phase === "twins";
   const perm = pm && (pm.tried || pm.state === "running")
-    ? ` The permuter ${pm.state === "running" ? `is rewriting near misses${pm.current ? ` (now ${pm.current})` : ""}` : "rewrote near misses"}: ${plural(pm.tried, "function")}, ${pm.matched} matched.` : "";
+    ? ` The permuter ${pm.state === "running" ? `is rewriting near misses${pm.current ? ` (now ${pm.current})` : ""}` : "rewrote near misses"}: ${plural(pm.tried, "function")}, ${(pm.variants || 0).toLocaleString()} rewrites judged, ${pm.improved || 0} improved, ${pm.matched} matched${pm.why ? `; stopped after ${pm.why}` : ""}.` : "";
   const twinsDone = (ap && ap.twins) || (tw && tw.matched) || 0;
-  if (running && ap.phase === "twins") {
+  if (running && ap.phase === "rejudge") {
+    $("apTitle").textContent = `Autopilot: judging every best attempt again (the compiler setup changed) · ${ap.matched.toLocaleString()} matched`;
+    $("apSub").textContent = `${(ap.rejudged || 0).toLocaleString()} of ${(ap.rejudge_total || 0).toLocaleString()} checked. Attempts that only missed because of how they were assembled match now.${perm}`;
+    $("apBar").hidden = false;
+    $("apBar").firstElementChild.style.width = `${(100 * (ap.rejudged || 0)) / Math.max(1, ap.rejudge_total || 0)}%`;
+    $("apBtn").textContent = "Stop";
+  } else if (running && ap.phase === "twins") {
     $("apTitle").textContent = "Autopilot: matching code the game has more than once (twins of matched functions)";
     $("apSub").textContent = `Each match's code is tried on its identical copies, names swapped; the judge decides.${perm}`;
     $("apBtn").textContent = "Stop";

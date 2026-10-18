@@ -33,7 +33,7 @@ DISCARD = ("*(.reginfo) *(.MIPS.abiflags) *(.MIPS.options) *(.pdr) *(.comment) *
 try:
     from decompnet import toolchains
     from decompnet.compiler import run_in
-    from decompnet.project import compiler_config
+    from decompnet.project import compiler_config, with_toolchain
 except ImportError:
     sys.exit("This build uses decomp.wtf's pinned compilers: install decomp.wtf first (https://decomp.wtf).")
 
@@ -129,8 +129,14 @@ def trim(path: Path) -> None:
     path.write_bytes(bytes(data))
 
 
+def compiler_for(fn: dict | None):
+    """The project's compiler, or the function's own (a game built with two compiler versions)."""
+    return compiler_config(ROOT, {"compiler": with_toolchain(B["compiler"], (fn or {}).get("toolchain"))})
+
+
 def build_objects(todo: list[tuple[str, str, str]]) -> None:
-    cfg = compiler_config(ROOT, {"compiler": B["compiler"]})
+    owner = {c_source(fn): fn for fn in B["functions"] if fn.get("toolchain")}
+    cfgs = {}
     as_ = binutils("as")
     for kind, src, obj in todo:
         target = ROOT / obj
@@ -140,6 +146,10 @@ def build_objects(todo: list[tuple[str, str, str]]) -> None:
         if kind == "asm":
             run([as_, *B["as_flags"], "-o", obj, src])
         else:
+            fn = owner.get(src)
+            if (key := src if fn else None) not in cfgs:
+                cfgs[key] = compiler_for(fn)
+            cfg = cfgs[key]
             argv = [a.replace("{src}", src).replace("{obj}", obj).replace("{include}", "include") for a in cfg.cmd]
             res = run_in(cfg, ROOT, argv, inputs=[src, "include"], outputs=[obj])
             if res.returncode != 0 or not target.exists():
@@ -296,7 +306,7 @@ def check(name: str) -> bool:
                     return image[at:at + n]
         return None
 
-    cfg = compiler_config(ROOT, {"compiler": B["compiler"]})
+    cfg = compiler_for(fn)
     text = (ROOT / src).read_text(encoding="utf-8")
     m = re.match(r'\s*#include "([^"]+)"\s*\n', text)
     header = (ROOT / "include" / m.group(1)).read_text(encoding="utf-8") if m else ""

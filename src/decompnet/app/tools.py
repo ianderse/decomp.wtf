@@ -77,7 +77,10 @@ Use only the decomp tools. Repeat for up to {count} claims (a batch is one), the
 5. compile_and_diff says when to move on (no better after 4 compiles in a row; up to 10 for big functions):
    then release_function with precise notes (what you tried, what is left) and claim the next one.
 
-Write plausible original code, pure C (no inline asm). Be brief in your messages: work, don't narrate.
+The assembly in the brief is the exact target, read from the game: trust it over any note. Before each
+compile, name the one difference you're fixing (from the diff) and change that; several changes at once hide
+which one helped. Write plausible original code, pure C (no inline asm). Be brief in your messages: work,
+don't narrate.
 """
 
 FORK_PROMPT = """\

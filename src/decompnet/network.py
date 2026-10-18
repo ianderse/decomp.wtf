@@ -16,16 +16,20 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import policy, scoring
+from . import policy, scoring, toolchains
 from .compiler import compile_source
 from .elfobj import FunctionObj, Reloc, extract_function
-from .project import compiler_config
+from .project import compiler_config, with_toolchain
 from .store import Store
 
 CLAIM_TTL = 30 * 60
 # A function an agent just released goes to the back of the queue for this long, for every agent: the next one
 # starts on something fresh instead of passing the same function back and forth. Asked for by name, it comes at once.
 RELEASE_COOLDOWN = 15 * 60
+# the other compiler versions of a platform, tried on a near miss: a game is sometimes built with two of them
+# (":gnu-as": without maspsx, for code that wasn't built with Sony's assembler, like some library code)
+ALTERNATES = {"gcc-2.7.2-psx": ("gcc-2.8.1-psx", "gcc-2.7.2-psx:gnu-as", "gcc-2.8.1-psx:gnu-as"),
+              "gcc-2.8.1-psx": ("gcc-2.7.2-psx", "gcc-2.8.1-psx:gnu-as", "gcc-2.7.2-psx:gnu-as")}
 MACHINE_AGENTS = ("autopilot", "permuter")  # decomp.wtf's own workers: their claims never mean "given up on"
 # Twins first (see app/twins.py): a function whose code the game has more than once (boost: how many more times)
 # and isn't too big or given up on, best value per instruction first; its twins (boost -1) last, as they match for
@@ -191,9 +195,60 @@ class Network:
         row = self.store.one("SELECT name FROM agents WHERE id=?", agent_id) if agent_id else None
         return row["name"] if row else "?"
 
-    def _compile(self, proj, header: str, source: str):
-        root = Path(proj["root"])
-        return compile_source(compiler_config(root, json.loads(proj["config"])), header, source)
+    def _compile(self, proj, header: str, source: str, fn=None, toolchain: str | None = None):
+        """With `fn`: that function's own compiler when it has one (a game built with two compiler versions)."""
+        cfg = json.loads(proj["config"])
+        tc = toolchain or (self.fn_toolchain(fn) if fn is not None else None)
+        if tc and "toolchain" in cfg.get("compiler", {}):
+            cfg = {**cfg, "compiler": with_toolchain(cfg["compiler"], tc)}
+        return compile_source(compiler_config(Path(proj["root"]), cfg), header, source)
+
+    def _alternate_match(self, fn, proj, header: str, source: str) -> str | None:
+        """A near miss that is byte-identical with another compiler version of the platform: that compiler, now
+        recorded as the function's own (so its regression tests and the export build use it)."""
+        comp = json.loads(proj["config"]).get("compiler", {})
+        main = comp.get("toolchain")
+        current = self.fn_toolchain(fn) or main
+        options = [main, *comp.get("alternates", ALTERNATES.get(main, ()))]
+        for tc in dict.fromkeys(t for t in options if t and t != current):
+            if toolchains.installed(tc.partition(":")[0]) is None:
+                continue
+            res = self._compile(proj, header, source, toolchain=tc)
+            if not res.ok:
+                continue
+            cand, verdict, _ = self._evaluate(fn, proj, res.obj)
+            if cand is None:
+                continue
+            if verdict is None:
+                verdict = cand.fingerprint() == self._target_obj(fn, proj).fingerprint()
+            if verdict:
+                self.set_fn_toolchain(fn, None if tc == main else tc)
+                return tc
+        return None
+
+    def set_fn_toolchain(self, fn, toolchain: str | None) -> None:
+        with self.store.tx() as db:
+            row = db.execute("SELECT meta FROM functions WHERE id=?", (fn["id"],)).fetchone()
+            try:
+                meta = json.loads(row["meta"] or "{}") if row else {}
+            except ValueError:
+                meta = {}
+            if not isinstance(meta, dict):
+                meta = {}
+            if toolchain:
+                meta["toolchain"] = toolchain
+            else:
+                meta.pop("toolchain", None)
+            db.execute("UPDATE functions SET meta=? WHERE id=?", (json.dumps(meta) if meta else None, fn["id"]))
+
+    @staticmethod
+    def fn_toolchain(fn) -> str | None:
+        """The compiler a function matched with when it isn't the project's (functions.meta's "toolchain")."""
+        try:
+            meta = json.loads(fn["meta"] or "{}")
+        except (KeyError, IndexError, TypeError, ValueError):
+            return None
+        return meta.get("toolchain") if isinstance(meta, dict) else None
 
     def _evaluate(self, fn, proj, obj: bytes) -> tuple[FunctionObj | None, bool | None, list[str]]:
         """(candidate, verdict, problems) for a compiled object. verdict None means: decide by comparing
@@ -341,17 +396,22 @@ class Network:
                 lines += ["", "### Machine-generated starting point (m2c: expect wrong types and names; "
                               "the context header helps)", "```c",
                           fn["seed"].strip(), "```"]
+        # each note with its author's record: a note by an agent that matched nothing is a guess (a small local model
+        # once reported the brief's assembly as "wrong", and the agents after it believed it)
+        wins = "(SELECT COUNT(*) FROM functions m WHERE m.matched_agent_id=n.agent_id AND m.status='matched') AS wins"
+        who = lambda n: f"{n['name']}, {n['wins']} match{'' if n['wins'] == 1 else 'es'}"
         notes = self.store.all(
-            "SELECT n.text, n.created_at, a.name FROM notes n LEFT JOIN agents a ON a.id=n.agent_id "
+            f"SELECT n.text, n.created_at, a.name, {wins} FROM notes n LEFT JOIN agents a ON a.id=n.agent_id "
             "WHERE n.function_id=? ORDER BY n.id DESC LIMIT 8", fn["id"])
         if notes:
-            lines += ["", "### Notes from previous agents on this function"]
-            lines += [f"- ({n['name']}, {_ago(n['created_at'])}) {n['text']}" for n in notes]
+            lines += ["", "### Notes from previous agents on this function (hints, not facts: the assembly above is "
+                          "the exact target)"]
+            lines += [f"- ({who(n)}, {_ago(n['created_at'])}) {n['text']}" for n in notes]
         pnotes = self.store.all(
-            "SELECT n.text, a.name FROM notes n LEFT JOIN agents a ON a.id=n.agent_id "
+            f"SELECT n.text, a.name, {wins} FROM notes n LEFT JOIN agents a ON a.id=n.agent_id "
             "WHERE n.project_id=? AND n.function_id IS NULL ORDER BY n.id DESC LIMIT 5", proj["id"])
         if pnotes:
-            lines += ["", "### Project-wide notes (latest)"] + [f"- ({n['name']}) {n['text']}" for n in pnotes]
+            lines += ["", "### Project-wide notes (latest)"] + [f"- ({who(n)}) {n['text']}" for n in pnotes]
         if fn["unit"] and fn["unit"] in self._unit_contexts(proj["id"]):
             lines.insert(2, f"source unit {fn['unit']}: call get_context with function=\"{fn['name']}\" for its header")
         if header == "CLAIMED":
@@ -390,7 +450,7 @@ class Network:
                     db.execute("UPDATE claims SET expires_at=? WHERE function_id=?", (now + self.claim_ttl, fn["id"]))
 
         ctx = self._context(proj["id"], fn["unit"])
-        result = self._compile(proj, ctx["header"], source)
+        result = self._compile(proj, ctx["header"], source, fn)
 
         if not result.ok:
             self._record(fn, agent, None, source, ctx["version"])
@@ -413,6 +473,8 @@ class Network:
         d = scoring.diff(self._target_obj(fn, proj), cand)
         if verdict is not None:
             d = scoring.DiffResult(0 if verdict else max(1, d.score), d.max_score, d.rows, verdict)
+        if not d.bytes_match and not scratch and d.percent >= 90 and self._alternate_match(fn, proj, ctx["header"], source):
+            d = scoring.DiffResult(0, d.max_score, d.rows, True)
         matched_now = d.bytes_match and not scratch
         self._record(fn, agent, d.score, source, ctx["version"], matched=matched_now)
 
@@ -591,7 +653,7 @@ class Network:
 
         def check(fn) -> tuple[str, str] | None:
             res = self._compile(proj, header_for(fn) if header_for else header,
-                                (sources or {}).get(fn["id"], fn["matched_source"]))
+                                (sources or {}).get(fn["id"], fn["matched_source"]), fn)
             if not res.ok:
                 return fn["name"], "no longer compiles: " + res.log.strip().splitlines()[0][:200] if res.log.strip() else "compile failed"
             cand, verdict, _ = self._evaluate(fn, proj, res.obj)

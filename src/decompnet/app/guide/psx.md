@@ -13,7 +13,9 @@ CPU: MIPS R3000A (MIPS I). Things that look odd at first:
   are never gp-relative.
 
 Compilers: PSY-Q SDK GCC 2.6/2.7.2/2.8.x and ASPSX versions differ in register allocation and
-instruction scheduling; the project picks them per file. Code is mostly C.
+instruction scheduling. Your code goes through GCC, then maspsx (Sony's assembler's delay-slot and nop rules),
+then GNU as. A near miss is also tried with the other GCC version, and a function that matches with it keeps
+it. Code is mostly C.
 
 Libraries: PSY-Q's libgte, libgpu, libgs, libspu, libcd, libetc, libapi and libc are usually linked
 as library objects, not decompiled; their names and prototypes are in the project's headers.

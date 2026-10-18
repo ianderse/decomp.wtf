@@ -26,6 +26,7 @@ from pathlib import Path
 from .. import scoring, seeds, similarity, toolchains
 from ..elfobj import FunctionObj
 from ..network import Agent, Network, NetworkError, _hash_token
+from ..project import compiler_config
 from ..rom import detect, match, split
 from ..rom.symbols import AUTO_NAME, IDENT, Symbol, SymbolTable
 
@@ -138,6 +139,9 @@ class RomNetwork(Network):
         self._ops: dict[int, dict] = {}  # project id -> look-alike index
         self._diffs: dict[tuple, dict] = {}  # (function, source, context, compiler) -> diff for the GUI
         self.autopilots: dict[str, dict] = {}  # slug -> progress of trying every function's machine draft
+        # the app runs the autopilot and the permuter in worker processes (worker.py); tests and the workers
+        # themselves run them as threads
+        self.out_of_process = False
         from .forkengine import ForkEngine  # forks build on this class's claims, attempts and live view
         from .permute import Permuter
         from .twins import Twins
@@ -638,14 +642,16 @@ class RomNetwork(Network):
     def _rom_ops(self, proj) -> dict[tuple[int, int], list[str]]:
         """(vram, size) -> mnemonics of every function, cached (renames keep addresses; splits change sizes)."""
         cache = self._ops.setdefault(proj["id"], {})
-        rows = self.store.all("SELECT vram, size, target FROM functions WHERE project_id=? AND target IS NOT NULL", proj["id"])
-        live = set()
-        for r in rows:
-            key = (r["vram"], r["size"])
-            live.add(key)
-            if key not in cache:
-                cache[key] = (similarity.thumb_mnemonics(r["target"], r["vram"] or 0) if proj["arch"] == "arm" else
-                              similarity.mips_mnemonics(r["target"], bool(proj["big_endian"]), r["vram"] or 0))
+        # every agent's brief asks: read the code only of functions not cached yet (a split adds a few), not all of it
+        live = {(r["vram"], r["size"]) for r in self.store.all(
+            "SELECT vram, size FROM functions WHERE project_id=? AND target IS NOT NULL", proj["id"])}
+        if live - set(cache):
+            for r in self.store.all("SELECT vram, size, target FROM functions WHERE project_id=? AND target IS NOT NULL",
+                                    proj["id"]):
+                key = (r["vram"], r["size"])
+                if key not in cache:
+                    cache[key] = (similarity.thumb_mnemonics(r["target"], r["vram"] or 0) if proj["arch"] == "arm" else
+                                  similarity.mips_mnemonics(r["target"], bool(proj["big_endian"]), r["vram"] or 0))
         for key in set(cache) - live:
             del cache[key]
         return cache
@@ -1413,6 +1419,8 @@ class RomNetwork(Network):
         state = self.autopilots.get(slug)
         if state and state["state"] == "running":
             return state
+        if self.out_of_process and not self.fork_slug(slug) and slug not in self.links:
+            return self._start_autopilot_proc(slug)
         # first the twins (identical code to something matched: every project), then machine drafts where m2c reads
         # the code and the project's headers are fit for them (ROM projects; games started from scratch)
         try:
@@ -1439,6 +1447,18 @@ class RomNetwork(Network):
                          daemon=True, name=f"autopilot-{slug}").start()
         return state
 
+    def _start_autopilot_proc(self, slug: str) -> dict:
+        """The same run, in a worker process (see worker.py); `state` follows what it reports."""
+        from .worker import BackgroundProc, ProcStop
+        proj = self._project(slug)
+        total = self.store.one("SELECT COUNT(*) AS n FROM functions WHERE project_id=? AND status='open'", proj["id"])["n"]
+        state = {"state": "running", "total": total, "tried": 0, "matched": 0, "near": 0, "twins": 0,
+                 "phase": "twins", "no_drafts": "", "started_at": time.time()}
+        proc = BackgroundProc("autopilot", slug, self.store.path, self.workspace, state)
+        state["stop"] = ProcStop(proc)
+        self.autopilots[slug] = state
+        return state
+
     def stop_autopilot(self, slug: str) -> None:
         if (state := self.autopilots.get(slug)) and state["state"] == "running":
             state["stop"].set()
@@ -1450,12 +1470,91 @@ class RomNetwork(Network):
         last = self.cfg(self._project(slug)).get("autopilot")  # the last run, from before the app restarted
         return {"state": "done", **last} if last else None
 
+    def judge_signature(self, proj) -> str | None:
+        """What a ROM project's code is judged with: the resolved compiler command. When it changes (a new assembler
+        step, another compiler), every score was measured with something else."""
+        try:
+            cfg = compiler_config(Path(proj["root"]), json.loads(proj["config"]))
+        except Exception:  # not installed yet: nothing judged with it either
+            return None
+        return hashlib.sha1(json.dumps(cfg.cmd).encode()).hexdigest()[:16]
+
+    def _rejudge(self, proj, agent, state: dict, workers: int) -> None:
+        """After the way code is judged changed: check every match still holds (a function that needs the other
+        compiler version gets it), then judge every function's best attempt again, which matches the ones that only
+        missed because of how they were assembled, and makes every best score true again."""
+        from concurrent.futures import ThreadPoolExecutor
+
+        sig = self.judge_signature(proj)
+        if sig is None or self.cfg(proj).get("judged_with") == sig:
+            return
+        state["phase"] = "rejudge"
+        log = logging.getLogger("decomp.wtf")
+        matched = self.store.all("SELECT * FROM functions WHERE project_id=? AND status='matched' AND matched_source IS NOT NULL",
+                                 proj["id"])
+        lost = []
+        for fn in matched:
+            if state["stop"].is_set():
+                return
+            unit = self._effective_unit(fn, self._unit_contexts(proj["id"]))
+            header = self._context(proj["id"], unit)["header"]
+            if self.regression_test(proj, header, only=[fn]) and not self._alternate_match(fn, proj, header, fn["matched_source"]):
+                lost.append(fn["name"])
+        if lost:  # matched before, byte for byte; kept, but context edits will say they no longer match
+            log.info("rejudge %s: %d matched functions don't match with the new setup: %s", proj["slug"], len(lost),
+                     ", ".join(lost[:20]))
+        open_rows = self.store.all("SELECT id FROM functions WHERE project_id=? AND status='open' AND best_source IS NOT NULL "
+                                   "ORDER BY n_insns", proj["id"])
+        state["rejudge_total"], state["rejudged"] = len(open_rows), 0
+
+        def one(fid: int) -> None:
+            if state["stop"].is_set():
+                return
+            fn = self.store.one("SELECT * FROM functions WHERE id=?", fid)
+            try:
+                res = self.try_quietly(agent, proj, fn, fn["best_source"]) if fn and fn["status"] == "open" else None
+            except Exception:  # held by an agent, or one odd function: the rest go on
+                res = None
+            state["rejudged"] += 1
+            if res and res["matched"]:
+                state["matched"] += 1
+                state["rejudge_matched"] = state.get("rejudge_matched", 0) + 1
+            elif res and res["score"] is not None:  # its true score now, better or worse
+                with self.store.tx() as db:
+                    db.execute("UPDATE functions SET best_score=? WHERE id=? AND status='open' AND best_source=?",
+                               (res["score"], fid, fn["best_source"]))
+
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            list(pool.map(one, [r["id"] for r in open_rows]))
+        if state["stop"].is_set():
+            return
+        with self.store.tx() as db:
+            cfg = json.loads(db.execute("SELECT config FROM projects WHERE id=?", (proj["id"],)).fetchone()["config"])
+            cfg["judged_with"] = sig
+            db.execute("UPDATE projects SET config=? WHERE id=?", (json.dumps(cfg), proj["id"]))
+            if state.get("rejudge_matched"):  # what agents wrote about misses the old setup caused is history now
+                db.execute("INSERT INTO notes(project_id,function_id,agent_id,text,created_at) VALUES(?,?,?,?,?)",
+                           (proj["id"], None, agent.id, "The compiler setup changed and every best attempt was judged "
+                            f"again ({state['rejudge_matched']} matched just from that). Older notes that blame "
+                            "instruction scheduling, delay slots or the epilogue's order may no longer apply: "
+                            "compile and look at the diff before believing them.", time.time()))
+            self._event(db, proj["id"], agent.id, "autopilot", f"judged again with the new compiler setup: "
+                        f"{state.get('rejudge_matched', 0)} more matched" + (f", {len(lost)} earlier matches need a look" if lost else ""))
+
     def _autopilot_run(self, slug: str, ids: list[int], state: dict, workers: int, try_one=None) -> None:
         from concurrent.futures import ThreadPoolExecutor
 
         agent, _ = self.local_agent("autopilot")
         proj = self._project(slug)
         try_one = try_one or self._autopilot_one
+        if not self.fork_slug(slug) and slug not in self.links:
+            try:  # the way code is judged changed since last time: every best attempt, judged again, first
+                self._rejudge(proj, agent, state, workers)
+            except Exception as e:
+                logging.getLogger("decomp.wtf").info("autopilot rejudge: %s", e)
+            if state["stop"].is_set():
+                state["state"] = "stopped"
+                return
         try:  # identical code first: free, and it takes those functions off the drafts' list
             if slug not in self.links:  # (a room member's matches come from the host)
                 job = self.twins.full_pass(slug)
@@ -1489,7 +1588,7 @@ class RomNetwork(Network):
                 cfg["autopilot"] = {k: state.get(k) for k in ("total", "tried", "matched", "near", "twins", "started_at",
                                                               "finished_at")}
                 db.execute("UPDATE projects SET config=? WHERE id=?", (json.dumps(cfg), proj["id"]))
-            drafts = state["matched"] - state.get("twins", 0)
+            drafts = state["matched"] - state.get("twins", 0) - state.get("rejudge_matched", 0)
             if drafts:  # (twins announce their own)
                 with self.store.tx() as db:
                     self._event(db, proj["id"], agent.id, "autopilot",
@@ -1515,7 +1614,7 @@ class RomNetwork(Network):
             db.execute("INSERT INTO claims VALUES(?,?,?,?)", (fn["id"], agent.id, now, now + 300))
         try:
             ctx = self._context(proj["id"], fn["unit"])
-            result = self._compile(proj, ctx["header"], source)
+            result = self._compile(proj, ctx["header"], source, fn)
             if not result.ok:
                 return {"matched": False, "score": None}
             cand, verdict, _ = self._evaluate(fn, proj, result.obj)
@@ -1524,6 +1623,8 @@ class RomNetwork(Network):
             d = scoring.diff(self._target_obj(fn, proj), cand)
             if verdict is not None:
                 d = scoring.DiffResult(0 if verdict else max(1, d.score), d.max_score, d.rows, verdict)
+            if not d.bytes_match and d.percent >= 90 and self._alternate_match(fn, proj, ctx["header"], source):
+                d = scoring.DiffResult(0, d.max_score, d.rows, True)
             self._record(fn, agent, d.score, source, ctx["version"], matched=d.bytes_match)
             return {"matched": d.bytes_match, "score": d.score}
         finally:
@@ -1548,7 +1649,7 @@ class RomNetwork(Network):
             if not draft:
                 return "fail"
             source = f"/* machine draft (m2c), tried by autopilot */\n{seeds.M2C_MACROS}\n{draft}\n"
-            result = self._compile(proj, ctx["header"], source)
+            result = self._compile(proj, ctx["header"], source, fn)
             if not result.ok:
                 return "fail"
             cand, verdict, _ = self._evaluate(fn, proj, result.obj)
@@ -1557,6 +1658,8 @@ class RomNetwork(Network):
             d = scoring.diff(self._target_obj(fn, proj), cand)
             if verdict is not None:
                 d = scoring.DiffResult(0 if verdict else max(1, d.score), d.max_score, d.rows, verdict)
+            if not d.bytes_match and d.percent >= 90 and self._alternate_match(fn, proj, ctx["header"], source):
+                d = scoring.DiffResult(0, d.max_score, d.rows, True)
             self._record(fn, agent, d.score, source, ctx["version"], matched=d.bytes_match)
             return "match" if d.bytes_match else "near" if d.percent >= 90 else "far"
         finally:
@@ -1583,7 +1686,7 @@ class RomNetwork(Network):
         key = (fn["id"], hashlib.sha1(source.encode()).hexdigest(), ctx["version"], proj["config"])
         if key in self._diffs:
             return self._diffs[key] | {"kind": kind}
-        result = self._compile(proj, ctx["header"], source)
+        result = self._compile(proj, ctx["header"], source, fn)
         if not result.ok:
             out = {"rows": None, "error": result.log.strip()[-3000:] or "it didn't compile", "source": source}
         else:
@@ -1638,14 +1741,21 @@ class RomNetwork(Network):
         pid = self._project(slug)["id"]
         now = time.time()
         rows = self.store.all(
-            "SELECT a.name AS agent, COUNT(t.id) AS compiles, MAX(t.created_at) AS last FROM attempts t "
-            "JOIN functions f ON f.id=t.function_id JOIN agents a ON a.id=t.agent_id WHERE f.project_id=? GROUP BY a.id", pid)
-        matched = {r["agent"]: r["n"] for r in self.store.all(
-            "SELECT a.name AS agent, COUNT(*) AS n FROM functions f JOIN agents a ON a.id=f.matched_agent_id "
-            "WHERE f.project_id=? AND f.status='matched' GROUP BY a.id", pid)}
-        board = [{"agent": r["agent"], "compiles": r["compiles"], "matched": matched.pop(r["agent"], 0), "last": r["last"]}
+            "SELECT a.name AS agent, COUNT(t.id) AS compiles, SUM(t.created_at > ?) AS compiles_hour, "
+            "MAX(t.created_at) AS last FROM attempts t "
+            "JOIN functions f ON f.id=t.function_id JOIN agents a ON a.id=t.agent_id WHERE f.project_id=? GROUP BY a.id",
+            now - 3600, pid)
+        matched = {r["agent"]: r for r in self.store.all(
+            "SELECT a.name AS agent, COUNT(*) AS n, SUM(f.matched_at > ?) AS hour FROM functions f "
+            "JOIN agents a ON a.id=f.matched_agent_id WHERE f.project_id=? AND f.status='matched' GROUP BY a.id",
+            now - 3600, pid)}
+        # the last hour, per agent: which ones earn their keep (a cheap local model vs. a paid one, say)
+        none = {"n": 0, "hour": 0}
+        board = [{"agent": r["agent"], "compiles": r["compiles"], "compiles_hour": r["compiles_hour"] or 0,
+                  "matched": (m := matched.pop(r["agent"], none))["n"], "matched_hour": m["hour"] or 0, "last": r["last"]}
                  for r in rows]
-        board += [{"agent": a, "compiles": 0, "matched": n, "last": None} for a, n in matched.items()]
+        board += [{"agent": a, "compiles": 0, "compiles_hour": 0, "matched": m["n"], "matched_hour": m["hour"] or 0,
+                   "last": None} for a, m in matched.items()]
         board.sort(key=lambda r: (-r["matched"], -r["compiles"]))
         per_hour = [0] * 24
         for r in self.store.all("SELECT matched_at FROM functions WHERE project_id=? AND status='matched' AND matched_at > ?",
