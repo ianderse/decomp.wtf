@@ -65,7 +65,8 @@ Use only the decomp tools. Repeat for up to {count} claims (a batch is one), the
 1. claim_function(count=4) gives you the next function, and when it's small, its neighbours with it (small
    functions mostly match on the first try): assembly, location, calls, data it uses, the best previous
    attempt and notes (start from those!), a machine-generated draft, and identical matched code if any.
-2. get_context() shows the shared header every compile includes.
+2. The brief shows what the shared header (context.h, included in every compile) declares for the function:
+   its prototypes, externs and types. get_context() shows all of it; read it when you need more.
 3. Write the C functions (same names as the assembly) and judge them: compile_and_diff(function="a, b, c",
    source=all the definitions) for a batch, one name for one. Read the diff: '<' '>' missing/extra
    instructions, 'i' operands, 'o' order, 'r' registers, 's' stack. Fix structure first, registers last.

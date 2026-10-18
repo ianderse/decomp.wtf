@@ -50,6 +50,86 @@ STRATEGIES = {
 }
 
 
+
+_IDENT = re.compile(r"\b[A-Za-z_]\w*\b")
+_KEYWORDS = {"struct", "union", "enum", "typedef", "extern", "static", "const", "volatile", "unsigned", "signed",
+             "void", "char", "short", "int", "long", "float", "double", "register", "inline", "define", "if", "endif"}
+
+
+def _header_items(header: str) -> list[tuple[str, set[str], set[str]]]:
+    """context.h as top-level declarations: (text, the names it declares, every identifier in it)."""
+    items, depth, start, k = [], 0, 0, 0
+    flat = re.sub(r"/\*.*?\*/|//[^\n]*", lambda m: " " * len(m.group()), header, flags=re.S)
+
+    def add(text: str, flat_text: str) -> None:
+        idents = set(_IDENT.findall(flat_text)) - _KEYWORDS
+        names: set[str] = set()
+        if flat_text.lstrip().startswith("#"):
+            m = re.match(r"\s*#\s*define\s+(\w+)", flat_text)
+            names = {m.group(1)} if m else set()
+        else:
+            for m in re.finditer(r"\b(?:struct|union|enum)\s+(\w+)", flat_text):
+                names.add(m.group(1))
+            outer = re.sub(r"\{.*\}", " ", flat_text, flags=re.S).split("=")[0]  # the declarators, outside any body
+            pointer = re.search(r"\(\s*\*\s*(\w+)\s*\)", outer)  # (*name)(...): a function pointer
+            if pointer:
+                names.add(pointer.group(1))
+            elif "(" in outer:  # a prototype: the name before its parameters
+                m = re.search(r"(\w+)\s*\(", outer)
+                if m:
+                    names.add(m.group(1))
+            else:
+                for part in outer.split(","):
+                    m = re.search(r"(\w+)\s*(?:\[[^\]]*\]\s*)*;?\s*$", part)
+                    if m:
+                        names.add(m.group(1))
+            names -= _KEYWORDS
+        text = text.strip()
+        if "\n\n" in text:  # only the comment right above it belongs to it
+            text = text[text.rindex("\n\n"):].strip()
+        if text:
+            items.append((text, names, idents))
+
+    while k < len(flat):
+        ch = flat[k]
+        if depth == 0 and ch == "#" and flat[start:k].strip() == "":
+            end = flat.find("\n", k)
+            end = len(flat) if end < 0 else end
+            add(header[k:end], flat[k:end])
+            start = k = end + 1
+            continue
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+        elif ch == ";" and depth == 0:
+            add(header[start:k + 1], flat[start:k + 1])
+            start = k + 1
+        k += 1
+    return items
+
+
+def header_excerpt(header: str, code: str, budget: int = 60) -> list[str]:
+    """The declarations of context.h that `code` (a function's assembly) refers to, and the types those use: what
+    an agent needs from a 600-line header for one small function, without reading all of it."""
+    items = _header_items(header)
+    used = set(_IDENT.findall(code))
+    picked = [i for i, (_, names, _) in enumerate(items) if names & used]
+    seen = set(picked)
+    for _ in range(2):  # the types those declarations use, and the types inside those
+        want = set().union(*(items[i][2] for i in picked)) if picked else set()
+        more = [i for i, (_, names, _) in enumerate(items) if i not in seen and names & want]
+        seen.update(more)
+        picked += more
+    lines: list[str] = []
+    for i in sorted(seen):
+        text = items[i][0]
+        if len(lines) + text.count("\n") + 1 > budget:
+            lines.append("/* ... more: get_context() */")
+            break
+        lines += text.splitlines()
+    return lines
+
 class NetworkError(Exception):
     """An error meant to be shown to the agent as-is."""
 
@@ -388,7 +468,7 @@ class Network:
     def get_function(self, function: str, project: str | None = None, agent: Agent | None = None) -> str:
         return self._brief(self._function(function, project), agent, header="VIEW")
 
-    def _brief(self, fn, agent: Agent | None, header: str) -> str:
+    def _brief(self, fn, agent: Agent | None, header: str, project_notes: bool = True) -> str:
         proj = self.store.one("SELECT * FROM projects WHERE id=?", fn["project_id"])
         ctx = self._context(proj["id"], fn["unit"])
         claim = self.store.one("SELECT * FROM claims WHERE function_id=?", fn["id"])
@@ -407,7 +487,11 @@ class Network:
                       "each function, never its code. Disassemble your own lawful copy with "
                       f"`decompnet local asm <your-object.o> {fn['name']}` and diff locally with `decompnet local diff`."]
         else:
-            lines += ["", "### Target assembly", "```asm", scoring.compact_asm(self._asm_text(fn, proj)), "```"]
+            asm = self._asm_text(fn, proj)
+            lines += ["", "### Target assembly", "```asm", scoring.compact_asm(asm), "```"]
+            if fn["status"] != "matched" and (decls := header_excerpt(ctx["header"], asm)):
+                lines += ["", f"### What context.h declares for it (v{ctx['version']}; the rest: get_context())",
+                          "```c", *decls, "```"]
         lines += self._extra_brief(fn, proj)
         if fn["status"] != "matched":
             if fn["best_source"]:
@@ -432,7 +516,7 @@ class Network:
         pnotes = self.store.all(
             f"SELECT n.text, a.name, {wins} FROM notes n LEFT JOIN agents a ON a.id=n.agent_id "
             "WHERE n.project_id=? AND n.function_id IS NULL ORDER BY n.id DESC LIMIT 5", proj["id"])
-        if pnotes:
+        if pnotes and project_notes:
             lines += ["", "### Project-wide notes (latest)"] + [f"- ({who(n)}) {n['text']}" for n in pnotes]
         if fn["unit"] and fn["unit"] in self._unit_contexts(proj["id"]):
             lines.insert(2, f"source unit {fn['unit']}: call get_context with function=\"{fn['name']}\" for its header")

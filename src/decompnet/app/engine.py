@@ -567,7 +567,7 @@ class RomNetwork(Network):
         self._rom_only(project, "get_context")
         return super().get_context(project, function)
 
-    def _brief(self, fn, agent, header):
+    def _brief(self, fn, agent, header, project_notes: bool = True):
         if self.cfg(self.store.one("SELECT config FROM projects WHERE id=?", fn["project_id"])).get("kind") == "fork":
             return self.forks.brief(fn, agent, header)
         proj = self.store.one("SELECT * FROM projects WHERE id=?", fn["project_id"])
@@ -575,7 +575,7 @@ class RomNetwork(Network):
             with self._seed_lock:
                 self._seed_for(self._function(fn["name"], proj["slug"]), proj)
             fn = self._function(fn["name"], proj["slug"])
-        return super()._brief(fn, agent, header)
+        return super()._brief(fn, agent, header, project_notes)
 
     # ------------------------------------------------------------------ cross references
 
@@ -1008,7 +1008,8 @@ class RomNetwork(Network):
                 f"Write all of them, then judge them in one call: compile_and_diff(function=\"{', '.join(names)}\", "
                 f"source=<all {len(rows)} definitions>). Each is judged on its own and saved as soon as it matches; "
                 "then fix what's left (one at a time is fine). release_function any you can't do.")
-        briefs = [self.forks.brief(r, agent, "CLAIMED") if fork else self._brief(r, agent, "CLAIMED") for r in rows]
+        briefs = [self.forks.brief(r, agent, "CLAIMED") if fork else self._brief(r, agent, "CLAIMED", project_notes=i == 0)
+                  for i, r in enumerate(rows)]  # the project's notes once, not once per function
         return "\n\n---\n\n".join([head, *briefs])
 
     def _batch_more(self, agent: Agent, proj, first, n: int) -> list:
