@@ -56,6 +56,12 @@ class Toolchain:
     binary_name: str = ""  # main executable of a tool, without .exe
     pip_extra: list[str] = field(default_factory=list)  # extra requirements for a git tool's environment
     requires_java: int = 0  # minimum Java version (Ghidra)
+    # platforms whose build can't print warnings (decompals' arm64 macOS builds of the old PS1 GCCs crash or print
+    # garbage on some): compiled with -w there. Warnings never change the code
+    no_warnings_on: list[str] = field(default_factory=list)
+    # where no_warnings_on applies, errors can crash it too: this toolchain (the same GCC version, another build)
+    # reads the source again and says what is wrong
+    explain_with: str = ""
 
     @property
     def proprietary(self) -> bool:

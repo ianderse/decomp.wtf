@@ -66,11 +66,14 @@ source = "decompals/old-gcc 0.17 (gcc-2.7.2-psx), decompals/mips-binutils-2.6 v0
 description = "GCC 2.7.2 with the PlayStation patches, the C compiler family behind PSY-Q, with the GNU assembler."
 cc = ["{tc}/gcc", "-B{tc}/", "-c", "-Wa,-EL"]
 flags = ["-O2", "-G8"]
+# its arm64 macOS build crashes ("cc1 got fatal signal 10") on warnings such as "makes integer from pointer"
+no_warnings_on = ["macos-arm64"]
+explain_with = "gcc-2.7.2-kmc"
 # GCC writes assembly, maspsx makes it what Sony's assembler (ASPSX) would have assembled (delay slots, nops, div
-# checks), modern GNU as assembles it: how PS1 decomps build. Plain GNU as schedules differently, and functions
+# checks; globals without a value stay common symbols, as with ccpsx), modern GNU as assembles it: how PS1 decomps build. Plain GNU as schedules differently, and functions
 # then miss by a nop or the stack restore's place. {aspsx}: the ASPSX version (the project's compiler.aspsx)
 requires = ["maspsx", "binutils-mips"]
-cmd = ["/bin/sh", "-c", "src=\"$1\"; obj=\"$2\"; inc=\"$3\"; aspsx=\"$4\"; shift 4; G=-G0; for a in \"$@\"; do case \"$a\" in -G*) G=\"$a\";; esac; done; \"{tc}/gcc\" -B\"{tc}/\" -S \"$@\" -I \"$inc\" \"$src\" -o \"$obj.s\" && PYTHONIOENCODING=latin-1 \"{python}\" \"{tc:maspsx}/maspsx.py\" --aspsx-version=\"$aspsx\" --expand-div \"$G\" --force-stdin < \"$obj.s\" > \"$obj.ms\" && \"{tc:binutils-mips}/mips-ps2-decompals-as\" -EL -march=r3000 -mtune=r3000 -no-pad-sections -O1 -G0 -o \"$obj\" \"$obj.ms\"", "psx-cc", "{src}", "{obj}", "{include}", "{aspsx}", "{flags}"]
+cmd = ["/bin/sh", "-c", "src=\"$1\"; obj=\"$2\"; inc=\"$3\"; aspsx=\"$4\"; shift 4; G=-G0; for a in \"$@\"; do case \"$a\" in -G*) G=\"$a\";; esac; done; \"{tc}/gcc\" -B\"{tc}/\" -S \"$@\" -I \"$inc\" \"$src\" -o \"$obj.s\" && PYTHONIOENCODING=latin-1 \"{python}\" \"{tc:maspsx}/maspsx.py\" --aspsx-version=\"$aspsx\" --expand-div --use-comm-section \"$G\" --force-stdin < \"$obj.s\" > \"$obj.ms\" && \"{tc:binutils-mips}/mips-ps2-decompals-as\" -EL -march=r3000 -mtune=r3000 -no-pad-sections -O1 -G0 -o \"$obj\" \"$obj.ms\"", "psx-cc", "{src}", "{obj}", "{include}", "{aspsx}", "{flags}"]
 [["gcc-2.7.2-psx".parts]]
 url = "https://github.com/decompals/old-gcc/releases/download/0.17/gcc-2.7.2-psx.tar.gz"
 sha256 = "500a459b3485e885a8d302cac23c2a4632f3900e03a09153f6190699fd723571"
@@ -97,11 +100,14 @@ source = "decompals/old-gcc 0.17 (gcc-2.8.1-psx), decompals/mips-binutils-2.6 v0
 description = "GCC 2.8.1 with the PlayStation patches (later PSY-Q versions), with the GNU assembler."
 cc = ["{tc}/gcc", "-B{tc}/", "-c", "-Wa,-EL"]
 flags = ["-O2", "-G8"]
+# its arm64 macOS build crashes ("cc1 got fatal signal 10") on warnings such as "makes integer from pointer"
+no_warnings_on = ["macos-arm64"]
+explain_with = "gcc-2.7.2-kmc"
 # GCC writes assembly, maspsx makes it what Sony's assembler (ASPSX) would have assembled (delay slots, nops, div
-# checks), modern GNU as assembles it: how PS1 decomps build. Plain GNU as schedules differently, and functions
+# checks; globals without a value stay common symbols, as with ccpsx), modern GNU as assembles it: how PS1 decomps build. Plain GNU as schedules differently, and functions
 # then miss by a nop or the stack restore's place. {aspsx}: the ASPSX version (the project's compiler.aspsx)
 requires = ["maspsx", "binutils-mips"]
-cmd = ["/bin/sh", "-c", "src=\"$1\"; obj=\"$2\"; inc=\"$3\"; aspsx=\"$4\"; shift 4; G=-G0; for a in \"$@\"; do case \"$a\" in -G*) G=\"$a\";; esac; done; \"{tc}/gcc\" -B\"{tc}/\" -S \"$@\" -I \"$inc\" \"$src\" -o \"$obj.s\" && PYTHONIOENCODING=latin-1 \"{python}\" \"{tc:maspsx}/maspsx.py\" --aspsx-version=\"$aspsx\" --expand-div \"$G\" --force-stdin < \"$obj.s\" > \"$obj.ms\" && \"{tc:binutils-mips}/mips-ps2-decompals-as\" -EL -march=r3000 -mtune=r3000 -no-pad-sections -O1 -G0 -o \"$obj\" \"$obj.ms\"", "psx-cc", "{src}", "{obj}", "{include}", "{aspsx}", "{flags}"]
+cmd = ["/bin/sh", "-c", "src=\"$1\"; obj=\"$2\"; inc=\"$3\"; aspsx=\"$4\"; shift 4; G=-G0; for a in \"$@\"; do case \"$a\" in -G*) G=\"$a\";; esac; done; \"{tc}/gcc\" -B\"{tc}/\" -S \"$@\" -I \"$inc\" \"$src\" -o \"$obj.s\" && PYTHONIOENCODING=latin-1 \"{python}\" \"{tc:maspsx}/maspsx.py\" --aspsx-version=\"$aspsx\" --expand-div --use-comm-section \"$G\" --force-stdin < \"$obj.s\" > \"$obj.ms\" && \"{tc:binutils-mips}/mips-ps2-decompals-as\" -EL -march=r3000 -mtune=r3000 -no-pad-sections -O1 -G0 -o \"$obj\" \"$obj.ms\"", "psx-cc", "{src}", "{obj}", "{include}", "{aspsx}", "{flags}"]
 [["gcc-2.8.1-psx".parts]]
 url = "https://github.com/decompals/old-gcc/releases/download/0.17/gcc-2.8.1-psx.tar.gz"
 sha256 = "f6f6e883942d4d3289d048236c672e71ed410e546aaae8ff655952f1567e1be0"

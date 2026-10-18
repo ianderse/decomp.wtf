@@ -60,10 +60,13 @@ def _first_address(path: Path) -> tuple[int | None, int | None]:
 def _symbol_lines(net, proj) -> list[str]:
     """symbol_addrs.txt entries for every function and every named symbol, so splat writes the project's names."""
     syms = net.symbols(proj["id"])
-    funcs = {r["vram"]: r for r in net.store.all("SELECT name, vram, size FROM functions WHERE project_id=?", proj["id"])}
+    rows = net.store.all("SELECT name, vram, size, rom_offset FROM functions WHERE project_id=? ORDER BY vram, rom_offset",
+                         proj["id"])
+    funcs = {r["vram"] for r in rows}
     lines = []
-    for vram, r in sorted(funcs.items()):
-        lines.append(f"{r['name']} = 0x{vram:08X}; // type:func")
+    for r in rows:  # with its ROM offset: overlays share addresses, and splat then names it in its own overlay only
+        rom = f" rom:0x{r['rom_offset']:X}" if r["rom_offset"] is not None else ""
+        lines.append(f"{r['name']} = 0x{r['vram']:08X}; // type:func{rom}")
     for s in sorted(syms.by_name.values(), key=lambda s: s.address):
         if s.address in funcs or AUTO_NAME.match(s.name):
             continue
@@ -87,6 +90,38 @@ def _segments(config: dict) -> list[dict]:
             seg = {"start": seg[0], "type": seg[1], "name": seg[2] if len(seg) > 2 else f"{seg[0]:X}"}
         out.append(dict(seg) | {"start": start, "end": end})
     return out
+
+
+def own_source(source: str, name: str, functions: set[str]) -> str:
+    """A function's matched source with only its own definition: agents often match several functions with one
+    compile, and each keeps that whole source. The other functions' definitions become prototypes (calls keep their
+    argument types); everything else (types, externs, globals) stays."""
+    from ..forks.csource import _blank
+
+    flat = _blank(source)
+    cuts, depth, start = [], 0, 0  # start: where the current top-level declaration began
+    for k, ch in enumerate(flat):
+        if ch == "{":
+            if depth == 0:
+                head = flat[start:k]
+                m = re.search(r"\b([A-Za-z_]\w*)\s*\([^;{}]*\)\s*$", head, re.S)  # name(params) right before {
+                cuts.append([m.group(1) if m else None, start, k, None])
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                if cuts and cuts[-1][3] is None:
+                    cuts[-1][3] = k + 1
+                start = k + 1
+        elif ch == ";" and depth == 0:
+            start = k + 1
+    out, at = [], 0
+    for fname, head_at, brace, end in cuts:
+        if fname is None or fname == name or fname not in functions or end is None:
+            continue
+        out += [source[at:brace].rstrip(), ";"]
+        at = end
+    return "".join(out) + source[at:]
 
 
 def export_rom(net, slug: str, out: Path, log=print) -> dict:
@@ -128,7 +163,12 @@ def export_rom(net, slug: str, out: Path, log=print) -> dict:
         ld.rename(out / f"splat-{ld.name}")
 
     # 2. which function is where, and which are matched
-    rows = {r["vram"]: r for r in net.store.all("SELECT * FROM functions WHERE project_id=?", proj["id"])}
+    all_rows = net.store.all("SELECT * FROM functions WHERE project_id=?", proj["id"])
+    # overlays share addresses: a function is its segment's (unit) at that address; by address alone for projects
+    # whose units aren't splat's segments
+    by_seg = {(r["unit"], r["vram"]): r for r in all_rows}
+    by_vram = {r["vram"]: r for r in all_rows}
+    names = {r["name"] for r in all_rows}
     units = net._unit_contexts(proj["id"])
     header = net._context(proj["id"])["header"]
     (out / "include").mkdir(exist_ok=True)
@@ -144,16 +184,18 @@ def export_rom(net, slug: str, out: Path, log=print) -> dict:
                           "asm": path.relative_to(out).as_posix()})
     functions.sort(key=lambda f: f["vram"])
 
+    seg_units = bool({r["unit"] for r in all_rows} & {f["seg"] for f in functions})
     objects, private, as_fallback = [], [], []
     for f in functions:
-        row = rows.get(f["vram"])
+        row = by_seg.get((f["seg"], f["vram"])) if seg_units else by_vram.get(f["vram"])
         f["obj_asm"] = f"build/{Path(f['asm']).with_suffix('.o').as_posix()}"
         if row is None or row["status"] != "matched" or not row["matched_source"]:
             f["kind"] = "asm"
             continue
         unit = net._effective_unit(row, units)
         hdr = net._context(proj["id"], unit)["header"]
-        compiled = net._compile(proj, hdr, row["matched_source"], row)
+        own = own_source(row["matched_source"], row["name"], names)
+        compiled = net._compile(proj, hdr, own, row)
         if not compiled.ok:
             as_fallback.append((f["name"], "doesn't compile any more"))
             f["kind"] = "asm"
@@ -177,7 +219,7 @@ def export_rom(net, slug: str, out: Path, log=print) -> dict:
         src = out / "src" / f["seg"] / f"{f['name']}.c"
         src.parent.mkdir(parents=True, exist_ok=True)
         include = "common.h" if not unit else f"common_{unit}.h"
-        src.write_text(f'#include "{include}"\n\n{row["matched_source"].strip()}\n', encoding="utf-8")
+        src.write_text(f'#include "{include}"\n\n{own.strip()}\n', encoding="utf-8")
         f["kind"] = "c"
         f["src"] = src.relative_to(out).as_posix()
         if (own := net.fn_toolchain(row)):  # matched with another compiler version than the project's

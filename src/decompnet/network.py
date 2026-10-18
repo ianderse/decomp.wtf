@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from . import policy, scoring, toolchains
-from .compiler import compile_source
+from .compiler import CompileResult, compile_source
 from .elfobj import FunctionObj, Reloc, extract_function
 from .project import compiler_config, with_toolchain
 from .store import Store
@@ -201,7 +201,29 @@ class Network:
         tc = toolchain or (self.fn_toolchain(fn) if fn is not None else None)
         if tc and "toolchain" in cfg.get("compiler", {}):
             cfg = {**cfg, "compiler": with_toolchain(cfg["compiler"], tc)}
-        return compile_source(compiler_config(Path(proj["root"]), cfg), header, source)
+        res = compile_source(compiler_config(Path(proj["root"]), cfg), header, source)
+        if not res.ok and "got fatal signal" in res.log and (tid := cfg.get("compiler", {}).get("toolchain")):
+            res = self._explain_crash(proj, tid, header, source, res)
+        return res
+
+    def _explain_crash(self, proj, tid: str, header: str, source: str, res):
+        """The compiler crashed instead of saying what's wrong (the arm64 macOS builds of the old PS1 GCCs do, on
+        some messages): the same GCC version, built for Intel, reads the source and says it."""
+        try:
+            other = toolchains.get(tid.partition(":")[0]).explain_with
+            if not other or toolchains.current_platform() not in toolchains.get(tid.partition(":")[0]).no_warnings_on:
+                return res
+            toolchains.ensure(other, log=lambda *_: None)
+            said = compile_source(compiler_config(Path(proj["root"]), {"compiler": {"toolchain": other, "flags": [
+                "-O2", "-fsyntax-only"]}}), header, source)
+        except Exception:
+            return res
+        why = "\n".join(ln for ln in said.log.splitlines() if "func.o" not in ln).strip()
+        if not why:
+            return CompileResult(False, None, res.log.strip() + "\nThe compiler crashed on code it accepts (GCC 2.7.2 "
+                                 "finds nothing wrong with it): write that statement another way.")
+        return CompileResult(False, None, f"{why}\n(the PS1 compiler's macOS build crashed printing this; the same "
+                                          "GCC version built for Intel says it)")
 
     def _alternate_match(self, fn, proj, header: str, source: str) -> str | None:
         """A near miss that is byte-identical with another compiler version of the platform: that compiler, now

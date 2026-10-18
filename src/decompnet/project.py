@@ -85,6 +85,8 @@ def compiler_config(root: Path, cfg: dict) -> CompilerConfig:
         if "runtime-i386" in tc.requires and not linux:  # in WSL its programs bring the runtime themselves
             runtime32 = str(toolchains.require("runtime-i386"))
         flags = c.get("flags", tc.flags)
+        if not linux and toolchains.current_platform() in tc.no_warnings_on and "-w" not in flags:
+            flags = [*flags, "-w"]
         # a template that needs a tool with no build for this computer (an Intel Mac has no modern MIPS assembler for
         # maspsx): the plain compiler command, if the toolchain has one
         template = tc.cmd if tc.cmd and c.get("assembler") != "gnu" and (linux or not tc.cc or all(
