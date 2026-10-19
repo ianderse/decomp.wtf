@@ -462,6 +462,12 @@ def main(argv: list[str] | None = None) -> int:
     jo.add_argument("--own-copy", action="store_true", help="confirm it's your own legally obtained copy")
     sv = sub.add_parser("service", help="run decomp.wtf in the background, starting with the computer")
     sv.add_argument("action", choices=["install", "remove", "status"])
+    pm = sub.add_parser("permuter", help="near misses for decomp-permuter on another computer, and its results back")
+    pm.add_argument("action", choices=["export", "import"])
+    pm.add_argument("project", help="the project's name (its slug, e.g. slus-01252)")
+    pm.add_argument("folder", help="export: where to write the directories; import: the folder with the results")
+    pm.add_argument("--max-miss", type=float, default=0.05, help="export: how far off at most (0.05: 5%%)")
+    pm.add_argument("--limit", type=int, default=400, help="export: how many functions at most")
     m = sub.add_parser("mcp", help="serve decomp.wtf to the AI agent you talk to (stdio MCP; starts the app if needed)")
     m.add_argument("--name", default=os.environ.get("DECOMP_AGENT_NAME") or "chat",
                    help="how this agent shows up in the app (e.g. claude-code; or set DECOMP_AGENT_NAME)")
@@ -470,6 +476,18 @@ def main(argv: list[str] | None = None) -> int:
     if args.cmd == "mcp":
         from .bridge import main as bridge
         return bridge(args.name)
+    if args.cmd == "permuter":
+        from .engine import RomNetwork
+        from .. import permuter_bridge
+        net = RomNetwork(home_dir() / ".decomp" / "decomp.db", home_dir())
+        folder = Path(args.folder).expanduser()
+        if args.action == "export":
+            n = permuter_bridge.export(net, args.project, folder, args.max_miss, args.limit)
+            print(f"next, on the permuter machine: sh {folder.name}/setup.sh, then decomp-permuter's "
+                  f"./permuter.py {folder.name}/* -j <cores> (see docs/plans/permuter-on-m5.md)" if n else "")
+        else:
+            permuter_bridge.import_results(net, args.project, folder)
+        return 0
     return {"setup": setup, "stop": stop, "shortcut": shortcut, "connect": connect_agents, "share": share,
             "host": host, "join": join, "service": service_cmd, "url": url_cmd, "update": update_cmd,
             "install-info": install_info}.get(args.cmd, run)(args)
