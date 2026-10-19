@@ -536,7 +536,7 @@ function setTab(tab) {
   document.querySelectorAll("[data-pane]").forEach((p) => { p.hidden = p.dataset.pane !== tab; });
   if (tab === "overview") { if (S.map.length) layoutMap(); renderOverview(); }
   if (tab === "functions") renderList();
-  if (tab === "agents") { renderLauncher($("launcher")); renderSessions(S.sessions); renderPrio(); }
+  if (tab === "agents") { renderLauncher($("launcher")); renderSessions(S.sessions); renderPrio(); loadStats(); }
   if (tab === "team") renderTeam();
   if (tab === "source" && S.ov) renderSource(S.ov);
   if (tab === "settings") renderProjectSettings();
@@ -642,9 +642,11 @@ async function poll(first) {
 }
 
 async function loadStats() {
-  if (!S.slug || S.tab !== "overview") return;
+  // the agents tab reads them too (each agent's matches, the memory A/B), not just the overview
+  if (!S.slug || (S.tab !== "overview" && S.tab !== "agents")) return;
   try { S.stats = await api(`/api/stats?slug=${S.slug}`); } catch { return; }
-  renderOverview();
+  if (S.tab === "agents") renderSessions(S.sessions);
+  else renderOverview();
 }
 
 /* Agents at work on this project: the helpers this app runs, plus outside agents (yours, the room's) with a claim. */
