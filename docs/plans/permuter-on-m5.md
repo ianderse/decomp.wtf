@@ -11,11 +11,11 @@ and statement order: decomp-permuter's job, and CPU-bound, so the M5 Ultra's cor
 ## On the laptop: export
 
 ```sh
-uv run decomp permuter export slus-01252 ~/permuter-slus     # --max-miss 0.05 --limit 400 are the defaults
+uv run decomp permuter export slus-01252 ~/permuter-slus
 rsync -a ~/permuter-slus/ ians-mac-studio:permuter-slus/
 ```
 
-One directory per function: `base.c` (the best attempt, preprocessed with the shared header), `target.o` (the
+(`--max-miss 0.05` and `--limit 400` are the defaults.) One directory per function: `base.c` (the best attempt, preprocessed with the shared header), `target.o` (the
 original instructions, assembled), `compile.sh` (decomp.wtf's exact pipeline for that function: its own compiler,
 maspsx, modern GNU as), `settings.toml`, and `decomp.json` (what the import needs). The folder holds game code:
 keep it on your own machines.
@@ -32,12 +32,12 @@ cd ~/decomp-permuter && uv venv && uv pip install toml pycparser Levenshtein
 ## On the M5 Ultra: each batch
 
 ```sh
-sh ~/permuter-slus/setup.sh                       # points the directories at this machine's MIPS objdump
+sh ~/permuter-slus/setup.sh
 cd ~/decomp-permuter
 .venv/bin/python permuter.py ~/permuter-slus/* -j 20 --best-only
 ```
 
-It works on all the directories at once and writes each improvement as `output-<score>-<n>/source.c` inside the
+`setup.sh` points the directories at this machine's MIPS objdump and prints `ready: <n> functions`. (Paste commands without trailing `# comments`: zsh doesn't treat `#` as a comment when typing commands unless `setopt interactivecomments` is on.) The permuter works on all the directories at once and writes each improvement as `output-<score>-<n>/source.c` inside the
 function's directory. Let it run overnight (stop with Ctrl-C at any time: results so far are kept). `-j 20`
 leaves cores for Qwen (oMLX) and Hindsight; use fewer while the laptop's agents are busy.
 
