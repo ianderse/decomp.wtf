@@ -1,9 +1,11 @@
 #!/bin/bash
-# Build an old PSY-Q GCC (2.6.0 or 2.6.3) natively on macOS, from decompals/old-gcc's patches.
+# Build an old PSY-Q GCC (2.6.0, 2.6.3 or 2.8.0; 2.91.66 and 2.95.2 are in psx-gcc-macos-egcs.sh) natively on macOS, from decompals/old-gcc's patches.
 # Usage: psx-gcc-macos.sh <version> <path to a checkout of decompals/old-gcc>
 # For an Intel build run it as: arch -x86_64 bash psx-gcc-macos.sh ...
 # Output: ./build-gcc-<version>-psx-macos-<arch>/{gcc,cc1,cpp}
 set -e
+
+case "$1" in 2.91.66|2.95.2) exec bash "$(dirname "$0")/psx-gcc-macos-egcs.sh" "$@" ;; esac
 
 VERSION="$1"
 OLDGCC="$(cd "$2" && pwd)"
@@ -16,6 +18,9 @@ WORKDIR="${WORKDIR:-$(mktemp -d)}"
 case "$VERSION" in
     2.6.3) URL="https://mirrors.slackware.com/slackware/slackware-2.2.0/source/d/gcc/gcc-2.6.3.tar.gz" ;;
     2.6.0) URL="http://www.nic.funet.fi/index/gnu/funet/historical-funet-gnu-area-from-early-1990s/gcc-$VERSION.tar.gz" ;;
+    2.8.0) URL="https://mirrors.kernel.org/gnu/gcc/gcc-2.8.0.tar.gz" ;;
+    # 2.5.7 isn't here: it is written in K&R varargs (va_alist, va_dcl) throughout, which Apple's arm64 calling
+    # convention can't run; try it as an Intel build (arch -x86_64) with its patches from gcc-2.5.7-psx.Dockerfile
     *) echo "unsupported version $VERSION"; exit 1 ;;
 esac
 
@@ -40,10 +45,16 @@ case "$VERSION" in
         patch -u -p1 cccp.c -i "$PATCHES/cccp-2.6.0.c.patch"
         patch -u -p1 gcc.c -i "$PATCHES/gcc-2.6.0.c.patch"
         patch -u -p1 config/mips/mips.h -i "$PATCHES/mipsel-2.6.patch" ;;
+    2.8.0)
+        patch -u -p1 obstack.h -i "$PATCHES/obstack-2.8.0.h.patch"
+        patch -u -p1 config/mips/mips.h -i "$PATCHES/mips.patch" ;;
 esac
 # sdbout-2.6.x.c.patch, as sed: Apple's patch rejects its odd hunk header
 sed -i '' -e 's/ && !defined(WINNT)$//' -e 's/^#if defined(USG) && !defined(MIPS) && !defined (hpux).*$/& \&\& !defined(_WIN32) \&\& !defined(__linux__)/' sdbout.c
-patch -su -p1 < "$PATCHES/psx-2.5.7.patch"
+case "$VERSION" in
+    2.8.*) patch -su -p1 < "$PATCHES/psx.patch" ;;
+    *) patch -su -p1 < "$PATCHES/psx-2.5.7.patch" ;;
+esac
 if [ "$VERSION" = 2.6.3 ]; then touch -c cp/parse.y cp/parse.h cp/parse.c; fi
 touch insn-config.h
 
@@ -69,6 +80,8 @@ awk '/^\t\*\)$/ { buf=$0; next }
 mv configure.tmp configure
 chmod +x configure
 
+# configure's own compiler test (main(){return(0);}) needs these under modern clang
+export CFLAGS="-std=gnu89 -w -Wno-int-conversion -Wno-implicit-function-declaration -Wno-return-mismatch"
 ./configure \
     --target=mips-sony-psx \
     --prefix=/opt/cross \
@@ -85,7 +98,7 @@ nice -n 10 make --jobs "$(sysctl -n hw.ncpu)" cpp cc1 xgcc \
 
 ./cc1 -quiet -O2 "$OLDGCC/tests/little_endian.c" -o little_endian.s
 grep -E 'lbu\s\$2,0\(\$4\)' little_endian.s
-./cc1 -quiet -help </dev/null 2>&1 | grep -- -msoft-float
+./cc1 -version </dev/null 2>&1 | grep -- -msoft-float
 
 mkdir -p "$OUTDIR"
 cp cpp cc1 xgcc "$OUTDIR/"

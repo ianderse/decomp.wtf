@@ -46,11 +46,12 @@ COMPILERS = {
     "gcc-2.8.1-psx": "later PlayStation games",
     "gcc-2.6.3-psx": "earlier PlayStation games, and parts of later ones (PSY-Q's GCC 2.6.3)",
     "gcc-2.6.0-psx": "early PlayStation games (PSY-Q's GCC 2.6.0)",
+    "gcc-2.8.0-psx": "PlayStation games from between PSY-Q's GCC 2.7.2 and 2.8.1",
     "ee-gcc-2.96": "PlayStation 2 games (Sony's EE GCC)",
     "agbcc": "Game Boy Advance games (pret's agbcc, GCC 2.95)",
 }
 SHORT_NAMES = {"gcc-2.7.2-kmc": "KMC GCC 2.7.2", "ido-7.1": "IDO 7.1", "ido-5.3": "IDO 5.3",
-               "gcc-2.7.2-psx": "GCC 2.7.2 (PS1)", "gcc-2.8.1-psx": "GCC 2.8.1 (PS1)", "gcc-2.6.3-psx": "GCC 2.6.3 (PS1)", "gcc-2.6.0-psx": "GCC 2.6.0 (PS1)", "ee-gcc-2.96": "EE-GCC 2.96",
+               "gcc-2.7.2-psx": "GCC 2.7.2 (PS1)", "gcc-2.8.1-psx": "GCC 2.8.1 (PS1)", "gcc-2.6.3-psx": "GCC 2.6.3 (PS1)", "gcc-2.6.0-psx": "GCC 2.6.0 (PS1)", "gcc-2.8.0-psx": "GCC 2.8.0 (PS1)", "ee-gcc-2.96": "EE-GCC 2.96",
                "agbcc": "agbcc"}
 # CodeWarrior versions in the `mwcc` pack (GameCube, Wii) and the `mwccarm` pack (DS), for games started from scratch.
 MW_VERSIONS = {

@@ -120,3 +120,18 @@ list (from its Dockerfile in decompals/old-gcc) added to the two `case` blocks.
 > (uv run pytest -q; compare with main's results, which have known failures), push to main on github.com/ianderse/decomp.wtf,
 > and note in this file what built, what didn't and why. Give up on a version after a reasonable effort and say
 > what blocks it.
+
+### Results of the agent's run (2026-10-19, arm64 only: Rosetta not installed)
+
+- **2.8.0: built**, passes the smoke test (it crashes on warnings and errors like 2.7.2 and 2.8.1, so its entry has
+  `no_warnings_on` and `explain_with`). Registered, with `COMPILERS` and `SHORT_NAMES`. Not added to `ALTERNATES`: the
+  survey decides per game.
+- **2.91.66 and 2.95.2: build, but cc1 crashes on every input** (`psx-gcc-macos-egcs.sh`, kept for the Intel try). The
+  source passes plain `int`s (a literal `0`) through `...` to `gen_rtx` and reads them back as pointers or 64-bit
+  words; Apple's arm64 ABI leaves the upper half of such a stack slot as garbage, so `copy_rtx_if_shared` gets
+  `orig = 0x6`. That is not fixable with flags; under `arch -x86_64` it should work (the register is zero-extended there).
+- **2.5.7: not built.** It is written in K&R varargs (`va_alist`, `va_dcl`) throughout, which arm64 can't run either, and
+  its `gvarargs.h` clashes with Apple's `va_list`. Also an Intel-only job (its patches are in
+  `gcc-2.5.7-psx.Dockerfile`; `psx-gcc-macos.sh` would need its case blocks back).
+- **Intel builds of 2.6.0, 2.6.3, 2.7.2, 2.8.1: not done** (no Rosetta). Next step when it is installed
+  (`softwareupdate --install-rosetta`): `arch -x86_64 docs/plans/psx-gcc-build-all.sh ../old-gcc 2.6.0 2.6.3 2.8.0 2.91.66 2.95.2`.

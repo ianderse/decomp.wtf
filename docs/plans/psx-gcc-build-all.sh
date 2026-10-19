@@ -20,7 +20,7 @@ smoke() {  # $1: the build folder. A plain function, one with a warning, one wit
     printf 'int g(void) { int x; x = (void *)0; return x; }\n' > "$t/warn.c"
     printf 'int h(void) { return 1 +; }\n' > "$t/err.c"
     "$dir/gcc" -B"$dir/" -S -O2 -G8 "$t/ok.c" -o "$t/ok.s" || { echo "  ok.c didn't compile"; return 1; }
-    grep -q "jr" "$t/ok.s" || { echo "  ok.c: no MIPS code in the output"; return 1; }
+    grep -qE 'jr|j[[:space:]]+[$]31' "$t/ok.s" || { echo "  ok.c: no MIPS code in the output"; return 1; }
     "$dir/gcc" -B"$dir/" -S -O2 -G8 "$t/warn.c" -o "$t/warn.s" 2> "$t/warn.log"
     if grep -q "fatal signal" "$t/warn.log"; then echo "  crashes on a warning (needs -w, like the arm64 builds)"; fi
     "$dir/gcc" -B"$dir/" -S -O2 -G8 "$t/err.c" -o "$t/err.s" 2> "$t/err.log"

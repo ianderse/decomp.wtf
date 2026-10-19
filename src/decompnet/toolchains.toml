@@ -197,6 +197,41 @@ url = "https://github.com/decompals/mips-binutils-2.6/releases/download/v0.3/bin
 sha256 = "ab21ad5908fb7776a4b0c596cc82f216876e3b5d108c7c7c1f33543b3f3fce4c"
 platforms = ["macos-x86_64", "macos-arm64"]
 
+["gcc-2.8.0-psx"]
+name = "GCC 2.8.0 for PlayStation + binutils 2.6"
+platform = "PS1"
+arch = "mipsel"
+license = "GPL-2.0"
+source = "decompals/old-gcc 0.17 (gcc-2.8.0-psx), its macOS build: docs/plans/psx-gcc-macos.sh, decompals/mips-binutils-2.6 v0.3"
+description = "GCC 2.8.0 with the PlayStation patches (between PSY-Q's 2.7.2 and 2.8.1), with the GNU assembler."
+cc = ["{tc}/gcc", "-B{tc}/", "-c", "-Wa,-EL"]
+flags = ["-O2", "-G8"]
+# its arm64 macOS build crashes ("cc1 got fatal signal 10") on warnings such as "makes integer from pointer"
+no_warnings_on = ["macos-arm64"]
+explain_with = "gcc-2.7.2-kmc"
+# GCC writes assembly, maspsx makes it what Sony's assembler (ASPSX) would have assembled (delay slots, nops, div
+# checks; globals without a value stay common symbols, as with ccpsx), modern GNU as assembles it: how PS1 decomps build. Plain GNU as schedules differently, and functions
+# then miss by a nop or the stack restore's place. {aspsx}: the ASPSX version (the project's compiler.aspsx)
+requires = ["maspsx", "binutils-mips"]
+cmd = ["/bin/sh", "-c", "src=\"$1\"; obj=\"$2\"; inc=\"$3\"; aspsx=\"$4\"; shift 4; G=-G0; for a in \"$@\"; do case \"$a\" in -G*) G=\"$a\";; esac; done; \"{tc}/gcc\" -B\"{tc}/\" -S \"$@\" -I \"$inc\" \"$src\" -o \"$obj.s\" && PYTHONIOENCODING=latin-1 \"{python}\" \"{tc:maspsx}/maspsx.py\" --aspsx-version=\"$aspsx\" --expand-div --use-comm-section \"$G\" --force-stdin < \"$obj.s\" > \"$obj.ms\" && \"{tc:binutils-mips}/mips-ps2-decompals-as\" -EL -march=r3000 -mtune=r3000 -no-pad-sections -O1 -G0 -o \"$obj\" \"$obj.ms\"", "psx-cc", "{src}", "{obj}", "{include}", "{aspsx}", "{flags}"]
+[["gcc-2.8.0-psx".parts]]
+url = "https://github.com/decompals/old-gcc/releases/download/0.17/gcc-2.8.0-psx.tar.gz"
+sha256 = "1a3c956fe8aea5ebdb251749d95de2c84f023530584d7bd663744b5ec24050b7"
+platforms = ["linux-x86_64"]
+[["gcc-2.8.0-psx".parts]]
+url = "https://github.com/decompals/mips-binutils-2.6/releases/download/v0.3/binutils-2.6-linux.tar.gz"
+sha256 = "5a612cd28344e5b410c3344ec5dcfb92d9d03947756f190cd12404055b4a624d"
+platforms = ["linux-x86_64"]
+[["gcc-2.8.0-psx".parts]]
+url = "https://raw.githubusercontent.com/ianderse/decomp.wtf/main/toolchain-builds/gcc-2.8.0-psx-macos-arm64.tar.gz"
+sha256 = "bf52b54925252f3a14f12650e167c7668fe59f7d4bdf53e6c2edda961aed476d"
+platforms = ["macos-arm64"]
+[["gcc-2.8.0-psx".parts]]
+url = "https://github.com/decompals/mips-binutils-2.6/releases/download/v0.3/binutils-2.6-mac.tar.gz"
+sha256 = "ab21ad5908fb7776a4b0c596cc82f216876e3b5d108c7c7c1f33543b3f3fce4c"
+platforms = ["macos-x86_64", "macos-arm64"]
+
+
 ["ee-gcc-2.96"]
 name = "EE-GCC 2.96"
 platform = "PS2"

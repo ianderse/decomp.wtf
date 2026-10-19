@@ -29,3 +29,6 @@ scripts/
 .DS_Store
 toolchain-builds/build-*/
 toolchain-builds/logs/
+
+# PS1 compiler builds in progress (the tarballs and logs are kept)
+toolchain-builds/build-*/
