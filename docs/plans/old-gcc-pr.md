@@ -1,7 +1,7 @@
-# Draft: pull request for decompals/old-gcc (not opened)
+# Pull request for decompals/old-gcc: opened as a draft, https://github.com/decompals/old-gcc/pull/39
 
-Status: draft for review. Nothing here has been submitted. Open it only after the SLUS-01252 matched-functions check on
-the laptop and a look at this text; see "Before submitting".
+Status: opened as a draft on 2026-10-19 (the text there is the final one; this file is the working copy). The check was
+done on the laptop before opening.
 
 **Title:** macOS builds of gcc-2.6.0, 2.6.3, 2.8.0, 2.91.66 and 2.95.2-psx, native on arm64 and Intel, and fixes for
 the arm64 crashes in the existing macOS builds
