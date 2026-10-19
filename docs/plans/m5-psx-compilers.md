@@ -135,3 +135,60 @@ list (from its Dockerfile in decompals/old-gcc) added to the two `case` blocks.
   `gcc-2.5.7-psx.Dockerfile`; `psx-gcc-macos.sh` would need its case blocks back).
 - **Intel builds of 2.6.0, 2.6.3, 2.7.2, 2.8.1: not done** (no Rosetta). Next step when it is installed
   (`softwareupdate --install-rosetta`): `arch -x86_64 docs/plans/psx-gcc-build-all.sh ../old-gcc 2.6.0 2.6.3 2.8.0 2.91.66 2.95.2`.
+
+## Native arm64 builds of every version (and an upstream contribution)
+
+Rosetta is going away (as recalled from Apple's 2025 announcement: fully available through macOS 27, then only a
+limited subset for older games), and decompals/old-gcc's own arm64 macOS builds of 2.7.2 and 2.8.1 crash or print
+garbage on some warnings, so native builds are worth fixing properly, for everyone, not just for this fork.
+
+**The cause:** the old GCC sources pass values through `...` with a type that differs from what the callee reads:
+an `int` (often a literal `0`) where `va_arg` reads a pointer or a 64-bit `HOST_WIDE_INT` (`gen_rtx`, `gen_rtvec`,
+`emit_library_call`...; the 2.91.66/2.95.2 crash), K&R `va_alist`/`va_dcl` code (2.5.7), and pointers passed to
+K&R diagnostic functions declared with `int` parameters (`error (s, v, v2)`; likely the garbled warnings, to be
+confirmed). x86_64 tolerates these by accident; Apple's arm64 ABI puts every variadic argument in its own 8-byte
+stack slot, and a 4-byte `int` written there leaves the upper half undefined.
+
+**The fix, generic rather than per call site:**
+
+1. **A widening header** (`arm64-varargs.h`), force-included with `-include` when building the compiler itself. It
+   redefines each variadic entry point as a macro that passes every argument after the fixed ones through
+   `#define DW(x) _Generic((x), double: (x), float: (double)(x), default: (long)(x))`, applied with a
+   fixed-arity FOR_EACH macro (up to 16 arguments). Pointers and longs are unchanged, ints are sign-extended to 64
+   bits (so a literal 0 read as a pointer is NULL), doubles untouched. Clang accepts `_Generic` in gnu89 mode. List
+   the variadic functions per version with `grep -n '\.\.\.\|va_dcl' *.c *.h`.
+2. **Diagnostics with real prototypes:** convert `error`, `warning`, `pedwarn`, `fatal`, `error_with_file_and_line`
+   and their siblings to `stdarg` with `const char *fmt, ...`, and make every `v_*` helper take a `va_list`. Check
+   with the smoke test's warning and error files: the message must print, not crash or show garbage.
+3. **2.5.7:** convert its `varargs.h` users to `stdarg.h` (as the 2.6+ scripts already sed), and drop its
+   `gvarargs.h` in favour of the system's `stdarg.h`.
+
+**Proof (required before using or publishing a build):** the native compiler's assembly output must be byte-identical
+to a reference build of the same version (the Rosetta build, or decompals's Linux build) on a large corpus: every
+matched function of SLUS-01252 (export them with their headers) and the C files of the public PS1 decomps listed in
+qwen-fine-tuning.md, at `-O2 -G8` and `-O1`. Any difference is a bug in the port, not noise. A script for it:
+compile each file with both compilers, `cmp` the `.s` outputs, list the differences.
+
+**Upstream:** once one version passes the proof, open a pull request to decompals/old-gcc with the header, the
+diagnostic patches, the macOS build scripts (`psx-gcc-macos.sh`, `psx-gcc-macos-egcs.sh`), and the identical-output
+results as evidence. Same license as old-gcc's patches (GPL-2.0, as GCC). Describe it as AI-assisted in the PR, as
+the decomp community expects to know.
+
+**Order:** Rosetta builds first (quick, and they're the reference for the proof), then 2.95.2 natively (the newest;
+SDK 4.70 pointed at it), then 2.91.66, the diagnostics fix for 2.6.x/2.7.2/2.8.x (which retires `-w` and
+`explain_with` here), and 2.5.7 last.
+
+### The agent's task for this (paste into a Claude Code session on the M5 Ultra)
+
+> In ~/decomp.wtf (pull main first), follow "Native arm64 builds of every version" in
+> docs/plans/m5-psx-compilers.md. First build the Intel references: install Rosetta if it isn't
+> (`softwareupdate --install-rosetta --agree-to-license`; ask me if it needs a password), then
+> `arch -x86_64 docs/plans/psx-gcc-build-all.sh ../old-gcc 2.5.7 2.6.0 2.6.3 2.7.2 2.8.0 2.8.1 2.91.66 2.95.2`.
+> Then port 2.95.2 to native arm64 with the widening header and stdarg diagnostics, and write the identical-output
+> check (scripts/compare-compilers.sh: two compiler folders and a corpus folder in, a list of differing files out).
+> Build the corpus from the public PS1 decomps (shallow clones, INCLUDE_ASM lines removed, as qwen-fine-tuning.md
+> describes) and from SLUS-01252's matched functions if the laptop's database is copied over. A port is done only
+> when its output is byte-identical on the whole corpus. Register each finished native build (macos-arm64 part) and
+> Intel build (macos-x86_64 part) in toolchains.toml, commit, push to main, and write the results here. Then do the
+> other versions in the order above. Prepare the decompals/old-gcc pull request as a branch and a description in
+> docs/plans/old-gcc-pr.md, but don't open it: I'll review and submit it.
