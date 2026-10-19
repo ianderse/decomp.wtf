@@ -1,8 +1,9 @@
 # More PS1 compiler versions, built natively on macOS (on the M5 Ultra)
 
 Status: 2.6.0 and 2.6.3 built natively on arm64 macOS (`docs/plans/psx-gcc-macos.sh <version> <old-gcc checkout>`), registered
-in `toolchains.toml` and added to the alternates. The tarballs are committed in toolchain-builds/ and served from main. Not yet done:
-the re-judge measurement, and everything Intel (Rosetta isn't installed on this machine; the arm64
+in `toolchains.toml` and added to the alternates. The tarballs are committed in toolchain-builds/ and served from main. Measured on the laptop (2026-10-19): 208 of 1605 stuck best attempts on SLUS-01252 match with GCC 2.6.3
+(2.6.0: the same ones; ASPSX 2.21 on top: none more), once `//` comments are turned into `/* */` for them
+(`line_comments = false`: GCC 2.6 predates `//`, and agents' headers use it). Not yet done: everything Intel (Rosetta isn't installed on this machine; the arm64
 build prints garbage in warnings, e.g. `warning: *aV makes integer from pointer`, so the Intel builds are still worth
 it). 2.5.7 fails to build (`va_list` clash between its gvarargs.h and Apple's SDK); 2.8.0, 2.91.66 and 2.95.2 not tried.
 Written 2026-10-19. Do this on the M5 Ultra; the laptop can keep running the app meanwhile

@@ -33,12 +33,13 @@ RELEASE_COOLDOWN = 15 * 60
 # ("@2.34": an older version of Sony's assembler; on SLUS-01252 62 stuck best attempts matched that way)
 # ("/O1": built at -O1; 38 of them with GCC 2.8.1 there)
 _PSX_OLDER = ("gcc-2.8.1-psx@2.34", "gcc-2.8.1-psx@2.21", "gcc-2.7.2-psx@2.21", "gcc-2.7.2-psx@2.34", "gcc-2.8.1-psx@2.56",
-              "gcc-2.8.1-psx/O1", "gcc-2.7.2-psx/O1",
-              # earlier PSY-Q GCCs (built natively on macOS, see docs/plans/psx-gcc-macos.sh): parts of a game, and Sony's
-              # libraries, can come from them. Drop one if the re-judge shows it matched nothing.
-              "gcc-2.6.3-psx", "gcc-2.6.0-psx", "gcc-2.6.3-psx@2.21", "gcc-2.6.0-psx@2.21")
-ALTERNATES = {"gcc-2.7.2-psx": ("gcc-2.8.1-psx", "gcc-2.7.2-psx:gnu-as", "gcc-2.8.1-psx:gnu-as", *_PSX_OLDER),
-              "gcc-2.8.1-psx": ("gcc-2.7.2-psx", "gcc-2.8.1-psx:gnu-as", "gcc-2.7.2-psx:gnu-as", *_PSX_OLDER)}
+              "gcc-2.8.1-psx/O1", "gcc-2.7.2-psx/O1")
+# earlier PSY-Q GCCs (built natively on macOS, see docs/plans/psx-gcc-macos.sh), tried right after the other
+# current one: on SLUS-01252 208 of 1605 stuck best attempts matched with 2.6.3 (2.6.0: the same ones, ASPSX 2.21 on
+# top: none more)
+_PSX_26 = ("gcc-2.6.3-psx", "gcc-2.6.0-psx")
+ALTERNATES = {"gcc-2.7.2-psx": ("gcc-2.8.1-psx", *_PSX_26, "gcc-2.7.2-psx:gnu-as", "gcc-2.8.1-psx:gnu-as", *_PSX_OLDER),
+              "gcc-2.8.1-psx": ("gcc-2.7.2-psx", *_PSX_26, "gcc-2.8.1-psx:gnu-as", "gcc-2.7.2-psx:gnu-as", *_PSX_OLDER)}
 MACHINE_AGENTS = ("autopilot", "permuter")  # decomp.wtf's own workers: their claims never mean "given up on"
 # Twins first (see app/twins.py): a function whose code the game has more than once (boost: how many more times)
 # and isn't too big or given up on, best value per instruction first; its twins (boost -1) last, as they match for

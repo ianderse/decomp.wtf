@@ -178,9 +178,16 @@ def export_rom(net, slug: str, out: Path, log=print) -> dict:
         if enabled(cfg):
             shutil.copyfile(header_path(), out / "include" / "psx_gte.h")
             gte = '#include "psx_gte.h"\n'
-    (out / "include" / "common.h").write_text(gte + header, encoding="utf-8")
+    # a function built with a compiler from before // comments (GCC 2.6): the tree's C uses /* */ ones throughout
+    from .. import toolchains
+    from ..compiler import block_comments
+    from ..project import toolchain_id
+    oldc = any(not toolchains.get(toolchain_id(t)).line_comments for t in
+               {net.fn_toolchain(r) for r in all_rows if r["status"] == "matched"} - {None})
+    fix = block_comments if oldc else (lambda text: text)
+    (out / "include" / "common.h").write_text(gte + fix(header), encoding="utf-8")
     for u in units:
-        (out / "include" / f"common_{u}.h").write_text(gte + net._context(proj["id"], u)["header"], encoding="utf-8")
+        (out / "include" / f"common_{u}.h").write_text(gte + fix(net._context(proj["id"], u)["header"]), encoding="utf-8")
     functions = []
     for path in sorted((out / "asm" / "nonmatchings").glob("**/*.s")):
         rom_off, vram = _first_address(path)
@@ -225,7 +232,7 @@ def export_rom(net, slug: str, out: Path, log=print) -> dict:
         src = out / "src" / f["seg"] / f"{f['name']}.c"
         src.parent.mkdir(parents=True, exist_ok=True)
         include = "common.h" if not unit else f"common_{unit}.h"
-        src.write_text(f'#include "{include}"\n\n{own.strip()}\n', encoding="utf-8")
+        src.write_text(f'#include "{include}"\n\n{fix(own).strip()}\n', encoding="utf-8")
         f["kind"] = "c"
         f["src"] = src.relative_to(out).as_posix()
         if (own := net.fn_toolchain(row)):  # matched with another compiler version than the project's

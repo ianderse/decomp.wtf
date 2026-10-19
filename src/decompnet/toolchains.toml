@@ -101,8 +101,9 @@ description = "GCC 2.6.0 with the PlayStation patches (an earlier PSY-Q version)
 cc = ["{tc}/gcc", "-B{tc}/", "-c", "-Wa,-EL"]
 flags = ["-O2", "-G8"]
 # its arm64 macOS build crashes ("cc1 got fatal signal 10") on warnings such as "makes integer from pointer"
+line_comments = false  # // comments came after GCC 2.6: they're turned into /* */ ones first
 no_warnings_on = ["macos-arm64"]
-explain_with = "gcc-2.6.0-kmc"
+explain_with = "gcc-2.7.2-kmc"
 # GCC writes assembly, maspsx makes it what Sony's assembler (ASPSX) would have assembled (delay slots, nops, div
 # checks; globals without a value stay common symbols, as with ccpsx), modern GNU as assembles it: how PS1 decomps build. Plain GNU as schedules differently, and functions
 # then miss by a nop or the stack restore's place. {aspsx}: the ASPSX version (the project's compiler.aspsx)
@@ -136,8 +137,9 @@ description = "GCC 2.6.3 with the PlayStation patches (an earlier PSY-Q version)
 cc = ["{tc}/gcc", "-B{tc}/", "-c", "-Wa,-EL"]
 flags = ["-O2", "-G8"]
 # its arm64 macOS build crashes ("cc1 got fatal signal 10") on warnings such as "makes integer from pointer"
+line_comments = false  # // comments came after GCC 2.6: they're turned into /* */ ones first
 no_warnings_on = ["macos-arm64"]
-explain_with = "gcc-2.6.3-kmc"
+explain_with = "gcc-2.7.2-kmc"
 # GCC writes assembly, maspsx makes it what Sony's assembler (ASPSX) would have assembled (delay slots, nops, div
 # checks; globals without a value stay common symbols, as with ccpsx), modern GNU as assembles it: how PS1 decomps build. Plain GNU as schedules differently, and functions
 # then miss by a nop or the stack restore's place. {aspsx}: the ASPSX version (the project's compiler.aspsx)

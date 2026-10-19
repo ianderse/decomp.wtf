@@ -51,6 +51,15 @@ def check_source(source: str) -> None:
             raise SourceRejected(why)
 
 
+def block_comments(text: str) -> str:
+    """// comments as /* */ ones (strings, character constants and block comments untouched), for a C compiler that
+    predates them: the code it compiles is the same."""
+    def swap(m):
+        t = m.group()
+        return "/*" + t[2:].replace("*/", "* /") + " */" if t.startswith("//") else t
+    return _COMMENTS_AND_STRINGS.sub(swap, text)
+
+
 @dataclass
 class CompilerConfig:
     cmd: list[str]
@@ -62,6 +71,7 @@ class CompilerConfig:
     runtime32: str | None = None  # 32-bit x86 C runtime for old i386 compiler binaries (see toolchains)
     wsl: bool = False  # a Linux toolchain on Windows: runs inside WSL 2, `cmd` holds WSL paths (see wsl.py)
     psx_gte: bool = False  # a PS1 compiler: the trusted GTE macros (psx_gte.h) come before the context
+    line_comments: bool = True  # False: the compiler predates // comments, they become /* */ ones (block_comments)
 
 
 @dataclass
@@ -153,6 +163,8 @@ def compile_source(cfg: CompilerConfig, context_header: str, source: str, truste
         if cfg.psx_gte:  # after the project's own headers, so none of them can stand in for it
             from .psx_gte import header_path
             shutil.copyfile(header_path(), inc / "psx_gte.h")
+        if not cfg.line_comments:
+            context_header, source = block_comments(context_header), block_comments(source)
         # LF on every platform: to the old GCCs a backslash before CRLF doesn't continue a line ("stray '\' in program")
         (inc / "context.h").write_text(context_header, encoding="utf-8", newline="\n")
         prefix = '#include "psx_gte.h"\n' if cfg.psx_gte else ""

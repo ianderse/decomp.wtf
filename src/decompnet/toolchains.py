@@ -62,6 +62,8 @@ class Toolchain:
     # where no_warnings_on applies, errors can crash it too: this toolchain (the same GCC version, another build)
     # reads the source again and says what is wrong
     explain_with: str = ""
+    # a C before // comments (GCC 2.6): they're turned into /* */ ones before it compiles (headers agents grew have them)
+    line_comments: bool = True
 
     @property
     def proprietary(self) -> bool:
