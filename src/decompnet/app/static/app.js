@@ -757,6 +757,7 @@ function renderStats(ov) {
   $("pctSub").textContent = (ov.bytes ? `${bytes(ov.matched_bytes)} of ${bytes(ov.bytes)}` : "") + linkedText(ov) + (S.today ? ` · ${S.today} matched today` : "");
   $("fnCount").textContent = `${ov.matched.toLocaleString()} / ${ov.functions.toLocaleString()}`;
   renderAutopilot(ov);
+  renderCompilersUsed(ov);
   renderSteering(ov);
   if (S.tab === "source") renderSource(ov);
   renderCompilerNotice(ov);
@@ -2297,6 +2298,22 @@ function renderPrio() {
 
 /* Autopilot: free matches before any agent spends a token: identical code (twins) of what's matched, then every
    function's machine draft through the judge; the permuter works on near misses meanwhile. */
+/* Which compilers built this game: matched functions per compiler setup (each function keeps the one it matched
+   with), and what the last compiler survey found. */
+function renderCompilersUsed(ov) {
+  const box = $("compilersUsed"), rows = ov.compilers_used || [];
+  box.hidden = rows.length < 2 && !ov.survey;
+  if (box.hidden) return;
+  const label = (spec) => esc(spec).replace(/@([\d.]+)/, " · ASPSX $1").replace("/O1", " · -O1").replace(":gnu-as", " · GNU as");
+  const total = rows.reduce((n, r) => n + r.matched, 0) || 1;
+  const sv = ov.survey;
+  const found = sv && Object.keys(sv.matches || {}).length
+    ? Object.entries(sv.matches).map(([k, n]) => `${label(k)} ${n}`).join(", ") : "nothing new";
+  box.innerHTML = `<p class="col-title">Compilers in this game</p>
+    <table class="mini"><tr><th>Setup</th><th>Matched</th><th>Code</th></tr>${rows.map((r) => `<tr><td>${label(r.spec)}${r.main ? ' <span class="muted small">(the project\'s)</span>' : ""}</td><td>${r.matched.toLocaleString()} <span class="muted small">${Math.round((100 * r.matched) / total)}%</span></td><td>${(r.bytes / 1024).toFixed(1)} KB</td></tr>`).join("")}</table>
+    ${sv ? `<p class="muted small">Last compiler survey ${clock(sv.at).slice(0, 5)}, ${new Date(sv.at * 1000).toLocaleDateString()}: ${sv.sampled} stuck functions tried with every setup; matched: ${found}.</p>` : ""}`;
+}
+
 function renderAutopilot(ov) {
   const box = $("autopilot"), ap = ov.autopilot, tw = ov.twins, pm = ov.permuter;
   const canRun = (ov.kind !== "fork" || ov.ready) && ov.functions - ov.matched > 0;

@@ -1469,8 +1469,20 @@ class RomNetwork(Network):
                                              "twins": None if twins is None else {
                                                  k: getattr(twins, k) for k in ("state", "pairs", "tried", "matched", "asm")},
                                              "helper_matches": helpers,
+                                             "compilers_used": self._compilers_used(proj),
+                                             "survey": cfg.get("survey"),
                                              "spend": cfg.get("spend"), "instructions": cfg.get("instructions") or "",
                                              "priority": cfg.get("priority", [])}
+
+    def _compilers_used(self, proj) -> list[dict]:
+        """Matched functions per compiler setup (the project's, or a function's own): which compilers built the game."""
+        if self.fork_slug(proj["slug"]):
+            return []
+        main = self.cfg(proj).get("compiler", {}).get("toolchain")
+        rows = self.store.all("SELECT COALESCE(json_extract(meta, '$.toolchain'), ?) AS spec, COUNT(*) AS matched, "
+                              "SUM(size) AS bytes FROM functions WHERE project_id=? AND status='matched' GROUP BY 1 "
+                              "ORDER BY 2 DESC", main, proj["id"])
+        return [dict(r) | {"main": r["spec"] == main} for r in rows]
 
     def _overview(self, slug: str, proj) -> dict:
         if (fork := self.fork_slug(slug)):
