@@ -96,7 +96,7 @@ name = "GCC 2.6.0 for PlayStation + binutils 2.6"
 platform = "PS1"
 arch = "mipsel"
 license = "GPL-2.0"
-source = "decompals/old-gcc 0.17 (gcc-2.6.0-psx; its macOS build is made by docs/plans/psx-gcc-macos.sh), decompals/mips-binutils-2.6 v0.3"
+source = "decompals/old-gcc 0.17 (gcc-2.6.0-psx), its macOS build: docs/plans/psx-gcc-macos.sh, decompals/mips-binutils-2.6 v0.3"
 description = "GCC 2.6.0 with the PlayStation patches (an earlier PSY-Q version), with the GNU assembler."
 cc = ["{tc}/gcc", "-B{tc}/", "-c", "-Wa,-EL"]
 flags = ["-O2", "-G8"]
@@ -117,7 +117,7 @@ url = "https://github.com/decompals/mips-binutils-2.6/releases/download/v0.3/bin
 sha256 = "5a612cd28344e5b410c3344ec5dcfb92d9d03947756f190cd12404055b4a624d"
 platforms = ["linux-x86_64"]
 [["gcc-2.6.0-psx".parts]]
-url = "https://github.com/ianderse/decomp.wtf/releases/download/psx-gcc-macos-1/gcc-2.6.0-psx-macos-arm64.tar.gz"
+url = "https://raw.githubusercontent.com/ianderse/decomp.wtf/main/toolchain-builds/gcc-2.6.0-psx-macos-arm64.tar.gz"
 sha256 = "570c87542cff393a10ef46db0521c1f59a68e9914ff4236cfc1fd4ca796b2e26"
 platforms = ["macos-arm64"]
 [["gcc-2.6.0-psx".parts]]
@@ -131,7 +131,7 @@ name = "GCC 2.6.3 for PlayStation + binutils 2.6"
 platform = "PS1"
 arch = "mipsel"
 license = "GPL-2.0"
-source = "decompals/old-gcc 0.17 (gcc-2.6.3-psx; its macOS build is made by docs/plans/psx-gcc-macos.sh), decompals/mips-binutils-2.6 v0.3"
+source = "decompals/old-gcc 0.17 (gcc-2.6.3-psx), its macOS build: docs/plans/psx-gcc-macos.sh, decompals/mips-binutils-2.6 v0.3"
 description = "GCC 2.6.3 with the PlayStation patches (an earlier PSY-Q version), with the GNU assembler."
 cc = ["{tc}/gcc", "-B{tc}/", "-c", "-Wa,-EL"]
 flags = ["-O2", "-G8"]
@@ -152,7 +152,7 @@ url = "https://github.com/decompals/mips-binutils-2.6/releases/download/v0.3/bin
 sha256 = "5a612cd28344e5b410c3344ec5dcfb92d9d03947756f190cd12404055b4a624d"
 platforms = ["linux-x86_64"]
 [["gcc-2.6.3-psx".parts]]
-url = "https://github.com/ianderse/decomp.wtf/releases/download/psx-gcc-macos-1/gcc-2.6.3-psx-macos-arm64.tar.gz"
+url = "https://raw.githubusercontent.com/ianderse/decomp.wtf/main/toolchain-builds/gcc-2.6.3-psx-macos-arm64.tar.gz"
 sha256 = "42ceccb136e09461078eef122f1b5ac5b9e4552f8a7e58e99ec9fdf482fb6119"
 platforms = ["macos-arm64"]
 [["gcc-2.6.3-psx".parts]]
