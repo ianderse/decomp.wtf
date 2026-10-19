@@ -25,7 +25,7 @@ from pathlib import Path
 
 from .. import scoring, seeds, similarity, toolchains
 from ..elfobj import FunctionObj
-from ..network import Agent, Network, NetworkError, _hash_token
+from ..network import ALTERNATES, Agent, Network, NetworkError, _hash_token
 from ..project import compiler_config
 from ..rom import detect, match, split
 from ..rom.symbols import AUTO_NAME, IDENT, Symbol, SymbolTable
@@ -972,6 +972,13 @@ class RomNetwork(Network):
                            "VALUES(?,?,?,?,?,?,?)", (proj["id"], version, header, agent.id, msg, time.time(), u))
             for fid, src in rewritten.items():
                 db.execute("UPDATE functions SET matched_source=?, best_source=? WHERE id=?", (src, src, fid))
+            # matched while the regression test ran (it takes minutes on a big game): renamed above by address, so
+            # their source gets the new name too, or the judge can't find them any more
+            for r in db.execute("SELECT id, matched_source FROM functions WHERE project_id=? AND status='matched'",
+                                (proj["id"],)).fetchall():
+                if r["id"] not in rewritten and r["matched_source"] and word.search(r["matched_source"]):
+                    src = word.sub(new, r["matched_source"])
+                    db.execute("UPDATE functions SET matched_source=?, best_source=? WHERE id=?", (src, src, r["id"]))
             for r in db.execute("SELECT id, best_source FROM functions WHERE project_id=? AND status='open' "
                                 "AND best_source IS NOT NULL", (proj["id"],)).fetchall():
                 db.execute("UPDATE functions SET best_source=? WHERE id=?", (word.sub(new, r["best_source"]), r["id"]))
@@ -1546,7 +1553,8 @@ class RomNetwork(Network):
             cfg = compiler_config(Path(proj["root"]), json.loads(proj["config"]))
         except Exception:  # not installed yet: nothing judged with it either
             return None
-        return hashlib.sha1(json.dumps(cfg.cmd).encode()).hexdigest()[:16]
+        main = json.loads(proj["config"]).get("compiler", {}).get("toolchain")  # (and what a function may match with)
+        return hashlib.sha1(json.dumps([cfg.cmd, ALTERNATES.get(main, ())]).encode()).hexdigest()[:16]
 
     def _rejudge(self, proj, agent, state: dict, workers: int) -> None:
         """After the way code is judged changed: check every match still holds (a function that needs the other
@@ -1582,6 +1590,11 @@ class RomNetwork(Network):
             fn = self.store.one("SELECT * FROM functions WHERE id=?", fid)
             try:
                 res = self.try_quietly(agent, proj, fn, fn["best_source"]) if fn and fn["status"] == "open" else None
+                if res and not res["matched"] and res["score"] is not None:  # any distance off: the other compilers too
+                    unit = self._effective_unit(fn, self._unit_contexts(proj["id"]))
+                    if self._alternate_match(fn, proj, self._context(proj["id"], unit)["header"], fn["best_source"]):
+                        res = self.try_quietly(agent, proj, self.store.one("SELECT * FROM functions WHERE id=?", fid),
+                                               fn["best_source"])
             except Exception:  # held by an agent, or one odd function: the rest go on
                 res = None
             state["rejudged"] += 1

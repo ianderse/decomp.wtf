@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor
@@ -51,14 +52,23 @@ def load_config(root: Path) -> dict:
         return tomllib.load(f)
 
 
+def toolchain_id(spec: str) -> str:
+    """The registry id in a toolchain spec ("gcc-2.8.1-psx@2.34", "gcc-2.7.2-psx:gnu-as" -> the part before)."""
+    return re.split(r"[:@]", spec, maxsplit=1)[0]
+
+
 def with_toolchain(compiler: dict, spec: str | None) -> dict:
-    """A project's compiler settings with another toolchain: an id, or id + ":gnu-as" for its plain command (GNU as
-    without the template's assembler step: PS1 library code that wasn't assembled by Sony's assembler)."""
+    """A project's compiler settings with another toolchain: an id; id + "@<version>" for another version of Sony's
+    assembler (maspsx's --aspsx-version: parts of a game were often assembled with an older one, Sony's libraries
+    above all); or id + ":gnu-as" for its plain command (GNU as without the template's assembler step)."""
     if not spec:
         return compiler
-    tid, _, variant = spec.partition(":")
+    head, _, variant = spec.partition(":")
+    tid, _, aspsx = head.partition("@")
     out = {**compiler, "toolchain": tid}
     out.pop("assembler", None)
+    if aspsx:
+        out["aspsx"] = aspsx
     if variant == "gnu-as":
         out["assembler"] = "gnu"
     return out

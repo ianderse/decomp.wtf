@@ -21,7 +21,7 @@ from pathlib import Path
 from . import policy, scoring, toolchains
 from .compiler import CompileResult, compile_source
 from .elfobj import FunctionObj, Reloc, extract_function
-from .project import compiler_config, with_toolchain
+from .project import compiler_config, toolchain_id, with_toolchain
 from .store import Store
 
 CLAIM_TTL = 30 * 60
@@ -30,8 +30,10 @@ CLAIM_TTL = 30 * 60
 RELEASE_COOLDOWN = 15 * 60
 # the other compiler versions of a platform, tried on a near miss: a game is sometimes built with two of them
 # (":gnu-as": without maspsx, for code that wasn't built with Sony's assembler, like some library code)
-ALTERNATES = {"gcc-2.7.2-psx": ("gcc-2.8.1-psx", "gcc-2.7.2-psx:gnu-as", "gcc-2.8.1-psx:gnu-as"),
-              "gcc-2.8.1-psx": ("gcc-2.7.2-psx", "gcc-2.8.1-psx:gnu-as", "gcc-2.7.2-psx:gnu-as")}
+# ("@2.34": an older version of Sony's assembler; on SLUS-01252 62 stuck best attempts matched that way)
+_PSX_OLDER = ("gcc-2.8.1-psx@2.34", "gcc-2.8.1-psx@2.21", "gcc-2.7.2-psx@2.21", "gcc-2.7.2-psx@2.34", "gcc-2.8.1-psx@2.56")
+ALTERNATES = {"gcc-2.7.2-psx": ("gcc-2.8.1-psx", "gcc-2.7.2-psx:gnu-as", "gcc-2.8.1-psx:gnu-as", *_PSX_OLDER),
+              "gcc-2.8.1-psx": ("gcc-2.7.2-psx", "gcc-2.8.1-psx:gnu-as", "gcc-2.7.2-psx:gnu-as", *_PSX_OLDER)}
 MACHINE_AGENTS = ("autopilot", "permuter")  # decomp.wtf's own workers: their claims never mean "given up on"
 # Twins first (see app/twins.py): a function whose code the game has more than once (boost: how many more times)
 # and isn't too big or given up on, best value per instruction first; its twins (boost -1) last, as they match for
@@ -301,8 +303,8 @@ class Network:
         """The compiler crashed instead of saying what's wrong (the arm64 macOS builds of the old PS1 GCCs do, on
         some messages): the same GCC version, built for Intel, reads the source and says it."""
         try:
-            other = toolchains.get(tid.partition(":")[0]).explain_with
-            if not other or toolchains.current_platform() not in toolchains.get(tid.partition(":")[0]).no_warnings_on:
+            other = toolchains.get(toolchain_id(tid)).explain_with
+            if not other or toolchains.current_platform() not in toolchains.get(toolchain_id(tid)).no_warnings_on:
                 return res
             toolchains.ensure(other, log=lambda *_: None)
             said = compile_source(compiler_config(Path(proj["root"]), {"compiler": {"toolchain": other, "flags": [
@@ -324,7 +326,7 @@ class Network:
         current = self.fn_toolchain(fn) or main
         options = [main, *comp.get("alternates", ALTERNATES.get(main, ()))]
         for tc in dict.fromkeys(t for t in options if t and t != current):
-            if toolchains.installed(tc.partition(":")[0]) is None:
+            if toolchains.installed(toolchain_id(tc)) is None:
                 continue
             res = self._compile(proj, header, source, toolchain=tc)
             if not res.ok:
@@ -359,7 +361,7 @@ class Network:
     def _memory_bank(self, proj, fn) -> str | None:
         """The bank a function's lessons go in: its compiler's (the project's, or the one it matched with)."""
         tc = self.fn_toolchain(fn) or json.loads(proj["config"]).get("compiler", {}).get("toolchain")
-        return tc.partition(":")[0] if tc else None
+        return toolchain_id(tc) if tc else None
 
     def _memory_lines(self, proj, fn, agent) -> list[str]:
         """What memory has for a claimed function, for half the claims (chosen at random and recorded: memory_ab,
@@ -421,7 +423,7 @@ class Network:
             return
         added = [ln[1:] for ln in difflib.unified_diff(old_header.splitlines(), new_header.splitlines(), lineterm="", n=0)
                  if ln.startswith("+") and not ln.startswith("+++")][:30]
-        self.memory.retain(bank.partition(":")[0], f"{proj['name']} ({proj['slug']}) shared header v{version}: "
+        self.memory.retain(toolchain_id(bank), f"{proj['name']} ({proj['slug']}) shared header v{version}: "
                            f"{message.strip()}\n" + "\n".join(added), "An accepted change to the game's shared "
                            "header: every matched function still matched with it.", [f"game:{proj['slug']}"],
                            f"{proj['slug']}:header:v{version}", {"game": proj["slug"], "kind": "header"})
