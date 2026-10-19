@@ -34,7 +34,7 @@ cd ~/decomp-permuter && uv venv && uv pip install toml pycparser Levenshtein
 ```sh
 sh ~/permuter-slus/setup.sh
 cd ~/decomp-permuter
-.venv/bin/python permuter.py ~/permuter-slus/* -j 20 --best-only
+.venv/bin/python permuter.py ~/permuter-slus/*/ -j 20 --best-only
 ```
 
 `setup.sh` points the directories at this machine's MIPS objdump and prints `ready: <n> functions`. (Paste commands without trailing `# comments`: zsh doesn't treat `#` as a comment when typing commands unless `setopt interactivecomments` is on.) The permuter works on all the directories at once and writes each improvement as `output-<score>-<n>/source.c` inside the

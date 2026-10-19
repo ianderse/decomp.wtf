@@ -484,7 +484,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.action == "export":
             n = permuter_bridge.export(net, args.project, folder, args.max_miss, args.limit)
             print(f"next, on the permuter machine: sh {folder.name}/setup.sh, then decomp-permuter's "
-                  f"./permuter.py {folder.name}/* -j <cores> (see docs/plans/permuter-on-m5.md)" if n else "")
+                  f"./permuter.py {folder.name}/*/ -j <cores> (see docs/plans/permuter-on-m5.md)" if n else "")
         else:
             permuter_bridge.import_results(net, args.project, folder)
         return 0
