@@ -300,3 +300,25 @@ Rosetta while it lasts), 2.5.7, the SLUS-01252 check, 2.7.2 and 2.8.1 Intel buil
   rebuilding 2.7.2 and 2.8.1 with `const-double-fix.py` is the next step for them.
 - The app now reinstalls a compiler when the registry pins a rebuilt package (`toolchains.stale`), and surveys again
   when one changes.
+
+### Against the official Linux builds (2026-10-19, laptop, Docker)
+
+`docs/plans/compare-with-linux.sh` compiles a corpus with decompals/old-gcc's official Linux builds (static i386, in
+a linux/amd64 container) and with the macOS builds, and compares the assembly without comment lines. Corpus: 400
+of SLUS-01252's matched functions (own definitions with the shared header, `//` comments made `/* */`), plus two
+small files: `double f(void) { return 1.5; }` and `float f(float x) { return x * 1.5f + 0.25f; } float k = 3.0f;`.
+
+| version | macOS build | identical | different |
+|---|---|---|---|
+| 2.8.0, 2.91.66, 2.95.2 | arm64 and x86_64 (ours) | 402 | 0 |
+| 2.6.0, 2.6.3 | arm64 and x86_64 (ours) | 401 | 1: the float file |
+| 2.7.2, 2.8.1 | arm64 (old-gcc's official macOS builds) | 400 | 2: the double and float files |
+
+- **Ours, 2.8.0, 2.91.66, 2.95.2: byte-identical to the official Linux builds.** That is the proof the PR needs.
+- **Ours, 2.6.0 and 2.6.3: a float global initializer is wrong.** `float k = 3.0f;` gives `.word 0xf489fa5840400000`
+  (arm64) / `.word 0x42bb1e40400000` (x86_64) where Linux gives `.word 0x40400000`: a 32-bit word printed from a
+  64-bit host value with garbage in the upper half, on both architectures, so it's the 64-bit-host patching, not
+  arm64 (2.6.x's float output path, like the CONST_DOUBLE copies const-double-fix.py fixed). To fix before the PR
+  claims 2.6.x; it doesn't affect SLUS-01252 (no float data; its 254 2.6.x matches all re-verified).
+- **old-gcc's official macOS 2.7.2 and 2.8.1 have the double/float-constant bug; their Linux builds don't.** Evidence
+  for the PR, and the reason to rebuild those two with the fixes.

@@ -93,3 +93,13 @@ The double-constant problem reproduces with the **official** macOS builds of gcc
 (old-gcc 0.17 release assets): `double f(void) { return 1.5; }` at `-O2 -G8` emits `.word 0x00000000` for both
 halves, and a `float` constant used inside a function is emitted as `0x00000000`. The rebuilt 2.95.2 with
 const-double-fix.py emits the right words.
+
+## Against the official Linux builds (laptop, Docker; docs/plans/compare-with-linux.sh)
+
+On 400 functions of a retail PS1 game plus two float/double test files, our native arm64 and x86_64 macOS builds of
+2.8.0, 2.91.66 and 2.95.2 produce assembly byte-identical to old-gcc's official Linux builds (402/402). Our 2.6.0
+and 2.6.3 builds match on the 400 functions but get a float global initializer wrong (a 64-bit-host printing bug, to
+fix before claiming them). old-gcc's own macOS builds of 2.7.2 and 2.8.1 differ from its Linux builds on the
+double and float test files (the CONST_DOUBLE bug), and match on the 400 functions.
+In the same game, 244 functions match the original byte for byte with our arm64 gcc-2.6.3-psx build and 10 with
+gcc-2.6.0-psx at -O1 (re-verified with the current builds).
