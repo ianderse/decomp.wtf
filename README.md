@@ -1,3 +1,76 @@
+# decomp.wtf: ianderse's fork
+
+This is a maintained fork of [decomp.wtf](https://github.com/i12bp8/decomp.wtf), which its author discontinued
+(their note is in the original README below). It's tuned mainly for PlayStation 1 games: on one PS1 game it went
+from 4.5% to 30% of the code matched, much of that from judging fixes rather than extra agent work.
+
+**Running it:** the original README's installer commands and the app's built-in updater still point at the
+original, discontinued project. To use this fork, clone it and start it from the checkout:
+
+```sh
+git clone https://github.com/ianderse/decomp.wtf && cd decomp.wtf
+uv run decomp
+```
+
+The original author's request still applies: only use it on games you own, don't share the game code it
+produces, and respect the rules of projects that don't want AI-made contributions.
+
+## What's different from the original
+
+### Matching PS1 code
+
+- **Assembled the way Sony's tools did.** PS1 code now goes through GCC, then
+  [maspsx](https://github.com/mkst/maspsx) (which imitates Sony's assembler, ASPSX), then a modern GNU `as`, as PS1
+  decomp projects do. The original assembled with plain GNU `as`, which places delay slots and stack restores
+  differently, so hundreds of correct functions missed by a single instruction.
+- **Each function can have its own compiler.** Games mix compiler and assembler versions (Sony's libraries above
+  all). When an attempt comes close, the judge also tries the other GCC version, older ASPSX versions (2.21, 2.34,
+  2.56), `-O1`, and plain GNU `as`. A function that matches one of those keeps it, and regression checks and the
+  export use it.
+- **Automatic re-judging.** When the compiler setup changes, the autopilot judges every best attempt again, which
+  matches the ones that only missed because of the setup, and corrects every stored score.
+- **The GTE from C.** A trusted header of `gte_*` macros (ported from the SynapticDreams fork) lets agents match code
+  that uses the PS1's geometry coprocessor, which used to be set aside. Raw inline assembly is still refused.
+- **BIOS call stubs set aside** with the name of the BIOS function they call (also ported from SynapticDreams).
+- **Compiler crashes explained.** The Apple Silicon builds of the old PS1 GCCs crash on some warnings and errors.
+  Warnings are turned off there (they never change the code), and when an error still crashes the compiler, the
+  same GCC version built for Intel reports the real message.
+
+### Agents
+
+- **Codex's matches become templates for local models.** Every open function's closest already-matched look-alike
+  is tracked. Helpers on an API model (a small local one, typically) claim those first, with the look-alike's C in
+  their brief, and CLI agents like Codex or Claude Code leave those functions to them while one is running.
+- **Leaner, more useful briefs:** the shared header's relevant declarations inline, matched callees' real
+  signatures, project-wide notes once per claim, and each note shown with its author's match count. The prompt asks
+  agents to trust the brief's assembly over notes.
+- **Long-term memory across games (optional).** With a [Hindsight](https://github.com/vectorize-io/hindsight)
+  server set in Settings, verified matches and accepted header edits are remembered in one bank per compiler, and
+  briefs carry what it recalls, for every kind of agent. Half the claims go without it, at random, so the agents
+  panel can show whether it helps.
+- **Sturdier sessions:** a session that prints nothing for 15 minutes is restarted; a plan's usage limit makes a
+  helper wait instead of stopping; helpers from a killed run release their claims at startup; agents can set a
+  function aside for a person with `flag_for_review`, and you can give it back from its drawer.
+
+### The app
+
+- **It stays responsive.** The autopilot and the permuter run in worker processes, and database reads don't wait
+  behind writes. In the original, busy background work could stall every page load for over a minute.
+- **The permuter gives up when it isn't helping**, instead of spinning on rewrites that never compile.
+- **Export fixes:** each function's source holds only its own definition, and overlays sharing an address no longer
+  take each other's code or names. PS1 games with overlays still don't rebuild byte for byte.
+- **Smaller fixes:** each agent's last hour (matches, compiles) in the agents panel; "Loading" instead of "None yet"
+  while projects load; renames no longer break functions matched meanwhile; the update tests no longer write into
+  your real app-data folder on macOS.
+
+Planned: fine-tuning a local model on matched PS1 code ([plan](docs/plans/qwen-fine-tuning.md)).
+
+---
+
+**Original README below**
+
+---
+
 ## This project is discontinued
 
 I've decided to stop working on decomp.wtf and archive it.
