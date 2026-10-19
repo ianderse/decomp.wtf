@@ -61,7 +61,7 @@ build also rejects (missing headers, project macros) are dropped.
 **What this does not show:** that these builds agree with the Linux i386 builds in this repository's releases. Both
 sides of the comparison come from the same patched sources and scripts, built with a modern clang. The check that
 matters for a decomp is whether functions that match with the released compilers still match with these; we are running
-that on SLUS-01252 (Gran Turismo-era PS1 game, matched functions from its decompilation project) and will add the result
+that on the matched functions of one PS1 game (SLUS-01252; fill in its title) and will add the result
 here before submitting.
 
 ## Notes for the reviewer
