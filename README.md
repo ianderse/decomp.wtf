@@ -32,6 +32,9 @@ produces, and respect the rules of projects that don't want AI-made contribution
 - **The GTE from C.** A trusted header of `gte_*` macros (ported from the SynapticDreams fork) lets agents match code
   that uses the PS1's geometry coprocessor, which used to be set aside. Raw inline assembly is still refused.
 - **BIOS call stubs set aside** with the name of the BIOS function they call (also ported from SynapticDreams).
+- **Sony's library functions found and set aside.** Install "PSY-Q library signatures" from Compilers & tools
+  (lab313ru's public set, fetched on request and never bundled), and functions a signature covers whole are set
+  aside with their real names. The matcher is ported from SynapticDreams.
 - **Compiler crashes explained.** The Apple Silicon builds of the old PS1 GCCs crash on some warnings and errors.
   Warnings are turned off there (they never change the code), and when an error still crashes the compiler, the
   same GCC version built for Intel reports the real message.
@@ -48,6 +51,9 @@ produces, and respect the rules of projects that don't want AI-made contribution
   server set in Settings, verified matches and accepted header edits are remembered in one bank per compiler, and
   briefs carry what it recalls, for every kind of agent. Half the claims go without it, at random, so the agents
   panel can show whether it helps.
+- **Tiered Claude Code helpers (optional).** With "Pick the model per function" switched on in the launcher, each
+  session picks Haiku, Sonnet or Opus for the function it's about to claim, by how close that function is to
+  matching (ported from SynapticDreams).
 - **Sturdier sessions:** a session that prints nothing for 15 minutes is restarted; a plan's usage limit makes a
   helper wait instead of stopping; helpers from a killed run release their claims at startup; agents can set a
   function aside for a person with `flag_for_review`, and you can give it back from its drawer.
@@ -63,7 +69,8 @@ produces, and respect the rules of projects that don't want AI-made contribution
   while projects load; renames no longer break functions matched meanwhile; the update tests no longer write into
   your real app-data folder on macOS.
 
-Planned: fine-tuning a local model on matched PS1 code ([plan](docs/plans/qwen-fine-tuning.md)).
+Planned: more PS1 compiler versions built natively on macOS ([plan](docs/plans/m5-psx-compilers.md)), and
+fine-tuning a local model on matched PS1 code ([plan](docs/plans/qwen-fine-tuning.md)).
 
 ---
 
