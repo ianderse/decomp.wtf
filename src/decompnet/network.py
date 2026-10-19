@@ -376,9 +376,7 @@ class Network:
             calls = sorted(set(re.findall(r"\bjal\s+(\w+)", asm)))
             query = (f"How to write C that {bank} compiles to exactly this {fn['n_insns']}-instruction function"
                      + (f" (it calls {', '.join(calls[:8])})" if calls else "") + ":\n" + "\n".join(asm.splitlines()[:40]))
-            texts = self.memory.recall(bank, query)
-            if not self.memory.up:  # it stopped answering just now: not a claim that had memory
-                return []
+            texts = self.memory.recall(bank, query)  # (a timeout still counts: recalled=0, or the arms would skew)
         with self.store.tx() as db:
             db.execute("INSERT INTO memory_ab(function_id,agent_id,project_id,arm,claimed_at,recalled) VALUES(?,?,?,?,?,?)",
                        (fn["id"], agent.id, proj["id"], arm, time.time(), len(texts) if arm == "memory" else None))

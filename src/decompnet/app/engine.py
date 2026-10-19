@@ -613,6 +613,9 @@ class RomNetwork(Network):
             lines.append("calls: " + ", ".join(syms.label(a) for a in calls[:30]))
         if callers:
             lines.append("called by: " + ", ".join(syms.label(a) for a in callers[:30]))
+        if fn["status"] != "matched" and (sigs := self._callee_signatures(proj, fn, calls)):
+            lines += ["", "### Signatures of functions it calls (from their matching C; declare them like this)",
+                      "```c", *sigs, "```"]
         used = sorted(x["uses"].get(fn["vram"], ()))
         if used:
             lines += ["", "### Data it uses (declare what you need as extern in your source, or in context.h)"]
@@ -657,6 +660,26 @@ class RomNetwork(Network):
         lines += ["", "Names: use the names shown here (or rename_symbol to give an address a real name). "
                       "Your code is linked at this function's address and must reproduce the ROM bytes exactly."]
         return lines
+
+    def _callee_signatures(self, proj, fn, calls: list[int], limit: int = 12) -> list[str]:
+        """The real prototypes of matched callees the header doesn't declare: an agent guessing a callee's signature
+        gets argument types (and so registers and extensions) wrong, or a "conflicting types" error later."""
+        if not calls:
+            return []
+        header = self._context(proj["id"], fn["unit"])["header"]
+        rows = self.store.all(f"SELECT name, matched_source FROM functions WHERE project_id=? AND status='matched' "
+                              f"AND vram IN ({','.join('?' * len(calls[:60]))})", proj["id"], *calls[:60])
+        out = []
+        for r in rows:
+            name = r["name"]
+            if re.search(rf"\b{re.escape(name)}\s*\(", header):
+                continue  # context.h has it (the brief shows it with the header's declarations)
+            m = re.search(rf"(?m)^([^\n;{{}}#]*\b{re.escape(name)}\s*\([^;{{}}]*\))\s*\{{", r["matched_source"] or "")
+            if m:
+                out.append(" ".join(m.group(1).split()) + ";")
+            if len(out) >= limit:
+                break
+        return out
 
     def _rom_ops(self, proj) -> dict[tuple[int, int], list[str]]:
         """(vram, size) -> mnemonics of every function, cached (renames keep addresses; splits change sizes)."""
