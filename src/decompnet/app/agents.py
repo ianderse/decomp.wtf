@@ -188,9 +188,9 @@ TIERS = {
     "fresh": (SONNET, "medium"),       # nothing compiled yet: the first structural attempt
     "structural": (SONNET, "medium"),  # far off: the structure is still to find
 }
-# Codex: Astra for the hardest, Sol (the workhorse) for normal work, Luna (fast, cheap) for near misses
+# Codex: Sol (the workhorse) for normal work and, on high effort, the hardest; Luna (fast, cheap) for near misses
 CODEX_TIERS = {
-    "escalated": ("gpt-6-astra", "high"),
+    "escalated": ("gpt-6.1-sol", "high"),
     "near_miss": ("gpt-6-luna", "medium"),
     "mechanical": ("gpt-6-luna", "medium"),
     "fresh": ("gpt-6.1-sol", "medium"),
@@ -284,7 +284,7 @@ def models(kind: str, path: str | None) -> list[dict]:
         return [{"id": TIERED, "name": "Tiered", "note": "Haiku, Sonnet or Opus picked per function"}] + \
             [{"id": i, "name": n, "note": note} for i, n, note in CLAUDE_MODELS]
     if kind == "codex":
-        return [{"id": TIERED, "name": "Tiered", "note": "Astra, Sol or Luna picked per function"}]
+        return [{"id": TIERED, "name": "Tiered", "note": "Sol or Luna picked per function"}]
     if kind not in ("opencode", "antigravity") or not path:
         return []
     cached = _models.get(kind)

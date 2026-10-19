@@ -1586,7 +1586,7 @@ function renderLauncher(box, compact = false) {
   } else {
     const opts = modelOptions(a).filter((o) => o.id !== "tiered");  // (Claude Code's tiers: the switch below)
     const tierText = { claude: "Haiku for near misses, Sonnet for new or far-off functions, Opus for ones still stuck after 10 attempts",
-      codex: "GPT-6-Luna for near misses, GPT-6.1-Sol for new or far-off functions, GPT-6-Astra for ones still stuck after 10 attempts" }[a.id];
+      codex: "GPT-6-Luna for near misses, GPT-6.1-Sol for new or far-off functions, and on high effort for ones still stuck after 10 attempts" }[a.id];
     const tiered = !!tierText && LZ.model === "tiered";
     const known = opts.some((o) => o.id === LZ.model);
     const tierSwitch = tierText ? `<label class="check"><input type="checkbox" data-f="tiered" ${tiered ? "checked" : ""}><span><b>Pick the model per function</b>: ${tierText}. Each session does one function.</span></label>` : "";
