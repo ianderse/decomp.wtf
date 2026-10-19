@@ -1483,7 +1483,7 @@ function renderSessions(sessions) {
     const by = {};
     ab.forEach((r) => { (by[r.agent] = by[r.agent] || {})[r.arm] = r; });
     const pct = (r) => (r && r.claims ? `${r.matched || 0}/${r.claims} (${Math.round((100 * (r.matched || 0)) / r.claims)}%)` : "–");
-    box.insertAdjacentHTML("beforeend", `<div class="session ext"><span class="facts-line"><b>Memory A/B</b> (claims matched, with / without memory): ${Object.entries(by).map(([a, r]) => `${esc(a)} ${pct(r.memory)} / ${pct(r.control)}`).join(" · ")}</span></div>`);
+    box.insertAdjacentHTML("beforeend", `<div class="session ext"><span class="facts-line"><b>Memory A/B</b> (claims matched, with / without memory): ${Object.entries(by).map(([a, r]) => `${esc(a)} ${pct(r.memory)}${r.memory ? ` [${r.memory.with_memories || 0} got recalls]` : ""} / ${pct(r.control)}`).join(" · ")}</span></div>`);
   }
   box.querySelectorAll("[data-stop]").forEach((b) => {
     b.onclick = async () => {

@@ -98,6 +98,11 @@ class Memory:
                 log.info("memory: retain failed: %s", e)
         self._pool.submit(send)
 
+    @property
+    def up(self) -> bool:
+        """False for a while after the server didn't answer."""
+        return time.time() >= self._down_until
+
     def recall(self, bank: str, query: str, max_tokens: int = 700, limit: int = 5) -> list[str]:
         """What the bank knows that bears on `query`: up to `limit` short texts, best first ([] when unreachable)."""
         now = time.time()
@@ -111,6 +116,12 @@ class Memory:
         try:
             res = self._post(f"/v1/default/banks/{self._bank(bank)}/memories/recall",
                              {"query": query, "budget": "low", "max_tokens": max_tokens}, self.timeout)
+        except urllib.error.HTTPError as e:
+            if e.code == 404:  # no bank yet: nothing remembered with this compiler so far (the server is fine)
+                return []
+            log.info("memory: recall failed (%s); trying again in 5 minutes", e)
+            self._down_until = now + 300
+            return []
         except Exception as e:
             log.info("memory: recall failed (%s); trying again in 5 minutes", e)
             self._down_until = now + 300

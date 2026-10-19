@@ -365,19 +365,21 @@ class Network:
         """What memory has for a claimed function, for half the claims (chosen at random and recorded: memory_ab,
         so whether it helps is measured, not assumed); the other half go without."""
         bank = self._memory_bank(proj, fn)
-        if self.memory is None or bank is None or agent.name in MACHINE_AGENTS:
-            return []
+        if self.memory is None or bank is None or agent.name in MACHINE_AGENTS or not self.memory.up:
+            return []  # (while the server doesn't answer, claims stay out of the comparison)
         arm = "memory" if random.random() < self.memory.share else "control"
+        texts: list[str] = []
+        if arm == "memory":
+            asm = scoring.compact_asm(self._asm_text(fn, proj))
+            calls = sorted(set(re.findall(r"\bjal\s+(\w+)", asm)))
+            query = (f"How to write C that {bank} compiles to exactly this {fn['n_insns']}-instruction function"
+                     + (f" (it calls {', '.join(calls[:8])})" if calls else "") + ":\n" + "\n".join(asm.splitlines()[:40]))
+            texts = self.memory.recall(bank, query)
+            if not self.memory.up:  # it stopped answering just now: not a claim that had memory
+                return []
         with self.store.tx() as db:
-            db.execute("INSERT INTO memory_ab(function_id,agent_id,project_id,arm,claimed_at) VALUES(?,?,?,?,?)",
-                       (fn["id"], agent.id, proj["id"], arm, time.time()))
-        if arm == "control":
-            return []
-        asm = scoring.compact_asm(self._asm_text(fn, proj))
-        calls = sorted(set(re.findall(r"\bjal\s+(\w+)", asm)))
-        query = (f"How to write C that {bank} compiles to exactly this {fn['n_insns']}-instruction function"
-                 + (f" (it calls {', '.join(calls[:8])})" if calls else "") + ":\n" + "\n".join(asm.splitlines()[:40]))
-        texts = self.memory.recall(bank, query)
+            db.execute("INSERT INTO memory_ab(function_id,agent_id,project_id,arm,claimed_at,recalled) VALUES(?,?,?,?,?,?)",
+                       (fn["id"], agent.id, proj["id"], arm, time.time(), len(texts) if arm == "memory" else None))
         if not texts:
             return []
         return ["", f"### From long-term memory ({bank}: what earlier matches taught, in any game; hints: check them "
@@ -427,7 +429,8 @@ class Network:
     def memory_report(self, project_id: int) -> list[dict]:
         """The memory A/B so far: per arm and agent, claims and how many the agent matched while holding them."""
         rows = self.store.all(
-            "SELECT m.arm, a.name AS agent, COUNT(*) AS claims, SUM(f.status='matched' AND f.matched_agent_id=m.agent_id "
+            "SELECT m.arm, a.name AS agent, COUNT(*) AS claims, SUM(COALESCE(m.recalled, 0) > 0) AS with_memories, "
+            "SUM(f.status='matched' AND f.matched_agent_id=m.agent_id "
             "AND f.matched_at >= m.claimed_at AND f.matched_at < m.claimed_at + 7200) AS matched FROM memory_ab m "
             "JOIN agents a ON a.id=m.agent_id JOIN functions f ON f.id=m.function_id WHERE m.project_id=? "
             "GROUP BY m.arm, a.name ORDER BY a.name, m.arm", project_id)
