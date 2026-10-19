@@ -49,9 +49,20 @@ PRELUDE = """.set noat
 _TC_ROOT = "$HOME/Library/Application Support/decompnet/toolchains"
 
 
+# maspsx needs Python 3.10 or newer, and a Mac's /usr/bin/python3 is 3.9: PY=/path/to/python overrides the search
+_FIND_PYTHON = (
+    'if [ -z "$PY" ]; then\n'
+    '  for p in python3.14 python3.13 python3.12 python3.11 python3.10 python3 python; do\n'
+    '    q="$(command -v $p 2>/dev/null)" && "$q" -c "import sys; sys.exit(sys.version_info < (3, 10))" 2>/dev/null && PY="$q" && break\n'
+    '  done\n'
+    'fi\n'
+    '[ -n "$PY" ] || { echo "compile.sh needs Python 3.10 or newer (maspsx): set PY=/path/to/python" >&2; exit 1; }\n'
+    'export PY\n')
+
+
 def _compile_sh(net, proj, fn) -> str:
     """The function's compile command as a shell script for the permuter machine: its toolchain folder is $TC (that
-    machine's), Python is its python3, and compile.sh's arguments (input.c -o output.o) stand in for src and obj."""
+    machine's), Python is the first 3.10+ it finds (or $PY), and compile.sh's arguments (input.c -o output.o) stand in for src and obj."""
     import sys
     cfg = json.loads(proj["config"])
     if (own := net.fn_toolchain(fn)):
@@ -63,15 +74,16 @@ def _compile_sh(net, proj, fn) -> str:
         if a in ("{src}", "{obj}"):
             words.append('"$IN"' if a == "{src}" else '"$OUT"')
             continue
-        a = a.replace("{include}", ".").replace(sys.executable, "python3").replace(root, "$TC")
+        a = a.replace("{include}", ".").replace(sys.executable, "$PY").replace(root, "$TC")
         if "\n" in a or "$1" in a or ";" in a:  # a sh -c script: its own sh expands $TC and its arguments
             words.append(shlex.quote(a))
-        elif "$TC" in a:
+        elif "$TC" in a or "$PY" in a:
             words.append('"' + a.replace('"', '\\"') + '"')
         else:
             words.append(shlex.quote(a))
     return ("#!/bin/sh\n# decomp.wtf's compile command for " + fn["name"] + "\n"
             'export TC="$HOME/Library/Application Support/decompnet/toolchains"\n'
+            + _FIND_PYTHON +
             'IN="$1"; OUT="$3"\n'
             "exec " + " ".join(words) + "\n")
 
