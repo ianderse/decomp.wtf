@@ -981,6 +981,26 @@ def build(net: RomNetwork, home: Path, port: int, secret: str):
     def checking() -> bool:
         return settings.data.get("check_updates", True) is not False and os.environ.get("DECOMP_UPDATES") != "off"
 
+    def watch_headers() -> None:
+        """Agents grow the shared header (types, prototypes); after enough of that, the autopilot's machine drafts
+        are tried again with it: drafts that missed for lack of a type can match now, for free."""
+        while True:
+            time.sleep(600)
+            if not settings.data.get("autopilot", True):
+                continue
+            try:
+                for row in net.store.all("SELECT slug, config FROM projects"):
+                    slug = row["slug"]
+                    if net.fork_slug(slug) or slug in net.links or (net.autopilots.get(slug) or {}).get("state") == "running":
+                        continue
+                    if not any(s.slug == slug and s.state in ("starting", "working", "waiting")
+                               for s in manager.sessions.values()):
+                        continue  # nobody is growing it
+                    if net.header_grew(slug):
+                        net.start_autopilot(slug)
+            except Exception as e:  # the next look, in ten minutes
+                logging.getLogger("decomp.wtf").info("header watch: %s", e)
+
     def watch_updates() -> None:
         """Check now and then; with "install updates automatically" on, install one while no helper is working."""
         time.sleep(20)
@@ -1250,6 +1270,8 @@ def build(net: RomNetwork, home: Path, port: int, secret: str):
         manager.on_stop()
     updater = updates.Updater(before_restart, port, secret)
     threading.Thread(target=watch_updates, daemon=True, name="updates").start()
+    if net.out_of_process:  # (the app: the autopilot runs in a worker process)
+        threading.Thread(target=watch_headers, daemon=True, name="headers").start()
 
     security = TransportSecuritySettings(enable_dns_rebinding_protection=True, allowed_hosts=sorted(allowed_hosts),
                                          allowed_origins=[f"http://{h}" for h in sorted(allowed_hosts)])

@@ -157,7 +157,7 @@ def _claim(net: RomNetwork, agent: Agent, slug: str, function: str, strategy: st
     """A claim; one asked for that's matched, hand-written assembly or someone else's is the next free function
     instead (an agent asking for those has nothing better to do than the next one, and is told why). count > 1: a
     batch of small ones."""
-    strategy = strategy or ("finish" if net.fork_slug(slug) else "easiest")
+    strategy = strategy or net.agent_strategy.get(agent.id) or ("finish" if net.fork_slug(slug) else "easiest")
     if not function and int(count or 1) > 1:
         return net.claim_many(agent, slug, int(count), strategy)
     try:

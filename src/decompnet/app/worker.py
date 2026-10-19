@@ -139,6 +139,25 @@ def main(argv: list[str]) -> int:
             return 0
         stop = state.stop
         finished = lambda: state.state != "running"
+    elif kind == "alike":  # look-alikes for every open function, again whenever agents matched more
+        state = {"state": "running", "templates": 0, "refreshed_at": 0.0}
+        stop = threading.Event()
+        finished = lambda: state["state"] != "running"
+
+        def loop() -> None:
+            last = None
+            try:
+                while not stop.is_set():
+                    proj = net.project_row(slug)
+                    n = net.store.one("SELECT COUNT(*) AS n FROM functions WHERE project_id=? AND status='matched'",
+                                      proj["id"])["n"]
+                    if n != last:
+                        state["templates"] = net.refresh_alikes(slug, stop)
+                        state["refreshed_at"], last = time.time(), n
+                    stop.wait(600)
+            finally:
+                state["state"] = "stopped" if stop.is_set() else "done"
+        threading.Thread(target=loop, daemon=True, name=f"alike-{slug}").start()
     else:
         print(f"unknown worker {kind!r}", file=sys.stderr)
         return 2

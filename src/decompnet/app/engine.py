@@ -142,6 +142,7 @@ class RomNetwork(Network):
         # the app runs the autopilot and the permuter in worker processes (worker.py); tests and the workers
         # themselves run them as threads
         self.out_of_process = False
+        self.alike_jobs: dict[str, dict] = {}  # slug -> the look-alike refresher's progress (worker.py)
         from .forkengine import ForkEngine  # forks build on this class's claims, attempts and live view
         from .permute import Permuter
         from .twins import Twins
@@ -626,15 +627,33 @@ class RomNetwork(Network):
         twin = self._twin_lines(proj, fn) if fn["status"] != "matched" else []
         lines += twin
         alike = [] if twin else [(r, sim) for r, sim in self.similar(proj, fn, top=3) if r["status"] == "matched"]
+        try:  # the closest matched one the refresher found (it ranks against matched functions only)
+            meta = json.loads(fn["meta"] or "{}")
+        except (ValueError, IndexError, KeyError):
+            meta = {}
+        if not twin and meta.get("alike") and (meta.get("alike_sim") or 0) >= 0.6 and \
+                meta["alike"] not in {r["name"] for r, _ in alike}:
+            row = self.store.one("SELECT name, status FROM functions WHERE project_id=? AND name=?", proj["id"], meta["alike"])
+            if row is not None and row["status"] == "matched":
+                alike = sorted([*alike, (row, meta["alike_sim"])], key=lambda x: -x[1])
         if alike:
             lines += ["", "### Looks like (already matched; read with get_function)",
                       ", ".join(f"{r['name']} ({sim * 100:.0f}% similar)" for r, sim in alike)]
             r, sim = alike[0]
             src = self.store.one("SELECT matched_source FROM functions WHERE project_id=? AND name=?", proj["id"], r["name"])
-            if sim >= 0.8 and src and src["matched_source"] and len(src["matched_source"]) <= 3000:
+            text = src["matched_source"] if src and src["matched_source"] else ""
+            if text:  # only its own definition (it may have been matched in one compile with others)
+                from ..rom.export import own_source
+                words = sorted(set(re.findall(r"\b[A-Za-z_]\w*\b", text)))
+                defined = {x["name"] for x in self.store.all(
+                    f"SELECT name FROM functions WHERE project_id=? AND name IN ({','.join('?' * len(words))})",
+                    proj["id"], *words)} if words else set()
+                text = own_source(text, r["name"], defined)
+            if sim >= 0.6 and text and len(text) <= 3000:
                 # nearly the same code: its matching C is the best starting point there is (saves a tool call)
-                lines += [f"Matching C of {r['name']} ({sim * 100:.0f}% similar): start from this",
-                          "```c", src["matched_source"].strip(), "```"]
+                lines += [f"Matching C of {r['name']} ({sim * 100:.0f}% similar): start from this"
+                          + ("" if sim >= 0.8 else " (adapt it to this function's instructions)"),
+                          "```c", text.strip(), "```"]
         lines += ["", "Names: use the names shown here (or rename_symbol to give an address a real name). "
                       "Your code is linked at this function's address and must reproduce the ROM bytes exactly."]
         return lines
@@ -655,6 +674,45 @@ class RomNetwork(Network):
         for key in set(cache) - live:
             del cache[key]
         return cache
+
+    def refresh_alikes(self, slug: str, stop=None) -> int:
+        """Each open function's closest matched look-alike, kept in functions.meta (alike, alike_sim): helpers that do
+        best with a template (a small local model) claim those first, and their brief carries its matching C. Every
+        match an agent makes becomes a template for the functions that look like it. Returns how many have one."""
+        proj = self._project(slug)
+        ops = self._rom_ops(proj)
+        rows = self.store.all("SELECT id, name, vram, size, status FROM functions WHERE project_id=? AND target IS NOT NULL",
+                              proj["id"])
+        matched = {(r["vram"], r["size"]): r["name"] for r in rows if r["status"] == "matched"}
+        cands = {f"{v}:{n}": ops[(v, n)] for (v, n) in matched if (v, n) in ops}
+        found, updates = 0, []
+        for r in rows:
+            if stop is not None and stop.is_set():
+                return found
+            key = (r["vram"], r["size"])
+            if r["status"] != "open" or key not in ops:
+                continue
+            hits = similarity.rank(ops[key], cands, top=1)
+            if hits:
+                v, n = (int(x) for x in hits[0][0].split(":"))
+                updates.append((matched[(v, n)], round(hits[0][1], 3), r["id"]))
+                found += 1
+            else:
+                updates.append((None, 0, r["id"]))
+        with self.store.tx() as db:
+            db.executemany("UPDATE functions SET meta=json_set(COALESCE(meta, '{}'), '$.alike', ?, '$.alike_sim', ?) "
+                           "WHERE id=?", updates)
+        return found
+
+    def start_alikes(self, slug: str) -> None:
+        """Keep the look-alikes current while agents work (worker.py: its own process, as it compares thousands)."""
+        if not self.out_of_process or self.fork_slug(slug) or slug in self.links:
+            return
+        if (st := self.alike_jobs.get(slug)) is not None and st.get("state") == "running":
+            return
+        from .worker import BackgroundProc, ProcStop
+        st = self.alike_jobs[slug] = {"state": "running", "templates": 0}
+        st["stop"] = ProcStop(BackgroundProc("alike", slug, self.store.path, self.workspace, st))
 
     def similar(self, proj, fn, top: int = 5) -> list[tuple[dict, float]]:
         """Functions whose instructions look like `fn`'s, matched ones first: [(row, similarity)]."""
@@ -1460,6 +1518,16 @@ class RomNetwork(Network):
         self.autopilots[slug] = state
         return state
 
+    def header_grew(self, slug: str, by: int = 10) -> bool:
+        """The shared header has `by` or more versions the autopilot's last drafts didn't have (agents added types
+        and prototypes since): m2c's drafts are better with them, and the next run may match what they couldn't."""
+        proj = self._project(slug)
+        last = (self.cfg(proj).get("autopilot") or {}).get("context_version")
+        if last is None:
+            return False  # never ran with this bookkeeping: the next run that ends records it
+        now = self.store.one("SELECT MAX(version) AS v FROM context_versions WHERE project_id=?", proj["id"])["v"] or 0
+        return now - last >= by
+
     def stop_autopilot(self, slug: str) -> None:
         if (state := self.autopilots.get(slug)) and state["state"] == "running":
             state["stop"].set()
@@ -1548,6 +1616,8 @@ class RomNetwork(Network):
         agent, _ = self.local_agent("autopilot")
         proj = self._project(slug)
         try_one = try_one or self._autopilot_one
+        state["context_version"] = self.store.one("SELECT MAX(version) AS v FROM context_versions WHERE project_id=?",
+                                                  proj["id"])["v"] or 0  # its drafts are as good as the header was
         if not self.fork_slug(slug) and slug not in self.links:
             try:  # the way code is judged changed since last time: every best attempt, judged again, first
                 self._rejudge(proj, agent, state, workers)
@@ -1587,7 +1657,7 @@ class RomNetwork(Network):
             with self.store.tx() as db:
                 cfg = json.loads(db.execute("SELECT config FROM projects WHERE id=?", (proj["id"],)).fetchone()["config"])
                 cfg["autopilot"] = {k: state.get(k) for k in ("total", "tried", "matched", "near", "twins", "started_at",
-                                                              "finished_at")}
+                                                              "finished_at", "context_version")}
                 db.execute("UPDATE projects SET config=? WHERE id=?", (json.dumps(cfg), proj["id"]))
             drafts = state["matched"] - state.get("twins", 0) - state.get("rejudge_matched", 0)
             if drafts:  # (twins announce their own)

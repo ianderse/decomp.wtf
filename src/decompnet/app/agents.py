@@ -588,6 +588,8 @@ class Manager:
         try:
             self.net.twins.refresh(slug)
             self.net.permuter.start(slug)  # near misses agents leave, on spare CPU
+            if hasattr(self.net, "start_alikes"):
+                self.net.start_alikes(slug)  # matched look-alikes: templates for the helpers that need them
         except Exception:  # agents work without them
             pass
         with self._lock:
@@ -615,6 +617,25 @@ class Manager:
 
         threading.Thread(target=run, daemon=True, name=f"start-files-{slug}").start()
 
+    def _route(self, slug: str) -> None:
+        """Who claims what on a game started from scratch: a helper on an API model (a small local one, typically)
+        takes the functions with a matched look-alike to adapt; a CLI agent (Claude Code, Codex...) working next to
+        one leaves those small templated functions to it and takes the rest. Alone, each takes the usual order."""
+        if not hasattr(self.net, "agent_strategy") or self.net.fork_slug(slug):
+            return
+        mine = [s for s in self.sessions.values() if s.slug == slug]
+        live = [s for s in mine if s.state in ("starting", "working", "waiting") and not s.stop.is_set()]
+        local = any(s.kind == "api" for s in live)
+        for s in mine:
+            row = self.net.store.one("SELECT id FROM agents WHERE name=?", s.agent_name)
+            if row is None:
+                continue
+            strategy = None if s not in live else "templates" if s.kind == "api" else "strong" if local else None
+            if strategy:
+                self.net.agent_strategy[row["id"]] = strategy
+            else:
+                self.net.agent_strategy.pop(row["id"], None)
+
     def running(self) -> list[dict]:
         """The helpers that should keep working: resumed by the server after the app restarts."""
         return [{"kind": s.kind, "slug": s.slug, "options": {k: v for k, v in s.options.items() if k != "api_key"}}
@@ -629,6 +650,11 @@ class Manager:
                     _terminate(s.proc)
                 if s.state not in ("error",):
                     s.state = "stopped"
+        for slug in {s.slug for s in self.sessions.values()}:  # the agents left behind take everything again
+            try:
+                self._route(slug)
+            except Exception:
+                pass
         if sid is not None:
             self.persist(self.running())
 
@@ -689,6 +715,10 @@ class Manager:
                            "(seconds; a minute the first time)")
             twins.ordered.wait(120)
         while not s.stop.is_set():
+            try:
+                self._route(s.slug)
+            except Exception:  # the usual order then
+                pass
             if self._left(s.slug) == 0:
                 s.push("info", "nothing left to decompile here 🎉")
                 break

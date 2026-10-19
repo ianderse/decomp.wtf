@@ -46,6 +46,13 @@ STRATEGIES = {
     # near-misses, the ones given up on least first (else every agent resumes the same stuck one)
     "closest": "f.best_score IS NULL, f.abandons ASC, CAST(f.best_score AS REAL) / (f.n_insns * 100) ASC",
     "hardest": "f.n_insns DESC",
+    # functions with a matched look-alike (functions.meta alike_sim, see RomNetwork.refresh_alikes), closest first:
+    # for helpers that do best adapting a template (a small local model)
+    "templates": "(json_extract(f.meta, '$.alike_sim') >= 0.6) DESC, json_extract(f.meta, '$.alike_sim') DESC, "
+                 "f.abandons > 0, f.n_insns ASC",
+    # a strong agent next to such helpers: the small templated functions are left to them
+    "strong": _TWINS + "(COALESCE(json_extract(f.meta, '$.alike_sim'), 0) >= 0.6 AND f.n_insns <= 120) ASC, "
+                       "f.abandons > 0, f.n_insns ASC",
     "random": "RANDOM()",
 }
 
@@ -156,6 +163,7 @@ def _ago(ts: float | None) -> str:
 class Network:
     def __init__(self, db_path: str | Path, claim_ttl: int = CLAIM_TTL):
         self.store = Store(db_path)
+        self.agent_strategy: dict[int, str] = {}  # agent id -> its default claim order (helpers, see agents.Manager)
         self.claim_ttl = claim_ttl
         self._pool = ThreadPoolExecutor(max_workers=8)
 
