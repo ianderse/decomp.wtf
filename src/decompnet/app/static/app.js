@@ -2304,7 +2304,13 @@ function renderAutopilot(ov) {
   const perm = pm && (pm.tried || pm.state === "running")
     ? ` The permuter ${pm.state === "running" ? `is rewriting near misses${pm.current ? ` (now ${pm.current})` : ""}` : "rewrote near misses"}: ${plural(pm.tried, "function")}, ${(pm.variants || 0).toLocaleString()} rewrites judged, ${pm.improved || 0} improved, ${pm.matched} matched${pm.why ? `; stopped after ${pm.why}` : ""}.` : "";
   const twinsDone = (ap && ap.twins) || (tw && tw.matched) || 0;
-  if (running && ap.phase === "rejudge") {
+  if (running && ap.phase === "survey") {
+    $("apTitle").textContent = "Autopilot: finding which compilers built this game";
+    $("apSub").textContent = `${(ap.surveyed || 0).toLocaleString()} of ${(ap.survey_total || 0).toLocaleString()} stuck functions tried with every PS1 compiler setup. The ones that match become this game's alternates.${perm}`;
+    $("apBar").hidden = false;
+    $("apBar").firstElementChild.style.width = `${(100 * (ap.surveyed || 0)) / Math.max(1, ap.survey_total || 0)}%`;
+    $("apBtn").textContent = "Stop";
+  } else if (running && ap.phase === "rejudge") {
     $("apTitle").textContent = `Autopilot: judging every best attempt again (the compiler setup changed) · ${ap.matched.toLocaleString()} matched`;
     $("apSub").textContent = `${(ap.rejudged || 0).toLocaleString()} of ${(ap.rejudge_total || 0).toLocaleString()} checked. Attempts that only missed because of how they were assembled match now.${perm}`;
     $("apBar").hidden = false;

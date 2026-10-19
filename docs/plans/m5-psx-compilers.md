@@ -83,3 +83,40 @@ Yes, that's fine. The two machines don't share a database: each app has its own 
   only needed for the new code to take effect.
 - **Don't push the same file from both machines at once.** Work on one machine at a time per change, or pull before
   editing.
+
+## Automation (2026-10-19)
+
+Two halves: the M5 Ultra builds compilers, and the app works out per game whether they help.
+
+### In the app: the compiler survey (done)
+
+Whenever the registry's set of PS1 compilers changes (a new build pulled in), the autopilot's first step on each PS1
+game installs the missing ones and tries every PS1 compiler setup (each GCC as is, with ASPSX 2.21, 2.34 and 2.56,
+at `-O1`, and with plain GNU `as`) on up to 600 of the game's stuck best attempts. The setups that match some become
+that game's alternates (`compiler.alternates` in its config), most matches first. The re-judge that follows uses
+them on every best attempt. Installing a PS1 compiler from Compilers & tools starts the survey too. So a new build
+only has to be registered: no measuring by hand, and no list of alternates to maintain in code.
+
+### On the M5 Ultra: the build loop
+
+`docs/plans/psx-gcc-build-all.sh <old-gcc checkout> [versions]` runs `psx-gcc-macos.sh` for each version not built
+yet, smoke-tests it (a plain function, one with a warning, one with an error), packages it into `toolchain-builds/`
+and prints the `toolchains.toml` part with its checksum. Failures are logged in `toolchain-builds/logs/` and
+skipped. `psx-gcc-macos.sh` knows only 2.6.0 and 2.6.3 so far: each other version needs its source URL and patch
+list (from its Dockerfile in decompals/old-gcc) added to the two `case` blocks.
+
+### The agent's task (paste into a Claude Code session on the M5 Ultra)
+
+> In ~/decomp.wtf (pull main first): build the remaining PSY-Q GCC versions natively on macOS: 2.8.0, 2.91.66,
+> 2.95.2, then 2.5.7, and, if Rosetta is installed, Intel builds of 2.6.0, 2.6.3, 2.7.2 and 2.8.1. Follow
+> docs/plans/m5-psx-compilers.md. For each version: add its source URL and the patches from its Dockerfile in
+> decompals/old-gcc (cloned next to the repo) to docs/plans/psx-gcc-macos.sh, run
+> `docs/plans/psx-gcc-build-all.sh ../old-gcc <version>`, and fix what modern clang rejects (K&R prototypes,
+> varargs/stdarg clashes with Apple's SDK, implicit int, sys_nerr declarations) until it builds and passes the smoke
+> test. Then register it in src/decompnet/toolchains.toml the way gcc-2.6.3-psx is (the same cmd template, requires,
+> no_warnings_on and explain_with if the smoke test says it crashes, line_comments = false before GCC 2.7), add it to
+> COMPILERS and SHORT_NAMES in src/decompnet/app/engine.py, and commit the tarball and the entry. Don't add it to
+> ALTERNATES in network.py: the app's compiler survey decides per game. Run the test suite before each commit
+> (uv run pytest -q; compare with main's results, which have known failures), push to main on github.com/ianderse/decomp.wtf,
+> and note in this file what built, what didn't and why. Give up on a version after a reasonable effort and say
+> what blocks it.

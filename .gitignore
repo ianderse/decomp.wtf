@@ -27,3 +27,5 @@ projects/zlib-n64/original/
 deploy/
 scripts/
 .DS_Store
+toolchain-builds/build-*/
+toolchain-builds/logs/

@@ -298,7 +298,7 @@ def build(net: RomNetwork, home: Path, port: int, secret: str):
     if net.out_of_process and settings.data.get("autopilot", True):
         for row in net.store.all("SELECT * FROM projects"):
             if net.is_rom(row) and not net.fork_slug(row["slug"]) and row["slug"] not in net.links \
-                    and json.loads(row["config"]).get("judged_with") != net.judge_signature(row):
+                    and (json.loads(row["config"]).get("judged_with") != net.judge_signature(row) or net.survey_due(row)):
                 try:
                     net.start_autopilot(row["slug"])
                 except NetworkError:
@@ -831,6 +831,14 @@ def build(net: RomNetwork, home: Path, port: int, secret: str):
 
         def work(log):
             toolchains.install(tid, accept_license=accept, log=log)
+            if toolchains.get(tid).platform == "PS1" and net.out_of_process:  # a new PS1 compiler: survey with it
+                for row in net.store.all("SELECT * FROM projects"):
+                    if net.survey_due(row) and (net.autopilots.get(row["slug"]) or {}).get("state") != "running":
+                        try:
+                            net.start_autopilot(row["slug"])
+                            log(f"{row['slug']}: the autopilot tries it on the game's stuck functions")
+                        except NetworkError:
+                            pass
             if tid == "psyq-signatures":  # find Sony's library functions in the PS1 projects there are, now
                 for row in net.store.all("SELECT slug FROM projects"):
                     try:

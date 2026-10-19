@@ -1664,8 +1664,101 @@ class RomNetwork(Network):
             cfg = compiler_config(Path(proj["root"]), json.loads(proj["config"]))
         except Exception:  # not installed yet: nothing judged with it either
             return None
-        main = json.loads(proj["config"]).get("compiler", {}).get("toolchain")  # (and what a function may match with)
-        return hashlib.sha1(json.dumps([cfg.cmd, ALTERNATES.get(main, ())]).encode()).hexdigest()[:16]
+        comp = json.loads(proj["config"]).get("compiler", {})  # (and what a function may match with)
+        alternates = comp.get("alternates", ALTERNATES.get(comp.get("toolchain"), ()))
+        return hashlib.sha1(json.dumps([cfg.cmd, list(alternates)]).encode()).hexdigest()[:16]
+
+    # ------------------------------------------------------------------ the compiler survey (PS1)
+
+    SURVEY_SAMPLE = 600  # stuck best attempts tried with every compiler variant
+
+    def _survey_compilers(self) -> list[str]:
+        """The PS1 compilers this computer can run (registry entries for PS1 with a build for it)."""
+        return sorted(t.id for t in toolchains.registry().values()
+                      if t.platform == "PS1" and t.kind == "compiler" and t.supported and not t.proprietary)
+
+    def survey_due(self, proj) -> bool:
+        cfg = json.loads(proj["config"])
+        return (cfg.get("platform") == "psx" and not self.fork_slug(proj["slug"]) and "toolchain" in cfg.get("compiler", {})
+                and (cfg.get("survey") or {}).get("stamp") != "|".join(self._survey_compilers()))
+
+    def survey(self, proj, state: dict, workers: int = 3) -> dict | None:
+        """Which compilers and assemblers built this game, from its own stuck code: every PS1 compiler this computer
+        has (each with older ASPSX versions, -O1, plain GNU as) tried on a sample of best attempts that don't match.
+        Those that match some become this game's alternates (most matches first), which the judge tries on near misses
+        and the rejudge tries on every best attempt. Runs again when the registry's PS1 compilers change (a new
+        build pulled in), so a new compiler pays off for each game it helps, and costs nothing for the others."""
+        if not self.survey_due(proj):
+            return None
+        cfg = json.loads(proj["config"])
+        main = cfg["compiler"]["toolchain"]
+        state["phase"] = "survey"
+        ids = self._survey_compilers()
+        for tid in ids:  # small, free: install what isn't yet
+            try:
+                toolchains.ensure(tid, log=lambda *_: None)
+            except Exception:
+                pass
+        installed = [t for t in ids if toolchains.installed(t) is not None]
+        variants = [v for t in installed for v in (t, f"{t}@2.21", f"{t}@2.34", f"{t}@2.56", f"{t}/O1", f"{t}:gnu-as")
+                    if v != main]
+        rows = self.store.all("SELECT * FROM functions WHERE project_id=? AND status='open' AND best_source IS NOT NULL "
+                              "ORDER BY attempts DESC, n_insns LIMIT ?", proj["id"], self.SURVEY_SAMPLE)
+        state["survey_total"], state["surveyed"] = len(rows), 0
+        hits: dict[str, int] = {}
+        units = self._unit_contexts(proj["id"])
+
+        def one(fn) -> list[str]:
+            if state["stop"].is_set():
+                return []
+            header = self._context(proj["id"], self._effective_unit(fn, units))["header"]
+            got = []
+            for v in variants:
+                res = self._compile(proj, header, fn["best_source"], toolchain=v)
+                if not res.ok:
+                    continue
+                cand, verdict, _ = self._evaluate(fn, proj, res.obj)
+                if cand is None:
+                    continue
+                if verdict is None:
+                    verdict = cand.fingerprint() == self._target_obj(fn, proj).fingerprint()
+                if verdict:
+                    got.append(v)
+            state["surveyed"] += 1
+            return got
+
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=workers) as pool:  # (compiles are processes of their own)
+            found = list(pool.map(one, rows))
+        if state["stop"].is_set():
+            return None
+        for got in found:
+            for v in got:
+                hits[v] = hits.get(v, 0) + 1
+        # a setup is kept only if it matches something the ones before it don't (2.6.3 with ASPSX 2.56 matched exactly
+        # what plain 2.6.3 did): each one kept costs a compile on every near miss
+        covered: set[int] = set()
+        useful = []
+        for v in sorted(hits, key=lambda v: -hits[v]):
+            mine = {i for i, got in enumerate(found) if v in got}
+            if mine - covered:
+                useful.append(v)
+                covered |= mine
+        # what matched functions already rely on stays tried (their own compiler, or a sample too small to see it)
+        relied = {self.fn_toolchain(r) for r in self.store.all(
+            "SELECT meta FROM functions WHERE project_id=? AND status='matched' AND meta LIKE '%toolchain%'", proj["id"])}
+        alternates = useful + sorted(v for v in relied - set(useful) - {None, main})
+        summary = {"stamp": "|".join(ids), "sampled": len(rows), "matches": dict(sorted(hits.items(), key=lambda x: -x[1])),
+                   "at": time.time()}
+        with self.store.tx() as db:
+            c = json.loads(db.execute("SELECT config FROM projects WHERE id=?", (proj["id"],)).fetchone()["config"])
+            c["compiler"]["alternates"] = alternates
+            c["survey"] = summary
+            db.execute("UPDATE projects SET config=? WHERE id=?", (json.dumps(c), proj["id"]))
+            top = ", ".join(f"{v} {n}" for v, n in list(summary["matches"].items())[:4])
+            self._event(db, proj["id"], None, "autopilot", f"compiler survey: {len(rows)} stuck functions tried with "
+                        f"{len(variants)} compiler setups; " + (f"matches with {top}" if top else "none matched"))
+        return summary
 
     def _rejudge(self, proj, agent, state: dict, workers: int) -> None:
         """After the way code is judged changed: check every match still holds (a function that needs the other
@@ -1750,6 +1843,11 @@ class RomNetwork(Network):
         state["context_version"] = self.store.one("SELECT MAX(version) AS v FROM context_versions WHERE project_id=?",
                                                   proj["id"])["v"] or 0  # its drafts are as good as the header was
         if not self.fork_slug(slug) and slug not in self.links:
+            try:  # which compilers built this game (when the PS1 compilers on hand changed): its alternates
+                self.survey(proj, state, workers)
+                proj = self._project(slug)
+            except Exception as e:
+                logging.getLogger("decomp.wtf").info("autopilot survey: %s", e)
             try:  # the way code is judged changed since last time: every best attempt, judged again, first
                 self._rejudge(proj, agent, state, workers)
             except Exception as e:
