@@ -79,6 +79,9 @@ TOOLS = {
 }
 # Functions this small are handed out in batches (claim_function count): agents match most on the first try.
 BATCH_INSNS = 48
+RELINK_EVERY = 100  # new matches between two rebuilt-game checks (relink)
+RELINK_LIMIT = 0.02  # more failing matches than this share at once: listed, not reopened (the check may be wrong)
+RELINK_PLATFORMS = ("n64", "psx", "ps2")  # the ones rom/export.py rebuilds
 PLATFORM_COMPILERS = {"n64": ["gcc-2.7.2-kmc", "ido-7.1", "ido-5.3"], "psx": ["gcc-2.7.2-psx", "gcc-2.8.1-psx"],
                       "ps2": ["ee-gcc-2.96"], "gba": ["agbcc"]}
 _AUTO_TOKEN = re.compile(r"\b(?:func|D|B|jtbl|RO|STR|FLT|DBL)_[0-9A-F]{8}\b")
@@ -149,6 +152,7 @@ class RomNetwork(Network):
         # themselves run them as threads
         self.out_of_process = False
         self.alike_jobs: dict[str, dict] = {}  # slug -> the look-alike refresher's progress (worker.py)
+        self.relink_jobs: dict[str, dict] = {}  # slug -> the rebuilt-game check's progress (worker.py)
         from .forkengine import ForkEngine  # forks build on this class's claims, attempts and live view
         from .permute import Permuter
         from .twins import Twins
@@ -326,7 +330,32 @@ class RomNetwork(Network):
                                  self.symbols(proj["id"]), self.reader(proj))
             return res.candidate, res.exact if res.candidate is not None else None, res.problems
         res = match.link(obj, fn["name"], self._rom_target(fn), self.symbols(proj["id"]), self.reader(proj))
+        if res.exact and (extra := self._extra_code(proj, obj, fn["name"])):
+            # the function matches, but its object holds code the game doesn't have here: it wouldn't rebuild
+            res.exact = False
+            res.problems.append(f"the object also defines {', '.join(extra)}, which isn't one of the game's functions: "
+                                "the game has no such code next to this one. Make it `static inline` (so it's "
+                                "compiled into its callers), or, if it is a function of the game, give it that "
+                                "function's name")
         return res.candidate, res.exact if res.candidate is not None else None, res.problems
+
+    def _extra_code(self, proj, obj: bytes, name: str) -> list[str]:
+        """Functions an object defines besides `name` that aren't the game's (a static helper GCC didn't inline).
+        Other functions of the game are fine: the exported tree keeps only each function's own definition."""
+        from io import BytesIO
+
+        from elftools.elf.elffile import ELFFile
+
+        from ..elfobj import _function_symbols
+
+        syms = self.symbols(proj["id"])
+        try:
+            defined = _function_symbols(ELFFile(BytesIO(obj)))
+        except Exception:
+            return []
+        return sorted(n for n, (_, _, size) in defined.items()
+                      if n != name and size and not _AUTO_TOKEN.fullmatch(n)
+                      and getattr(syms.by_name.get(n), "kind", None) != "func")
 
     def _twin_lines(self, proj, fn) -> list[str]:
         """For a brief: the matched function with the same code, and its C with this one's names."""
@@ -1453,6 +1482,94 @@ class RomNetwork(Network):
             db.execute("UPDATE projects SET config=? WHERE id=?", (json.dumps(cfg), proj["id"]))
         return res
 
+    def relink(self, slug: str, log=print) -> dict:
+        """The check that a match is a match in the game, not only on its own: export, rebuild the whole game with
+        every match in C at its own address, and compare it with the user's copy byte for byte. A match that fails
+        (it no longer compiles or matches with today's header, its object holds more than the function, its bytes
+        differ in place) goes back to agents, its C kept as their starting point, with what went wrong; unless so
+        many fail at once that the check itself is more likely wrong (RELINK_LIMIT): then they're only listed."""
+        proj = self._project(slug)
+        version = self._header_stamp(proj["id"])
+        res = self.export_rom(slug, log=log)
+        report = {}
+        try:
+            report = json.loads((Path(res["path"]) / "build" / "report.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError, KeyError, TypeError):
+            pass
+        failures = [{"name": name, "reason": f"the exported tree couldn't use its C: it {why}"}
+                    for name, why in res.get("fallback") or []]
+        failures += [{"name": t["name"], "unit": t["seg"],
+                      "reason": f"its object holds more than the function: 0x{t['size']:X} bytes of code where the game "
+                                f"has 0x{t['room']:X} (a static helper GCC didn't inline?)"}
+                     for t in report.get("too_big") or []]
+        failures += [{"name": d["name"], "unit": d["seg"],
+                      "reason": f"in the rebuilt game its bytes differ from your copy's ({d['bytes']} bytes, the first "
+                                f"at ROM offset 0x{d['offset']:X})"}
+                     for d in report.get("differs") or [] if d.get("c")]
+        matched = self.store.one("SELECT COUNT(*) AS n FROM functions WHERE project_id=? AND status='matched'",
+                                 proj["id"])["n"]
+        act = len(failures) <= max(5, RELINK_LIMIT * matched)
+        reopened = []
+        with self.store.tx() as db:
+            for f in failures if act else []:
+                rows = db.execute("SELECT id, name, unit, meta FROM functions WHERE project_id=? AND name=? AND "
+                                  "status='matched'", (proj["id"], f["name"])).fetchall()
+                rows = [r for r in rows if not f.get("unit") or len(rows) == 1 or r["unit"] == f["unit"]]
+                for r in rows[:1]:
+                    meta = json.loads(r["meta"] or "{}")
+                    meta["relink"] = f["reason"]
+                    db.execute("UPDATE functions SET status='open', best_source=matched_source, best_score=1, "
+                               "matched_source=NULL, matched_agent_id=NULL, matched_at=NULL, meta=? "
+                               "WHERE id=? AND status='matched'", (json.dumps(meta), r["id"]))
+                    db.execute("INSERT INTO notes(project_id,function_id,agent_id,text,created_at) VALUES(?,?,?,?,?)",
+                               (proj["id"], r["id"], None,
+                                f"Matched on its own, but not in the rebuilt game: {f['reason']}. Its C is the best "
+                                "attempt: fix that and it matches again.", time.time()))
+                    self._event(db, proj["id"], None, "relink", r["name"])
+                    reopened.append(r["name"])
+            cfg = json.loads(db.execute("SELECT config FROM projects WHERE id=?", (proj["id"],)).fetchone()["config"])
+            cfg.setdefault("export", {}).update({
+                "context_version": version, "checked_matched": matched, "failures": failures[:200],
+                "reopened": reopened, "acted": act, "differs": len(report.get("differs") or []),
+                "identical": res.get("identical")})
+            db.execute("UPDATE projects SET config=? WHERE id=?", (json.dumps(cfg), proj["id"]))
+        if failures:
+            logging.getLogger("decomp.wtf").info(
+                "relink %s: %d matches don't hold in the rebuilt game%s: %s", slug, len(failures),
+                "" if act else f" (more than {RELINK_LIMIT:.0%}: listed, not reopened)",
+                ", ".join(f["name"] for f in failures[:20]))
+        return {**res, "failures": failures, "reopened": reopened, "acted": act}
+
+    def relink_due(self, slug: str) -> bool:
+        """After RELINK_EVERY new matches since the last check, or a change to the shared header."""
+        proj = self._project(slug)
+        cfg = self.cfg(proj)
+        if not cfg.get("platform") or self.fork_slug(slug) or cfg.get("platform") not in RELINK_PLATFORMS:
+            return False
+        ex = cfg.get("export") or {}
+        matched = self.store.one("SELECT COUNT(*) AS n FROM functions WHERE project_id=? AND status='matched'",
+                                 proj["id"])["n"]
+        if not ex.get("checked_matched") and matched:
+            return True
+        return (abs(matched - (ex.get("checked_matched") or 0)) >= RELINK_EVERY
+                or ex.get("context_version") != self._header_stamp(proj["id"]))
+
+    def _header_stamp(self, project_id: int) -> float | None:
+        """When any of the project's headers last changed."""
+        return self.store.one("SELECT MAX(created_at) AS t FROM context_versions WHERE project_id=?", project_id)["t"]
+
+    def start_relink(self, slug: str) -> None:
+        """Keep the rebuilt-game check current while agents work (worker.py: its own process)."""
+        if not self.out_of_process or self.fork_slug(slug) or slug in self.links:
+            return
+        if (st := self.relink_jobs.get(slug)) is not None and st.get("state") == "running":
+            return
+        if self.cfg(self._project(slug)).get("platform") not in RELINK_PLATFORMS:
+            return
+        from .worker import BackgroundProc, ProcStop
+        st = self.relink_jobs[slug] = {"state": "running", "phase": "waiting"}
+        st["stop"] = ProcStop(BackgroundProc("relink", slug, self.store.path, self.workspace, st))
+
     # ------------------------------------------------------------------ for the GUI
 
     def overview(self, slug: str) -> dict:
@@ -1507,6 +1624,7 @@ class RomNetwork(Network):
             "context_version": self._context(proj["id"])["version"],
             "folder": proj["root"],
             "export": cfg.get("export"),
+            "relink": {k: v for k, v in (self.relink_jobs.get(slug) or {}).items() if k != "stop"},
             "exportable": cfg.get("platform", "n64") in ("n64", "psx", "ps2", "gba"),
             "room": self._room_info(proj["slug"]),
         }

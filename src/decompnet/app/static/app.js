@@ -2414,9 +2414,13 @@ function renderSource(ov) {
   }
   $("srcText").innerHTML = "decomp.wtf writes a complete decompilation project: the matched functions as C, everything else as assembly, a linker script and <code>build.py</code>. Then it builds it to prove it rebuilds your game <b>byte for byte</b>. It's the base for ports and mods; game code and data stay out of git, so the tree is safe to put in a repository.";
   const stale = ex && ex.matched != null && ex.matched < ov.matched;
+  const rl = ov.relink || {}, fails = (ex && ex.failures) || [];
   $("srcState").innerHTML = !ex ? `<span class="muted small">Not exported yet.</span>`
     : `<div class="src-line ${ex.identical === false ? "bad" : "ok"}">${ex.identical === false ? "✕ the last rebuild differed" : "✓ rebuilds byte for byte"}</div>
        <div class="src-line">${ex.matched != null ? `${ex.matched.toLocaleString()} of ${ex.functions.toLocaleString()} functions in C` : ""}${stale ? ` · <b>${ov.matched - ex.matched} new matches since</b>` : ""}</div>
+       ${rl.state === "running" ? `<div class="src-line muted small">${rl.phase === "rebuilding" ? "Rebuilding the game now to check the new matches…" : "Checked again automatically after every 100 new matches and every header change."}</div>` : ""}
+       ${fails.length ? `<div class="src-line warn-text">${fails.length} match${fails.length === 1 ? "" : "es"} didn't hold in the rebuilt game${ex.acted === false ? " (too many at once to be sure: listed, not given back)" : ex.reopened && ex.reopened.length ? `; ${ex.reopened.length} given back to agents` : ""}:</div>
+         <ul class="src-fails small">${fails.slice(0, 12).map((f) => `<li><code>${esc(f.name)}</code>: ${esc(f.reason)}</li>`).join("")}${fails.length > 12 ? `<li class="muted">and ${fails.length - 12} more</li>` : ""}</ul>` : ""}
        ${ex.path ? `<div class="src-line">${esc(ex.path)}</div>` : ""}`;
   $("srcExport").textContent = ex ? "Export again" : "Export project";
 }

@@ -493,6 +493,8 @@ table.mini td { padding: 3px 18px 3px 0; border-top: 1px solid var(--line-soft);
 .src-line { font: 12px/1.5 var(--mono); color: var(--muted); overflow-wrap: anywhere; }
 .src-line.ok { color: var(--match); }
 .src-line.bad { color: var(--miss); }
+.src-fails { margin: 4px 0 6px 18px; padding: 0; color: var(--muted); }
+.src-fails li { margin: 2px 0; overflow-wrap: anywhere; }
 .src-line b { color: var(--work); font-weight: 500; }
 .danger-zone { margin-top: 16px; border-color: color-mix(in srgb, var(--miss) 25%, var(--line)); }
 

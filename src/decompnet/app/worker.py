@@ -1,4 +1,4 @@
-"""The autopilot and the permuter, each in a process of its own.
+"""The autopilot, the permuter, the look-alikes and the rebuilt-game check, each in a process of its own.
 
 Both are busy Python loops (drafts, rewrites, diffs). Run as threads inside the app they held the interpreter most of
 the time, and everything else (the GUI's requests, the agents' compiles, every database read) waited for it: a
@@ -158,6 +158,27 @@ def main(argv: list[str]) -> int:
             finally:
                 state["state"] = "stopped" if stop.is_set() else "done"
         threading.Thread(target=loop, daemon=True, name=f"alike-{slug}").start()
+    elif kind == "relink":  # the rebuilt-game check, again after enough new matches or a header change
+        state = {"state": "running", "phase": "waiting", "checked_at": 0.0}
+        stop = threading.Event()
+        finished = lambda: state["state"] != "running"
+
+        def loop() -> None:
+            try:
+                while not stop.is_set():
+                    if net.relink_due(slug):
+                        state["phase"] = "rebuilding"
+                        try:
+                            res = net.relink(slug, log=lambda *_: None)
+                            state["identical"], state["failures"] = res.get("identical"), len(res["failures"])
+                        except Exception as e:  # the next round tries again
+                            logging.getLogger("decomp.wtf").info("relink %s: %s", slug, e)
+                            state["error"] = str(e)[:300]
+                        state["phase"], state["checked_at"] = "waiting", time.time()
+                    stop.wait(600)
+            finally:
+                state["state"] = "stopped" if stop.is_set() else "done"
+        threading.Thread(target=loop, daemon=True, name=f"relink-{slug}").start()
     else:
         print(f"unknown worker {kind!r}", file=sys.stderr)
         return 2

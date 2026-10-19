@@ -683,6 +683,8 @@ class Manager:
             self.net.permuter.start(slug)  # near misses agents leave, on spare CPU
             if hasattr(self.net, "start_alikes"):
                 self.net.start_alikes(slug)  # matched look-alikes: templates for the helpers that need them
+            if hasattr(self.net, "start_relink"):
+                self.net.start_relink(slug)  # every match checked in the rebuilt game, as more come in
         except Exception:  # agents work without them
             pass
         with self._lock:
