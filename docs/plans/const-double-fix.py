@@ -7,6 +7,12 @@ and 3) are not contiguous: the copy took padding for the high half, and a double
 one .word (on one run in a few). The generic code (gen_rtx, copy_rtx, read_rtx) fills slots 2 and 3 by format, so
 the slots stay as they are and the copies are rewritten to move the halves one by one.
 
+The same real.h has a second problem: its host-format REAL_VALUE_TO_TARGET_SINGLE and _DOUBLE read the float or the
+two halves of the double through a `long *`, which is 8 bytes on this host: `float k = 3.0f;` came out as
+`.word 0x4bd60c040400000` and a double repeated its eight bytes in both words (2.6.x use these macros; later versions
+convert with their own emulator). They read `unsigned int` now (unsigned, so a negative float is not sign-extended
+into the `long` that is printed with %08lx).
+
 Assumes sizeof (REAL_VALUE_TYPE) == 2 * sizeof (HOST_WIDE_INT): a host double and a 32-bit HOST_WIDE_INT."""
 import pathlib, re, sys
 
@@ -26,6 +32,13 @@ if 'CONST_DOUBLE_TO_BYTES' not in s:
     s, n = re.subn(r'(#define CONST_DOUBLE_HIGH\(r\) XWINT \(r, 3\)\n)', lambda m: m.group(1) + MACROS, s, count=1)
     assert n == 1, 'CONST_DOUBLE_HIGH not found in real.h'
     real.write_text(s)
+
+old = real.read_text()
+new = re.sub(r'(#define REAL_VALUE_TO_TARGET_(?:SINGLE|DOUBLE)\(IN, OUT\)(?:[^\n]*\\\n)+[^\n]*)',
+             lambda m: m.group(1).replace('*(long *) &f', '*(unsigned int *) &f').replace('((long *) &in)', '((unsigned int *) &in)'), old)
+if new != old:
+    real.write_text(new)
+    print('real.h: host-format REAL_VALUE_TO_TARGET_* read unsigned int')
 
 EXPR = r'((?:[^()]|\((?:[^()]|\([^()]*\))*\))*)'          # an expression with up to two levels of parentheses
 TO = re.compile(r'bcopy\s*\(\(char \*\) &CONST_DOUBLE_LOW \(' + EXPR + r'\),\s*(\(char \*\) &[\w.>\-\[\]]+),\s*sizeof [\w.>\-\[\]]+\)')

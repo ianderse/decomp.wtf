@@ -322,3 +322,15 @@ small files: `double f(void) { return 1.5; }` and `float f(float x) { return x *
   claims 2.6.x; it doesn't affect SLUS-01252 (no float data; its 254 2.6.x matches all re-verified).
 - **old-gcc's official macOS 2.7.2 and 2.8.1 have the double/float-constant bug; their Linux builds don't.** Evidence
   for the PR, and the reason to rebuild those two with the fixes.
+
+### The 2.6.x float initializer, fixed (2026-10-19, M5)
+
+Cause: 2.6.x use real.h's host-format `REAL_VALUE_TO_TARGET_SINGLE` / `_DOUBLE`, which read the float (and the halves of the
+double) through `long *`; on this host `long` is 8 bytes, so a float read 4 bytes of whatever followed it, and a double's
+two words both got its eight bytes (`double d = 2.5` gave `.word 0x4004000000000000` twice; the laptop's `return 1.5`
+test passed by luck). `const-double-fix.py` now makes them read `unsigned int` (unsigned: a negative float must not be
+sign-extended into the `long` printed with `%08lx`). 2.6.0 and 2.6.3 rebuilt for arm64 and x86_64 (new sha256 in
+`toolchains.toml`). `compare-with-linux.sh` (Docker via colima here; `WORK=<dir under $HOME>`): all five versions, arm64 and
+x86_64, 8/8 on `scripts/float-corpus`, identical to the official Linux builds. The laptop should rerun it on its 400
+functions (402/402 expected for 2.6.x too).
+

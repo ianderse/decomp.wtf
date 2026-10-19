@@ -8,10 +8,9 @@ the arm64 crashes in the existing macOS builds
 
 ## What this adds
 
-- `gcc-<version>-psx-macos.sh` style build scripts for 2.6.0, 2.6.3 and 2.8.0, and a second script for 2.91.66 and
-  2.95.2 (their source keeps the compiler in `gcc/` beside `libiberty/`). Our versions:
-  `docs/plans/psx-gcc-macos.sh` and `docs/plans/psx-gcc-macos-egcs.sh` in https://github.com/ianderse/decomp.wtf,
-  to be renamed to this repository's convention. Same patches as the Dockerfiles; only `cc1`, `cpp` and the `gcc` driver
+- `gcc-<version>-psx-macos.sh` for 2.6.0, 2.6.3, 2.8.0, 2.91.66 and 2.95.2 (`VERSION=2.8.0-psx PLATFORM=macos make`),
+  thin wrappers over `macos/build.sh` and `macos/build-egcs.sh` (2.91.66 and 2.95.2 keep the compiler in `gcc/` beside
+  `libiberty/`), with the arm64 helpers in `macos/`. The five are added to the macOS CI matrix. Same patches as the Dockerfiles; only `cc1`, `cpp` and the `gcc` driver
   are built. An `x86_64` build from an arm64 shell works with `cc -arch x86_64` (and runs under Rosetta).
 - Three source changes for Apple's arm64, which the 2.91.66 and 2.95.2 builds need to run at all and which fix garbled
   or crashing warnings and errors in the others:
@@ -27,18 +26,22 @@ the arm64 crashes in the existing macOS builds
      `&CONST_DOUBLE_LOW`), which assumes they are contiguous; on a 64-bit host each rtx slot is 8 bytes, so a double
      constant could come out with garbage in one `.word` (`.word 0x00000077` where it should be 0), different from run
      to run. This happens on x86_64 builds too. The six to eight copies per version are rewritten to move the halves one
-     by one.
+     by one. For 2.6.x there is a second part: its host-format `REAL_VALUE_TO_TARGET_SINGLE` and `_DOUBLE` in `real.h` read
+     through a `long *`, 8 bytes on this host, so `float k = 3.0f;` came out as `.word 0x4bd60c040400000` and a double
+     repeated its eight bytes in both words (they read `unsigned int` now).
 - `HOST_WIDE_INT` stays the 32-bit `int` that `xm-darwin.h` sets. A 64-bit one changes the generated code (we saw
   `li $18,-65536` become `li $18,4294901760` and different delay slots in 33 of 388 files), because these sources assume
   the host word is the target word.
 
-## Possible impact on the existing macOS builds
+## Impact on the existing macOS builds
 
-`gcc-2.7.2-psx-macos.sh` and `gcc-2.8.1-psx-macos.sh` use the same `xm-darwin.h`, so they probably have the double
-constant bug in point 3, and their arm64 builds crash on warnings for the reason in points 1 and 2 (the README's `-w`
-workaround). We have not applied the fixes to them: with 2.7.2 and 2.8.1 the `(error)` trick of point 1 needs
-declarations first, because there `error`, `warning` and `pedwarn` are declared without prototypes. We did not verify
-the double constant bug on those two builds; it is an inference from the shared header.
+`gcc-2.7.2-psx-macos.sh` and `gcc-2.8.1-psx-macos.sh` use the same `xm-darwin.h`, and the double constant bug of point 3
+is confirmed on the official macOS builds of both (old-gcc 0.17 release assets, run on an Apple Silicon laptop):
+`double f(void) { return 1.5; }` at `-O2 -G8` emits `.word 0x00000000` for both halves, and a `float` constant used
+inside a function is emitted as `0x00000000`. The 2.95.2 build with `const-double-fix.py` emits the right words. Their
+arm64 builds also crash on warnings for the reason in points 1 and 2 (the README's `-w` workaround). We have not applied
+the fixes to 2.7.2 and 2.8.1: there the `(error)` trick of point 1 needs declarations first, because `error`, `warning`
+and `pedwarn` are declared without prototypes.
 
 ## Evidence
 
@@ -58,11 +61,19 @@ build also rejects (missing headers, project macros) are dropped.
 
 2.6.0 and 2.6.3 hardly compile any of these files (`//` comments, modern C), so their evidence is thin: three files.
 
-**What this does not show:** that these builds agree with the Linux i386 builds in this repository's releases. Both
-sides of the comparison come from the same patched sources and scripts, built with a modern clang. The check that
-matters for a decomp is whether functions that match with the released compilers still match with these; we are running
-that on the matched functions of one PS1 game (SLUS-01252; fill in its title) and will add the result
-here before submitting.
+**On a real game:** in one retail PS1 game (NTSC-U, PSY-Q GCC 2.7.2 era), 244 functions match the original byte for
+byte with the native arm64 `gcc-2.6.3-psx` build, and 10 with `gcc-2.6.0-psx` at `-O1` (each match re-checked against
+these builds). Nothing matched with 2.8.0, 2.91.66 or 2.95.2 in a sample of its 600 most-attempted unmatched functions,
+so the game says nothing about those three. The arm64 and Intel builds of all five versions also produce identical
+assembly for 400 of that game's matched functions (two do not compile on either 2.6.x build).
+
+**Against the official Linux builds** (Docker, `compare-with-linux.sh`): our native arm64 and x86_64 builds of 2.6.0,
+2.6.3, 2.8.0, 2.91.66 and 2.95.2 produce assembly byte-identical to old-gcc's official Linux builds (static i386, in a
+linux/amd64 container) on 400 functions of the game above (402/402 with two float/double test files) and on eight
+float/double files (`scripts/float-corpus`: initializers, negatives, arrays, structs, conversions). That test found the
+2.6.x float problem described above, which the arm64-versus-Intel comparison could not see (both sides had it).
+old-gcc's own macOS builds of 2.7.2 and 2.8.1 differ from their Linux builds on exactly the double and float files
+(the CONST_DOUBLE bug), and match on the 400 functions.
 
 ## Notes for the reviewer
 
@@ -80,26 +91,10 @@ the results and ran the builds and comparisons myself. Tell me if the project pr
 
 ## Before submitting (checklist, not part of the PR text)
 
-- [ ] SLUS-01252 matched functions re-checked with the arm64 2.95.2 / 2.91.66 / 2.8.0 builds (laptop); result added above
-- [ ] Rename the scripts to the repository's convention, add them to its Makefile or README, and re-run them from a
-      clean checkout of decompals/old-gcc (ours was run from a clone at the time of writing)
+- [x] Game check done (244 + 10 matches with 2.6.3 / 2.6.0), game not named
+- [x] Arm64 and Intel builds vs decompals' official Linux builds (Docker): identical for all five versions after the 2.6.x float fix
+- [x] Scripts renamed to the repository's convention, README and CI matrix updated, all five built through `make` from a
+      clean clone (branch `macos-native-arm64-psx`); output compared with the earlier builds: 0 assembly differences
 - [ ] Apple's Rosetta timeline is not cited in the PR (it was only recalled, not checked)
-- [ ] The identity and wording of the AI disclosure is right
+- [x] The AI disclosure wording is approved
 - [ ] Squash into one or two commits per decompals's habits
-
-## Evidence from decomp.wtf's laptop (2026-10-19)
-
-The double-constant problem reproduces with the **official** macOS builds of gcc-2.7.2-psx and gcc-2.8.1-psx
-(old-gcc 0.17 release assets): `double f(void) { return 1.5; }` at `-O2 -G8` emits `.word 0x00000000` for both
-halves, and a `float` constant used inside a function is emitted as `0x00000000`. The rebuilt 2.95.2 with
-const-double-fix.py emits the right words.
-
-## Against the official Linux builds (laptop, Docker; docs/plans/compare-with-linux.sh)
-
-On 400 functions of a retail PS1 game plus two float/double test files, our native arm64 and x86_64 macOS builds of
-2.8.0, 2.91.66 and 2.95.2 produce assembly byte-identical to old-gcc's official Linux builds (402/402). Our 2.6.0
-and 2.6.3 builds match on the 400 functions but get a float global initializer wrong (a 64-bit-host printing bug, to
-fix before claiming them). old-gcc's own macOS builds of 2.7.2 and 2.8.1 differ from its Linux builds on the
-double and float test files (the CONST_DOUBLE bug), and match on the 400 functions.
-In the same game, 244 functions match the original byte for byte with our arm64 gcc-2.6.3-psx build and 10 with
-gcc-2.6.0-psx at -O1 (re-verified with the current builds).

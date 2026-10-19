@@ -2,12 +2,12 @@
 # The macOS builds of the PSY-Q GCCs against decompals/old-gcc's official Linux builds (static i386, run in a
 # linux/amd64 container), on a corpus of C files: assembly per file, compared without comment lines (which name the
 # host). Usage: compare-with-linux.sh <corpus dir with .c files (and their headers)> [versions...]
-# Needs Docker. macOS builds compared: the installed ones (decomp.wtf's toolchains folder) and any Intel builds in
+# Needs Docker (WORK=<dir> to keep the files in a folder the Docker VM can mount, e.g. under $HOME with colima). macOS builds compared: the installed ones (decomp.wtf's toolchains folder) and any Intel builds in
 # $MAC_X86 (one folder per version, e.g. unpacked toolchain-builds/gcc-<v>-psx-macos-x86_64.tar.gz).
 set -eu
 CORPUS="$(cd "$1" && pwd)"; shift
 VERSIONS="${*:-2.6.0 2.6.3 2.7.2 2.8.0 2.8.1 2.91.66 2.95.2}"
-W="$(mktemp -d)"; TC="$HOME/Library/Application Support/decompnet/toolchains"
+W="${WORK:-$(mktemp -d)}"; mkdir -p "$W"; TC="$HOME/Library/Application Support/decompnet/toolchains"
 cat > "$W/compile-all.sh" <<'SH'
 #!/bin/sh
 G="$1"; O="$2"; C="$3"; mkdir -p "$O"
