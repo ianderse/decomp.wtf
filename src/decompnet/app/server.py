@@ -199,6 +199,7 @@ class Settings:
                 "per_session": self.data.get("per_session", agents.PER_SESSION), "last_project": self.data.get("last_project"),
                 "autopilot": self.data.get("autopilot", True), "budget_usd": self.data.get("budget_usd") or 0,
                 "auto_update": bool(self.data.get("auto_update")), "check_updates": self.data.get("check_updates", True) is not False,
+                "memory_url": self.data.get("memory_url") or "", "memory_ab": self.data.get("memory_ab", True) is not False,
                 "launcher": _launcher(self.data.get("launcher") or {}), "recent_models": self.data.get("recent_models") or {}}
 
 
@@ -261,8 +262,16 @@ def build(net: RomNetwork, home: Path, port: int, secret: str):
     build_id = (updates.installed().get("commit") or "")[:12]  # a branch install: the commit it came from
     manager = agents.Manager(net, home, mcp_url)
     manager.release_orphans()  # before any helper resumes
+
+    def use_memory() -> None:
+        """Long-term memory (a Hindsight server) as Settings say: off without an address; with "measure" on, half
+        the claims go without it, for comparison (memory_ab)."""
+        from ..memory import Memory
+        url = settings.data.get("memory_url") or ""
+        net.memory = Memory(url, share=0.5 if settings.data.get("memory_ab", True) is not False else 1.0) if url else None
     jobs = Jobs(home / "logs" / "decomp.log")
     settings = Settings(home / "settings.json")
+    use_memory()
     manager.budget = lambda: float(settings.data.get("budget_usd") or 0)
 
     def remember(running: list[dict]) -> None:
@@ -957,6 +966,12 @@ def build(net: RomNetwork, home: Path, port: int, secret: str):
             settings.data["auto_update"] = bool(data["auto_update"])
         if "check_updates" in data:
             settings.data["check_updates"] = bool(data["check_updates"])
+        if "memory_url" in data:
+            settings.data["memory_url"] = str(data["memory_url"] or "").strip()
+        if "memory_ab" in data:
+            settings.data["memory_ab"] = bool(data["memory_ab"])
+        if "memory_url" in data or "memory_ab" in data:
+            use_memory()
         settings.save()
         return JSONResponse(settings.public())
 

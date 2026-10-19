@@ -1478,6 +1478,13 @@ function renderSessions(sessions) {
       <span class="last">on ${S.claims.filter((c) => c.agent === a).map((c) => fnLink(c.name)).join(", ")}</span></div>`).join(""));
   box.querySelectorAll(".fn").forEach((x) => { x.onclick = () => openFn(x.dataset.fn); });
   $("noSessions").hidden = sessions.length + outside.length > 0;
+  const ab = S.stats?.memory_ab || [];
+  if (ab.length) {  // the memory A/B: per agent, matches per claim with and without what memory recalled
+    const by = {};
+    ab.forEach((r) => { (by[r.agent] = by[r.agent] || {})[r.arm] = r; });
+    const pct = (r) => (r && r.claims ? `${r.matched || 0}/${r.claims} (${Math.round((100 * (r.matched || 0)) / r.claims)}%)` : "–");
+    box.insertAdjacentHTML("beforeend", `<div class="session ext"><span class="facts-line"><b>Memory A/B</b> (claims matched, with / without memory): ${Object.entries(by).map(([a, r]) => `${esc(a)} ${pct(r.memory)} / ${pct(r.control)}`).join(" · ")}</span></div>`);
+  }
   box.querySelectorAll("[data-stop]").forEach((b) => {
     b.onclick = async () => {
       await api("/api/agents/stop", { method: "POST", body: { id: b.dataset.stop, remove: !!b.dataset.remove } }).catch((e) => toast(esc(e.message), "err"));
@@ -2535,7 +2542,9 @@ async function showSettingsPage() {
   $("setAgents").innerHTML = `
     <label class="field"><span>Functions per agent session (a fresh session keeps the agent's context small)</span><input id="perSession" type="number" min="1" max="20" value="${st.settings.per_session}"></label>
     <label class="field"><span>Budget: stop helper agents when a project's agents have spent this much (US dollars, as the agents report it; 0 = no limit)</span><input id="budgetSet" type="number" min="0" step="0.5" value="${st.settings.budget_usd || 0}"></label>
-    <label class="check"><input type="checkbox" id="autopilotSet" ${st.settings.autopilot !== false ? "checked" : ""}><span><b>Autopilot after each import</b>: try every function's machine draft first, so free matches cost no agent time.</span></label>`;
+    <label class="check"><input type="checkbox" id="autopilotSet" ${st.settings.autopilot !== false ? "checked" : ""}><span><b>Autopilot after each import</b>: try every function's machine draft first, so free matches cost no agent time.</span></label>
+    <label class="field"><span>Long-term memory: a Hindsight server's address (e.g. http://my-mac-studio:8888). Every verified match is remembered in a bank per compiler, tagged with its game, and claim briefs carry what it recalls, for every agent. Empty = off.</span><input id="memoryUrl" type="url" placeholder="http://host:8888" value="${esc(st.settings.memory_url || "")}"></label>
+    <label class="check"><input type="checkbox" id="memoryAb" ${st.settings.memory_ab !== false ? "checked" : ""}><span><b>Measure it</b>: half the claims, chosen at random, go without memory, so the project page can show whether it helps.</span></label>`;
   const theme = savedTheme();
   $("setComputer").innerHTML = `
     <div class="field"><span>Appearance</span><div class="seg" id="themeSeg">${[["", "System"], ["light", "Light"], ["dark", "Dark"]].map(([k, l]) => `<button type="button" data-theme="${k}" class="${theme === k ? "on" : ""}">${l}</button>`).join("")}</div></div>
@@ -2570,6 +2579,8 @@ async function showSettingsPage() {
   $("perSession").onchange = () => save({ per_session: Number($("perSession").value) }, "Saved.");
   $("autopilotSet").onchange = () => save({ autopilot: $("autopilotSet").checked }, "Saved.");
   $("budgetSet").onchange = () => save({ budget_usd: Number($("budgetSet").value) || 0 }, "Budget saved.");
+  $("memoryUrl").onchange = () => save({ memory_url: $("memoryUrl").value.trim() }, $("memoryUrl").value.trim() ? "Memory on." : "Memory off.");
+  $("memoryAb").onchange = () => save({ memory_ab: $("memoryAb").checked }, "Saved.");
 }
 
 /* ------------------------------------------------------------------ updates (app/updates.py)

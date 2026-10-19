@@ -7,8 +7,10 @@ the website.
 
 from __future__ import annotations
 
+import difflib
 import hashlib
 import json
+import random
 import re
 import secrets
 import time
@@ -164,6 +166,7 @@ class Network:
     def __init__(self, db_path: str | Path, claim_ttl: int = CLAIM_TTL):
         self.store = Store(db_path)
         self.agent_strategy: dict[int, str] = {}  # agent id -> its default claim order (helpers, see agents.Manager)
+        self.memory = None  # long-term memory across games (memory.Memory: a Hindsight server), when set up
         self.claim_ttl = claim_ttl
         self._pool = ThreadPoolExecutor(max_workers=8)
 
@@ -351,6 +354,85 @@ class Network:
                 meta.pop("toolchain", None)
             db.execute("UPDATE functions SET meta=? WHERE id=?", (json.dumps(meta) if meta else None, fn["id"]))
 
+    # ---------------------------------------------------------------- long-term memory (memory.py)
+
+    def _memory_bank(self, proj, fn) -> str | None:
+        """The bank a function's lessons go in: its compiler's (the project's, or the one it matched with)."""
+        tc = self.fn_toolchain(fn) or json.loads(proj["config"]).get("compiler", {}).get("toolchain")
+        return tc.partition(":")[0] if tc else None
+
+    def _memory_lines(self, proj, fn, agent) -> list[str]:
+        """What memory has for a claimed function, for half the claims (chosen at random and recorded: memory_ab,
+        so whether it helps is measured, not assumed); the other half go without."""
+        bank = self._memory_bank(proj, fn)
+        if self.memory is None or bank is None or agent.name in MACHINE_AGENTS:
+            return []
+        arm = "memory" if random.random() < self.memory.share else "control"
+        with self.store.tx() as db:
+            db.execute("INSERT INTO memory_ab(function_id,agent_id,project_id,arm,claimed_at) VALUES(?,?,?,?,?)",
+                       (fn["id"], agent.id, proj["id"], arm, time.time()))
+        if arm == "control":
+            return []
+        asm = scoring.compact_asm(self._asm_text(fn, proj))
+        calls = sorted(set(re.findall(r"\bjal\s+(\w+)", asm)))
+        query = (f"How to write C that {bank} compiles to exactly this {fn['n_insns']}-instruction function"
+                 + (f" (it calls {', '.join(calls[:8])})" if calls else "") + ":\n" + "\n".join(asm.splitlines()[:40]))
+        texts = self.memory.recall(bank, query)
+        if not texts:
+            return []
+        return ["", f"### From long-term memory ({bank}: what earlier matches taught, in any game; hints: check them "
+                    "against the diff)", *[f"- {t}" for t in texts]]
+
+    def _remember_match(self, proj, fn, agent, source: str) -> None:
+        """A verified match into memory: its own C, and the change from the best attempt before it that made it match
+        (the reusable part: which construct gives which instructions)."""
+        bank = self._memory_bank(proj, fn)
+        if self.memory is None or bank is None or agent.name in MACHINE_AGENTS:
+            return
+        try:
+            from .rom.export import own_source
+            words = set(re.findall(r"\b[A-Za-z_]\w*\b", source + (fn["best_source"] or "")))
+            defined = {r["name"] for r in self.store.all(
+                f"SELECT name FROM functions WHERE project_id=? AND name IN ({','.join('?' * len(words))})",
+                proj["id"], *sorted(words))} if words else set()
+            mine = own_source(source, fn["name"], defined).strip()
+            before = own_source(fn["best_source"], fn["name"], defined).strip() if fn["best_source"] else ""
+        except Exception:
+            mine, before = source.strip(), (fn["best_source"] or "").strip()
+        content = (f"{proj['name']} ({proj['slug']}), {fn['name']}: {fn['n_insns']} instructions, compiled with {bank} "
+                   f"{' '.join(json.loads(proj['config']).get('compiler', {}).get('flags') or [])}. Matching C:\n{mine}\n")
+        if before and before != mine:
+            diff = [ln for ln in difflib.unified_diff(before.splitlines(), mine.splitlines(), lineterm="", n=1)
+                    if not ln.startswith(("---", "+++"))][:40]
+            content += (f"\nThe best attempt before it scored {fn['best_score']} (0 = exact); this change made it "
+                        "match:\n" + "\n".join(diff) + "\n")
+        notes = self.store.all("SELECT text FROM notes WHERE function_id=? ORDER BY id DESC LIMIT 2", fn["id"])
+        if notes:
+            content += "\nNotes agents left on it: " + " | ".join(" ".join(n["text"].split())[:300] for n in notes)
+        self.memory.retain(bank, content, f"Verified by the judge: compiles byte for byte to the original function "
+                           f"in {proj['name']}.", [f"game:{proj['slug']}"], f"{proj['slug']}:{fn['name']}",
+                           {"game": proj["slug"], "function": fn["name"], "agent": agent.name, "kind": "match"})
+
+    def _remember_header(self, proj, agent, old_header: str, new_header: str, message: str, version: int) -> None:
+        bank = json.loads(proj["config"]).get("compiler", {}).get("toolchain")
+        if self.memory is None or not bank or agent.name in MACHINE_AGENTS:
+            return
+        added = [ln[1:] for ln in difflib.unified_diff(old_header.splitlines(), new_header.splitlines(), lineterm="", n=0)
+                 if ln.startswith("+") and not ln.startswith("+++")][:30]
+        self.memory.retain(bank.partition(":")[0], f"{proj['name']} ({proj['slug']}) shared header v{version}: "
+                           f"{message.strip()}\n" + "\n".join(added), "An accepted change to the game's shared "
+                           "header: every matched function still matched with it.", [f"game:{proj['slug']}"],
+                           f"{proj['slug']}:header:v{version}", {"game": proj["slug"], "kind": "header"})
+
+    def memory_report(self, project_id: int) -> list[dict]:
+        """The memory A/B so far: per arm and agent, claims and how many the agent matched while holding them."""
+        rows = self.store.all(
+            "SELECT m.arm, a.name AS agent, COUNT(*) AS claims, SUM(f.status='matched' AND f.matched_agent_id=m.agent_id "
+            "AND f.matched_at >= m.claimed_at AND f.matched_at < m.claimed_at + 7200) AS matched FROM memory_ab m "
+            "JOIN agents a ON a.id=m.agent_id JOIN functions f ON f.id=m.function_id WHERE m.project_id=? "
+            "GROUP BY m.arm, a.name ORDER BY a.name, m.arm", project_id)
+        return [dict(r) for r in rows]
+
     @staticmethod
     def fn_toolchain(fn) -> str | None:
         """The compiler a function matched with when it isn't the project's (functions.meta's "toolchain")."""
@@ -524,6 +606,8 @@ class Network:
         pnotes = self.store.all(
             f"SELECT n.text, a.name, {wins} FROM notes n LEFT JOIN agents a ON a.id=n.agent_id "
             "WHERE n.project_id=? AND n.function_id IS NULL ORDER BY n.id DESC LIMIT 5", proj["id"])
+        if header == "CLAIMED" and agent is not None and fn["status"] != "matched":
+            lines += self._memory_lines(proj, fn, agent)
         if pnotes and project_notes:
             lines += ["", "### Project-wide notes (latest)"] + [f"- ({who(n)}) {n['text']}" for n in pnotes]
         if fn["unit"] and fn["unit"] in self._unit_contexts(proj["id"]):
@@ -591,6 +675,8 @@ class Network:
             d = scoring.DiffResult(0, d.max_score, d.rows, True)
         matched_now = d.bytes_match and not scratch
         self._record(fn, agent, d.score, source, ctx["version"], matched=matched_now)
+        if matched_now:
+            self._remember_match(proj, fn, agent, source)
 
         if scratch:
             head = f"(scratch — {fn['name']} was already matched) score {d.score}"
@@ -699,6 +785,7 @@ class Network:
                 db.execute("INSERT INTO context_versions(project_id,version,header,agent_id,message,created_at,unit) "
                            "VALUES(?,?,?,?,?,?,?)", (proj["id"], version, new_header, agent.id, message.strip(), time.time(), unit))
                 self._event(db, proj["id"], agent.id, "context", f"v{version}{f' ({unit})' if unit else ''}: {message.strip()}")
+            self._remember_header(proj, agent, header, new_header, message, version)
             return f"✅ header is now v{version} (all {len(members)} matched functions that use it still match)."
         raise NetworkError("the header is being edited heavily right now; re-read it and retry")
 
