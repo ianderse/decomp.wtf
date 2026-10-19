@@ -214,3 +214,32 @@ SDK 4.70 pointed at it), then 2.91.66, the diagnostics fix for 2.6.x/2.7.2/2.8.x
 > Intel build (macos-x86_64 part) in toolchains.toml, commit, push to main, and write the results here. Then do the
 > other versions in the order above. Prepare the decompals/old-gcc pull request as a branch and a description in
 > docs/plans/old-gcc-pr.md, but don't open it: I'll review and submit it.
+
+### Results of the native arm64 port (2026-10-19)
+
+- **2.95.2 and 2.91.66 now work natively on arm64**: `cc1` compiles, and warnings and errors print properly
+  (`warning: assignment makes integer from pointer without a cast`), so their entries have no `no_warnings_on` or
+  `explain_with`. Registered, with `COMPILERS` and `SHORT_NAMES`. `psx-gcc-macos-egcs.sh` does it with three changes,
+  found in this order by debugging the crash (`copy_rtx_if_shared(orig=0x6)`) with lldb:
+  1. `arm64-varargs.h` (written by `arm64-varargs-gen.py`): widens every argument after the fixed ones of the
+     variadic functions in its table, with the names in prototypes and definitions put in parentheses first
+     (`(gen_rtx) VPROTO(...)`) so the macros stay off them. `__VA_OPT__` handles calls with no variadic arguments, and
+     the `_Generic` branches must not cast a pointer to double (clang checks every branch). Alone, this was not
+     enough.
+  2. **The function-pointer type `rtx (*)(rtx, ...)`** that `expr.h` and `expr.c` give `insn_gen_function` and
+     `genfun`: `GEN_FCN (icode) (a, b)` called the generated `gen_*` functions through a variadic type, so the
+     arguments went on the stack and the callee read registers. Calls through an unprototyped `()` pointer type
+     work (checked with a 10-line test). This was the actual crash.
+  3. **`HOST_WIDE_INT`**: the `xm-darwin.h` the older versions need forces it to 32-bit `int`; 2.9x needs the 64-bit
+     one its own headers pick (`machmode.def`'s DImode masks overflowed otherwise).
+- **Not proven yet.** There is no reference compiler here (Rosetta isn't installed), so "byte-identical to a
+  reference build" and the matched-functions check against SLUS-01252 haven't been done. A wrong compiler can only
+  fail to match, never match falsely, so registering them is safe, but the upstream PR must wait for the proof. The
+  cheapest first check, on the laptop: re-run the compiler survey and see whether SLUS-01252's matched functions
+  still match with 2.95.2 or 2.91.66 where the official Linux build would.
+- **2.8.0 (and so 2.6.x, 2.7.2, 2.8.1): not converted.** The same header breaks their build: `error`, `warning` and
+  `pedwarn` are declared unprototyped there (`extern void error ();`), so a call written `(error) (...)` is an
+  undeclared identifier (a plain call gets an implicit declaration; a parenthesised name doesn't). Either make the
+  macros emit `((void (*)()) error)(...)`-style calls with explicit declarations, or fix the cause of their garbled
+  warnings directly: the plan's step 2 (reproduce one in lldb first). They keep `no_warnings_on` meanwhile.
+- **2.5.7: not attempted** (K&R varargs throughout).

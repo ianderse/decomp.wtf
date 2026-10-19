@@ -6,6 +6,7 @@ set -e
 VERSION="$1"
 OLDGCC="$(cd "$2" && pwd)"
 PATCHES="$OLDGCC/patches"
+HERE="$(cd "$(dirname "$0")" && pwd)"
 ARCH="$(uname -m)"
 OUTDIR="$(pwd)/build-gcc-$VERSION-psx-macos-$ARCH"
 WORKDIR="${WORKDIR:-$(mktemp -d)}"
@@ -33,6 +34,19 @@ patch -u -p1 gcc/config/mips/mips.h -i "$PATCHES/mips.patch"
 patch -su -p1 < "$PATCHES/psx-2.91.patch"
 touch gcc/insn-config.h
 
+# Apple's arm64 variadic ABI (see arm64-varargs.h): the header widens the arguments of every variadic call, so the
+# names in prototypes and definitions that mention "..." go in parentheses first, to keep the macros off them
+if [ "$(uname -m)" = arm64 ]; then
+    names="$(sed -n 's/^#define \([a-z_]*\)(a1.*/\1/p' "$HERE/arm64-varargs.h" | paste -sd'|' -)"
+    sed -E -i '' "s/(^|[^A-Za-z0-9_(])($names)([[:space:]]+P?V?PROTO)/\1(\2)\3/" gcc/*.c gcc/*.h
+    touch gcc/cstamp-h.in   # depends on acconfig.h, which sed just rewrote: don't let make try to regenerate it
+    WIDEN="-include $HERE/arm64-varargs.h"
+    # GEN_FCN (icode) (a, b) calls the generated gen_* functions through a pointer typed rtx (*)(rtx, ...). A call
+    # through a variadic type puts its arguments on the stack, the gen_* functions read registers: unprototyped
+    # pointer types (as genoutput.c already writes the table) call them the ordinary way
+    sed -i '' -e 's/PROTO *((rtx, \.\.\.))/()/' -e 's/(rtx (\*) (rtx, \.\.\.)/(rtx (*) ()/' gcc/expr.h gcc/expr.c
+fi
+
 # modern config.guess/config.sub (Apple Silicon), psx* added to the OS list; same as psx-gcc-macos.sh
 for d in . gcc libiberty; do
     [ -f "$d/config.guess" ] && [ -f "$d/config.sub" ] || continue
@@ -45,6 +59,9 @@ for d in . gcc libiberty; do
 done
 
 cp "$PATCHES/xm-darwin.h" gcc/config/
+# 2.9x needs a 64-bit HOST_WIDE_INT for the target's DImode masks (it picks long on this LP64 host itself); the
+# 32-bit one the older versions' xm-darwin.h forces makes machmode.def's shifts overflow
+sed -i '' '/HOST_BITS_PER_WIDE_INT/d; /define HOST_WIDE_INT/d' gcc/config/xm-darwin.h
 chmod +w gcc/configure
 awk '/^\t\*\)$/ { buf=$0; next }
      buf != "" { if (!done && /echo.*Configuration.*not supported/) {
@@ -56,6 +73,7 @@ chmod +x gcc/configure
 
 HOST="$(./config.guess)"
 export CFLAGS="-std=gnu89 -w -Wno-int-conversion -Wno-implicit-function-declaration -Wno-return-mismatch"
+GCC_CFLAGS="$CFLAGS ${WIDEN:-}"
 for d in libiberty gcc; do
     (cd $d && ./configure \
         --target=mips-sony-psx \
@@ -71,7 +89,7 @@ sed -i '' -e 's/^extern int sys_nerr;/extern const int sys_nerr;/' \
     -e 's/^extern char \*sys_errlist\[\];/extern const char *const sys_errlist[];/' libiberty/strerror.c
 
 nice -n 10 make -C libiberty --jobs "$(sysctl -n hw.ncpu)" CFLAGS="$CFLAGS"
-nice -n 10 make -C gcc --jobs "$(sysctl -n hw.ncpu)" cpp cc1 xgcc CFLAGS="$CFLAGS"
+nice -n 10 make -C gcc --jobs "$(sysctl -n hw.ncpu)" cpp cc1 xgcc CFLAGS="$GCC_CFLAGS"
 
 cd gcc
 ./cc1 -version </dev/null 2>&1 | grep -- -msoft-float
