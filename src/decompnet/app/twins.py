@@ -391,10 +391,26 @@ class Twins:
         """ROM projects on MIPS (N64, PlayStation, PlayStation 2): mips_reason on each open function's code."""
         if (proj["arch"] or "mips") != "mips":
             return 0
-        platform, big = self.net.cfg(proj).get("platform", ""), bool(proj["big_endian"])
+        cfg = self.net.cfg(proj)
+        platform, big = cfg.get("platform", ""), bool(proj["big_endian"])
+        gte = False
+        if platform == "psx":
+            from ..psx_gte import enabled
+            gte = enabled(cfg)
+        if gte:  # set aside only for using the GTE, before its macros: back to agents if nothing else holds it
+            for r in self.net.store.all("SELECT id, target, meta FROM functions WHERE project_id=? AND status='asm' "
+                                        "AND json_extract(meta, '$.asm_code') LIKE 'uses the GTE%'", proj["id"]):
+                if mips_reason(r["target"] or b"", big, platform, allow_gte=True) is None:
+                    meta = json.loads(r["meta"] or "{}")
+                    meta.pop("asm_code", None)
+                    with self.net.store.tx() as db:
+                        db.execute("UPDATE functions SET status='open', meta=? WHERE id=? AND status='asm'",
+                                   (json.dumps(meta) if meta else None, r["id"]))
         marks = []
         for r in self.net.store.all("SELECT id, target, meta FROM functions WHERE project_id=? AND status='open'", proj["id"]):
-            if (why := mips_reason(r["target"] or b"", big, platform)):
+            if json.loads(r["meta"] or "{}").get("for_agents"):
+                continue  # a person gave it back to agents: no rule takes it again
+            if (why := mips_reason(r["target"] or b"", big, platform, allow_gte=gte)):
                 marks.append((json.dumps({**json.loads(r["meta"] or "{}"), "asm_code": why}), r["id"]))
         if marks:
             with self.net.store.tx() as db:

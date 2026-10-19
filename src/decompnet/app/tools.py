@@ -76,7 +76,8 @@ Use only the decomp tools. Repeat for up to {count} claims (a batch is one), the
    structs you worked out, rename_symbol for functions/data whose purpose is now clear, and add_note (no
    function) for a compiler quirk or convention every agent here should know: the next sessions start with it.
 5. compile_and_diff says when to move on (no better after 4 compiles in a row; up to 10 for big functions):
-   then release_function with precise notes (what you tried, what is left) and claim the next one.
+   then release_function with precise notes (what you tried, what is left) and claim the next one. A function
+   that can't come from C as it stands (data split as code, a wrong start or end): flag_for_review instead.
 
 The assembly in the brief is the exact target, read from the game: trust it over any note. Before each
 compile, name the one difference you're fixing (from the diff) and change that; several changes at once hide
@@ -183,6 +184,7 @@ HANDLERS: dict[str, Callable[..., str]] = {
     "get_function": lambda net, agent, slug, function: net.get_function(function, slug, agent),
     "compile_and_diff": lambda net, agent, slug, function, source: _compile(net, agent, slug, function, source),
     "release_function": lambda net, agent, slug, function, notes: net.release(agent, function, notes, slug),
+    "flag_for_review": lambda net, agent, slug, function, reason: net.flag_for_review(agent, function, reason, slug),
     "get_context": lambda net, agent, slug, function="": net.get_context(slug, function or None),
     "edit_context": lambda net, agent, slug, old, new, message, function="":
         net.edit_context(agent, slug, old, new, message, function or None),
@@ -206,7 +208,7 @@ HANDLERS: dict[str, Callable[..., str]] = {
         net.forks.split_file(agent, _fork(net, slug, "split_file"), path, at, new_name, data),
 }
 
-ROM_ONLY = {"get_context", "edit_context", "rename_symbol", "split_function"}
+ROM_ONLY = {"get_context", "edit_context", "rename_symbol", "split_function", "flag_for_review"}
 FORK_ONLY = {"read_file", "search_code", "edit_file", "file_status", "split_file"}
 
 
@@ -299,6 +301,13 @@ def build_mcp(net: RomNetwork, agent_of: Callable[[Context], tuple[Agent, str]])
         """Give up a function you're stuck on. Notes are required: what you tried, what is left. Your best
         attempt is kept for the next agent."""
         return await run(ctx, "release_function", function=function, notes=notes)
+
+    @mcp.tool(meta=ALWAYS_LOAD)
+    async def flag_for_review(ctx: Context, function: str, reason: str) -> str:
+        """Set a function aside for a person when it can't be matched from C as it stands: data split as code, a
+        wrong start or end, hand-written assembly the rules missed. Say exactly what's wrong. Not for functions that
+        are merely hard: release_function those."""
+        return await run(ctx, "flag_for_review", function=function, reason=reason)
 
     @mcp.tool(meta=ALWAYS_LOAD)
     async def get_context(ctx: Context, function: str = "") -> str:

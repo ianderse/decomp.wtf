@@ -653,6 +653,11 @@ def build(net: RomNetwork, home: Path, port: int, secret: str):
             raise ValueError("write the note first")
         return {"message": net.add_note(agent, slug, text[:2000], str(data.get("function", "")) or None)}
 
+    def p_reopen(slug, request, data):
+        """You give a set-aside function back to agents."""
+        net.return_to_agents(slug, str(data.get("name", "")))
+        return {"ok": True}
+
     def p_autopilot(slug, request, data):
         if data.get("action") == "stop":
             net.stop_autopilot(slug)
@@ -670,6 +675,7 @@ def build(net: RomNetwork, home: Path, port: int, secret: str):
         "/api/delete": (p_delete, ["POST"]), "/api/agents/manual": (p_manual, ["POST"]),
         "/api/try": (p_try, ["POST"]), "/api/release": (p_release, ["POST"]),
         "/api/autopilot": (p_autopilot, ["POST"]), "/api/instructions": (p_instructions, ["POST"]),
+        "/api/reopen": (p_reopen, ["POST"]),
         "/api/priority": (p_priority, ["POST"]), "/api/note": (p_note, ["POST"]),
         "/api/stats": (lambda s, r, d: net.stats(s), ["GET"]),
     }

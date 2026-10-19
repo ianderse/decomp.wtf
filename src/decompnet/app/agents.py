@@ -157,6 +157,11 @@ _NO_CREDIT = re.compile(r"insufficient[ _](?:balance|credits?|funds|quota)|excee
                         r"credit balance is too low|payment required|out of credits?", re.I)
 # and when it's asked too much at once (HTTP 429): it works again in a while
 _THROTTLED = re.compile(r"too many requests|rate[ _-]?limit|concurrency limit|\b429\b|overloaded", re.I)
+# a subscription plan's usage limit (Codex: "You've hit your usage limit", Claude Code: "usage limit reached ... resets"):
+# nothing to fix, it comes back on its own. The helper waits instead of failing three times and stopping
+_PLAN_LIMIT = re.compile(r"hit your usage limit|usage limit (?:reached|exceeded)|reached your usage limit|"
+                         r"\b(?:5-hour|weekly|daily) limit\b|limit reached\W+resets", re.I)
+SILENT_MINUTES = 15  # a CLI session that prints nothing this long is stuck: it's ended and a fresh one starts
 
 
 def no_credit(said: str) -> str | None:
@@ -517,6 +522,8 @@ class Session:
     tokens: int = 0
     signed_out: bool = False  # the agent CLI isn't signed in: trying again won't help
     throttled: bool = False  # the last run ended on the provider's limit of requests at once: not a failure
+    plan_limited: bool = False  # the last run ended on the plan's usage limit: wait it out
+    silent: bool = False  # the last run was ended for printing nothing for SILENT_MINUTES
 
     def push(self, kind: str, text: str) -> None:
         self.seq += 1
@@ -758,6 +765,14 @@ class Manager:
             if s.signed_out:
                 s.state = "error"
                 break
+            if s.plan_limited:  # the subscription's usage limit: it resets by itself
+                s.plan_limited = False
+                s.state = "waiting"
+                s.push("info", f"{KINDS[s.kind].name} hit its plan's usage limit: trying again in 30 minutes")
+                s.stop.wait(1800)
+                continue
+            if s.silent:  # stuck, not failed: a fresh session (its claims were let go)
+                s.silent, ok = False, True
             if s.throttled and throttles < 10:  # the provider's limit, not the agent's failure: wait it out
                 s.throttled, throttles = False, throttles + 1
                 s.state = "waiting"
@@ -912,17 +927,31 @@ class Manager:
             except OSError:  # it exited before reading (stderr says why)
                 pass
 
+        heard = [time.time()]  # when it last printed anything (stdout or stderr)
+
         def drain_err():
             for line in proc.stderr:
+                heard[0] = time.time()
                 if (text := clean_stderr(s.kind, line)) and (not errors or errors[-1] != text):
                     errors.append(text)
+
+        def watch():  # stuck sessions (a hung tool call, a model that stopped answering) end, and a fresh one starts
+            while proc.poll() is None:
+                if time.time() - heard[0] > SILENT_MINUTES * 60 and not s.stop.is_set():
+                    s.silent = True
+                    s.push("info", f"no output for {SILENT_MINUTES} minutes: ending this session, a fresh one starts")
+                    _terminate(proc)
+                    return
+                time.sleep(15)
         threading.Thread(target=feed_prompt, daemon=True).start()
         threading.Thread(target=drain_err, daemon=True).start()
+        threading.Thread(target=watch, daemon=True).start()
         saw_tool = False
         said: collections.deque = collections.deque(maxlen=20)
         state: dict = {}
         last_error = refused = ""
         for line in proc.stdout:
+            heard[0] = time.time()
             for kind, text in parse_line(s.kind, line, state):
                 if kind == "usage":
                     self._account(s, json.loads(text))
@@ -942,6 +971,11 @@ class Manager:
             raise Fatal(refused)  # every retry would be refused the same way
         if code != 0 and not s.stop.is_set() and (why := no_credit(" ".join([*said, *errors]))):
             raise Fatal(why)  # every agent on this account fails the same way until it's topped up
+        if s.silent:
+            return False  # (not counted as a failure: see _run)
+        if code != 0 and not s.stop.is_set() and _PLAN_LIMIT.search(" ".join([*said, *errors])):
+            s.plan_limited = True
+            return False
         if code != 0 and not s.stop.is_set() and _THROTTLED.search(" ".join([*said, *errors])):
             s.throttled = True
         if code != 0 and not s.stop.is_set() and _SIGNED_OUT.search(" ".join([*said, *errors])):
@@ -1097,6 +1131,9 @@ def api_tool_schemas(fork: bool = False) -> list[dict]:
                              s(function=st("function name, or several: a, b, c", True), source=st("C source", True))),
         "release_function": ("Give up a function with notes for the next agent.",
                              s(function=st("function", True), notes=st("what you tried, what is left", True))),
+        "flag_for_review": ("Set a function aside for a person when it can't come from C as it stands (data split as "
+                            "code, a wrong boundary, hand-written assembly). Not for hard functions: release those.",
+                            s(function=st("function", True), reason=st("what is wrong with it, exactly", True))),
         "get_context": ("The shared header included in every compile.", s()),
         "edit_context": ("Replace `old` (exactly once) with `new` in the shared header, or append when old is empty.",
                          s(old=st("text to replace, or empty", True), new=st("replacement", True),

@@ -438,7 +438,9 @@ class RomNetwork(Network):
                 db.execute("INSERT INTO symbols(project_id,name,address,size,kind,preview) VALUES(?,?,?,?,?,?)",
                            (pid, s.name, s.address, s.size, s.kind, preview))
             db.execute("INSERT INTO context_versions(project_id,version,header,agent_id,message,created_at,unit) "
-                       "VALUES(?,?,?,?,?,?,?)", (pid, 1, BASE_HEADER.format(title=info["title"]) + (GP_NOTE if res.gp else ""),
+                       "VALUES(?,?,?,?,?,?,?)", (pid, 1, BASE_HEADER.format(title=info["title"]) + (GP_NOTE if res.gp else "")
+                                                  + (__import__("decompnet.psx_gte", fromlist=["TYPES"]).TYPES
+                                                     if picked.platform == "psx" else ""),
                                                   None, "basic types", now, ""))
             self._event(db, pid, None, "import", f"{len(res.functions)} functions from {info['title']}")
         log(f"ready: {len(res.functions)} functions to decompile")
@@ -610,9 +612,19 @@ class RomNetwork(Network):
         calls = sorted(x["calls"].get(fn["vram"], ()))
         callers = sorted(x["called_by"].get(fn["vram"], ()))
         if calls:
-            lines.append("calls: " + ", ".join(syms.label(a) for a in calls[:30]))
+            bios = {r["vram"]: m.group(1) for r in self.store.all(  # BIOS call stubs: what they call
+                f"SELECT vram, meta FROM functions WHERE project_id=? AND status='asm' AND vram IN "
+                f"({','.join('?' * len(calls[:30]))})", proj["id"], *calls[:30])
+                if (m := re.search(r"a BIOS call stub, (bios_\w+)", r["meta"] or ""))}
+            lines.append("calls: " + ", ".join(syms.label(a) + (f" (= {bios[a]})" if a in bios else "") for a in calls[:30]))
         if callers:
             lines.append("called by: " + ", ".join(syms.label(a) for a in callers[:30]))
+        if self.cfg(proj).get("platform") == "psx" and fn["status"] != "matched":
+            from ..psx_gte import count, enabled
+            if (n := count(fn["target"] or b"")) and enabled(self.cfg(proj)):
+                lines += ["", f"GTE: {n} geometry-coprocessor instructions. Write them with the trusted gte_* macros "
+                              "(included in every compile: gte_ldv0, gte_rtps, gte_stsxy, gte_mfc2... see guide('psx')); "
+                              "raw inline assembly is rejected."]
         if fn["status"] != "matched" and (sigs := self._callee_signatures(proj, fn, calls)):
             lines += ["", "### Signatures of functions it calls (from their matching C; declare them like this)",
                       "```c", *sigs, "```"]
@@ -1178,6 +1190,36 @@ class RomNetwork(Network):
         if fn["status"] != "open" or score <= 0 or (fn["best_score"] is not None and score >= fn["best_score"]):
             return
         self._record(fn, agent, score, source, self._context(fn["project_id"], fn["unit"])["version"], via="room")
+
+    def flag_for_review(self, agent: Agent, function: str, reason: str, project: str | None = None) -> str:
+        """An agent sets a function aside for a person: it can't come from C as it stands (data split as code, a wrong
+        boundary, hand-written assembly the rules missed). The person reads why and gives it back, or leaves it."""
+        fn = self._function(function, project)
+        if fn["status"] != "open":
+            raise NetworkError(f"{fn['name']} is {fn['status']}: nothing to set aside")
+        if len(reason.strip()) < 15:
+            raise NetworkError("say what a person should look at, and why it can't be matched from C as it stands")
+        meta = json.loads(fn["meta"] or "{}")
+        meta["review"] = reason.strip()[:600]
+        meta["asm_code"] = f"set aside for a person by {agent.name}: {meta['review']}"
+        with self.store.tx() as db:
+            db.execute("UPDATE functions SET status='asm', meta=? WHERE id=? AND status='open'", (json.dumps(meta), fn["id"]))
+            db.execute("DELETE FROM claims WHERE function_id=?", (fn["id"],))
+            self._event(db, fn["project_id"], agent.id, "review", fn["name"])
+        return (f"Set {fn['name']} aside for a person (it shows on the project page with your reason); it's no longer "
+                f"yours. Claim the next one.")
+
+    def return_to_agents(self, project: str | None, function: str) -> None:
+        """A person gives a set-aside function back to agents; no automatic rule sets it aside again."""
+        fn = self._function(function, project)
+        if fn["status"] != "asm":
+            raise NetworkError(f"{fn['name']} isn't set aside")
+        meta = json.loads(fn["meta"] or "{}")
+        for k in ("asm_code", "asm_twin", "review"):
+            meta.pop(k, None)
+        meta["for_agents"] = True
+        with self.store.tx() as db:
+            db.execute("UPDATE functions SET status='open', meta=? WHERE id=? AND status='asm'", (json.dumps(meta), fn["id"]))
 
     def release(self, agent: Agent, function: str, notes: str, project: str | None = None) -> str:
         if (fork := self.fork_slug(project)):
@@ -1841,6 +1883,7 @@ class RomNetwork(Network):
             "notes": [dict(n) for n in notes],
             "calls": [syms.label(a) for a in sorted(x["calls"].get(fn["vram"], ()))],
             "called_by": [syms.label(a) for a in sorted(x["called_by"].get(fn["vram"], ()))],
+            "set_aside": (json.loads(fn["meta"] or "{}").get("asm_code") or "set aside") if fn["status"] == "asm" else None,
         }
 
     def stats(self, slug: str) -> dict:

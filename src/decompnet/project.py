@@ -123,7 +123,14 @@ def compiler_config(root: Path, cfg: dict) -> CompilerConfig:
         cmd = [a.replace("{aspsx}", str(c.get("aspsx", "2.77"))) for a in cmd]
     else:
         cmd = list(c["cmd"])
+    gte = False
+    if "toolchain" in c:
+        try:
+            gte = toolchains.get(c["toolchain"]).platform == "PS1" and bool(c.get("gte", True))
+        except toolchains.ToolchainError:
+            pass
     return CompilerConfig(
+        psx_gte=gte,
         cmd=cmd,
         timeout=float(c.get("timeout", 15)),
         sandbox=c.get("sandbox", "auto"),

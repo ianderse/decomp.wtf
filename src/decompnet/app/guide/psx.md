@@ -20,9 +20,18 @@ it. Code is mostly C.
 Libraries: PSY-Q's libgte, libgpu, libgs, libspu, libcd, libetc, libapi and libc are usually linked
 as library objects, not decompiled; their names and prototypes are in the project's headers.
 
-GTE (the geometry coprocessor): `mtc2`/`mfc2`/`ctc2`/`cfc2`, `lwc2`/`swc2` and commands like
-`RTPS`/`NCLIP` come from PSY-Q's GTE macros (`gte_ldv0`, `gte_rtps`...). Use the project's macros;
-don't write raw assembly.
+GTE (the geometry coprocessor): every compile includes trusted `gte_*` macros (you can't redefine them, and raw
+inline assembly is rejected). Types `SVECTOR`, `VECTOR`, `DVECTOR`, `CVECTOR`, `RECT`, `MATRIX` are in new projects'
+context.h; add them with edit_context if yours lacks them.
+- `gte_ldv0(p)`, `gte_ldv1(p)`, `gte_ldv2(p)` load a vector; `gte_ldv3(p0, p1, p2)` loads three.
+- Commands: lowercase `gte_rtps()`, `gte_rtpt()`, `gte_nclip()`, `gte_avsz3()`... emit two nops first, as PSY-Q's
+  macros do; uppercase `gte_RTPS()` emits only the command. `gte_mvmva(sf, mx, v, cv, lm)`, `gte_sqr(sf)`,
+  `gte_op(sf)`, `gte_gpf(sf)`, `gte_gpl(sf)` take compile-time constants.
+- Results: `gte_stsxy(p)`, `gte_stsxy3(p0, p1, p2)`, `gte_stsz(p)`, `gte_stotz(p)`, `gte_strgb(p)`, `gte_stflg(p)`.
+- Registers: `gte_mfc2(reg)` / `gte_cfc2(reg)` read one (with the load-delay nop), `gte_mtc2(reg, value)` /
+  `gte_ctc2(reg, value)` write one; `gte_lwc2(reg, p)` / `gte_swc2(reg, p)` move memory.
+The memory helpers clobber memory, which can move instructions around them: compare the bytes, nops included. m2c
+often has no draft for GTE code: work from the assembly. Reference: https://psx-spx.consoledev.net/geometrytransformationenginegte/
 
 Typical patterns: `jtbl_` jump tables in .rodata for dense switches; overlays loaded at the same address
 (separate units); `D_800xxxxx` data and `func_800xxxxx` names for things nobody named yet.

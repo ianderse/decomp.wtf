@@ -181,6 +181,10 @@ def _mips_uses(w: int) -> tuple[set[int], set[int]] | None:
         return ({rs}, {rt})
     if op == 15:  # lui
         return (set(), {rt})
+    if op in (0x32, 0x3A, 0x36, 0x3E):  # coprocessor 2 loads/stores: a GPR base, no GPR written
+        return ({rs}, set())
+    if op == 0x12:  # coprocessor 2: mfc2/cfc2 write a GPR, mtc2/ctc2 read one, commands touch none
+        return ((set(), {rt}) if rs in (0, 2) else ({rt}, set()) if rs in (4, 6) else (set(), set()))
     if op in _MIPS_LOAD:
         return ({rs}, {rt})
     if op in _MIPS_STORE:
@@ -198,17 +202,30 @@ def _mips_uses(w: int) -> tuple[set[int], set[int]] | None:
     return None
 
 
-def mips_reason(code: bytes, big_endian: bool, platform: str = "") -> str | None:
+def mips_reason(code: bytes, big_endian: bool, platform: str = "", allow_gte: bool = False) -> str | None:
     """Why this MIPS function (its code, from the entry) can't come from a compiler, or None."""
     order = "big" if big_endian else "little"
     words = [int.from_bytes(code[at:at + 4], order) for at in range(0, len(code) - 3, 4)]
     if not words:
         return None
+    if platform in ("psx", "ps") and not big_endian:
+        from .rom.psx_bios import recognize
+        if (bios := recognize(code)):
+            what = f" ({bios['api']})" if bios["api"] else ""
+            return (f"a BIOS call stub, {bios['name']}: it jumps into the BIOS's {bios['gate']} table at slot "
+                    f"0x{bios['slot']:02X}{what}. Sony's libraries wrote these in assembly; call it by its name")
     for w in words:
         op = w >> 26
         if op == 0x10:
             return "uses coprocessor 0 (the system's: mfc0, mtc0, rfe, eret): no C compiler emits it"
         if platform in ("psx", "ps", "ps2") and (op == 0x12 or op in (0x32, 0x3A, 0x36, 0x3E)):
+            if platform in ("psx", "ps") and allow_gte:  # the trusted gte_* macros emit these (psx_gte.h)
+                from .psx_gte import COMMANDS
+                rs = (w >> 21) & 31
+                if op in (0x32, 0x3A) or (op == 0x12 and (
+                        (rs in (0, 2, 4, 6) and not (w & 0x7FF)) or (rs >= 16 and (w & 63) in COMMANDS))):
+                    continue
+                return "uses a GTE instruction the trusted gte_* macros can't emit"
             unit = "the GTE (coprocessor 2)" if platform != "ps2" else "VU0 (coprocessor 2)"
             return (f"uses {unit}: no C compiler emits it (PSY-Q's libgte is written in assembly; C does it with "
                     "inline asm)" if platform != "ps2" else f"uses {unit}: C reaches it only through inline asm")

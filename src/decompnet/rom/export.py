@@ -172,9 +172,15 @@ def export_rom(net, slug: str, out: Path, log=print) -> dict:
     units = net._unit_contexts(proj["id"])
     header = net._context(proj["id"])["header"]
     (out / "include").mkdir(exist_ok=True)
-    (out / "include" / "common.h").write_text(header, encoding="utf-8")
+    gte = ""
+    if platform == "psx":  # the trusted GTE macros every PS1 compile includes (psx_gte.py)
+        from ..psx_gte import enabled, header_path
+        if enabled(cfg):
+            shutil.copyfile(header_path(), out / "include" / "psx_gte.h")
+            gte = '#include "psx_gte.h"\n'
+    (out / "include" / "common.h").write_text(gte + header, encoding="utf-8")
     for u in units:
-        (out / "include" / f"common_{u}.h").write_text(net._context(proj["id"], u)["header"], encoding="utf-8")
+        (out / "include" / f"common_{u}.h").write_text(gte + net._context(proj["id"], u)["header"], encoding="utf-8")
     functions = []
     for path in sorted((out / "asm" / "nonmatchings").glob("**/*.s")):
         rom_off, vram = _first_address(path)

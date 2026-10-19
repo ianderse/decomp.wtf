@@ -61,6 +61,7 @@ class CompilerConfig:
     include_dirs: tuple[str, ...] = ()  # absolute paths of extra (static) header dirs
     runtime32: str | None = None  # 32-bit x86 C runtime for old i386 compiler binaries (see toolchains)
     wsl: bool = False  # a Linux toolchain on Windows: runs inside WSL 2, `cmd` holds WSL paths (see wsl.py)
+    psx_gte: bool = False  # a PS1 compiler: the trusted GTE macros (psx_gte.h) come before the context
 
 
 @dataclass
@@ -136,6 +137,10 @@ def compile_source(cfg: CompilerConfig, context_header: str, source: str, truste
     if not trusted:
         try:
             check_source(source)
+            if cfg.psx_gte:  # neither the source nor the shared header may swap the trusted macros for raw asm
+                from .psx_gte import check_overrides
+                check_overrides(source)
+                check_overrides(context_header)
         except SourceRejected as e:
             return CompileResult(False, None, f"rejected: {e}")
 
@@ -145,9 +150,13 @@ def compile_source(cfg: CompilerConfig, context_header: str, source: str, truste
         inc.mkdir()
         for d in cfg.include_dirs:
             shutil.copytree(d, inc, dirs_exist_ok=True)
+        if cfg.psx_gte:  # after the project's own headers, so none of them can stand in for it
+            from .psx_gte import header_path
+            shutil.copyfile(header_path(), inc / "psx_gte.h")
         # LF on every platform: to the old GCCs a backslash before CRLF doesn't continue a line ("stray '\' in program")
         (inc / "context.h").write_text(context_header, encoding="utf-8", newline="\n")
-        (work / "func.c").write_text('#include "context.h"\n#line 1 "func.c"\n' + source + "\n", encoding="utf-8",
+        prefix = '#include "psx_gte.h"\n' if cfg.psx_gte else ""
+        (work / "func.c").write_text(prefix + '#include "context.h"\n#line 1 "func.c"\n' + source + "\n", encoding="utf-8",
                                      newline="\n")
 
         root = _root(cfg, work)
