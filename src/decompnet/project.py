@@ -53,22 +53,27 @@ def load_config(root: Path) -> dict:
 
 
 def toolchain_id(spec: str) -> str:
-    """The registry id in a toolchain spec ("gcc-2.8.1-psx@2.34", "gcc-2.7.2-psx:gnu-as" -> the part before)."""
-    return re.split(r"[:@]", spec, maxsplit=1)[0]
+    """The registry id in a toolchain spec ("gcc-2.8.1-psx@2.34", "gcc-2.8.1-psx/O1", "gcc-2.7.2-psx:gnu-as")."""
+    return re.split(r"[:@/]", spec, maxsplit=1)[0]
 
 
 def with_toolchain(compiler: dict, spec: str | None) -> dict:
-    """A project's compiler settings with another toolchain: an id; id + "@<version>" for another version of Sony's
+    """A project's compiler settings with another toolchain: an id; id + "/O1" for another optimization level;
+    id + "@<version>" for another version of Sony's
     assembler (maspsx's --aspsx-version: parts of a game were often assembled with an older one, Sony's libraries
     above all); or id + ":gnu-as" for its plain command (GNU as without the template's assembler step)."""
     if not spec:
         return compiler
     head, _, variant = spec.partition(":")
+    head, _, opt = head.partition("/")  # "/O1": another optimization level (a file built with -O1, say)
     tid, _, aspsx = head.partition("@")
     out = {**compiler, "toolchain": tid}
     out.pop("assembler", None)
     if aspsx:
         out["aspsx"] = aspsx
+    if opt:
+        flags = compiler.get("flags") or toolchains.get(tid).flags
+        out["flags"] = [f for f in flags if not re.fullmatch(r"-O\d?", f)] + [f"-{opt}"]
     if variant == "gnu-as":
         out["assembler"] = "gnu"
     return out

@@ -31,7 +31,9 @@ RELEASE_COOLDOWN = 15 * 60
 # the other compiler versions of a platform, tried on a near miss: a game is sometimes built with two of them
 # (":gnu-as": without maspsx, for code that wasn't built with Sony's assembler, like some library code)
 # ("@2.34": an older version of Sony's assembler; on SLUS-01252 62 stuck best attempts matched that way)
-_PSX_OLDER = ("gcc-2.8.1-psx@2.34", "gcc-2.8.1-psx@2.21", "gcc-2.7.2-psx@2.21", "gcc-2.7.2-psx@2.34", "gcc-2.8.1-psx@2.56")
+# ("/O1": built at -O1; 38 of them with GCC 2.8.1 there)
+_PSX_OLDER = ("gcc-2.8.1-psx@2.34", "gcc-2.8.1-psx@2.21", "gcc-2.7.2-psx@2.21", "gcc-2.7.2-psx@2.34", "gcc-2.8.1-psx@2.56",
+              "gcc-2.8.1-psx/O1", "gcc-2.7.2-psx/O1")
 ALTERNATES = {"gcc-2.7.2-psx": ("gcc-2.8.1-psx", "gcc-2.7.2-psx:gnu-as", "gcc-2.8.1-psx:gnu-as", *_PSX_OLDER),
               "gcc-2.8.1-psx": ("gcc-2.7.2-psx", "gcc-2.8.1-psx:gnu-as", "gcc-2.7.2-psx:gnu-as", *_PSX_OLDER)}
 MACHINE_AGENTS = ("autopilot", "permuter")  # decomp.wtf's own workers: their claims never mean "given up on"
