@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import subprocess
 import sys
@@ -80,23 +81,29 @@ def c_source(fn: dict) -> str | None:
     return path if (ROOT / path).exists() else None
 
 
-def objects() -> tuple[list[tuple[str, str, str]], dict[str, str]]:
-    """[(kind, source, object)] to build, and function name -> the object that provides it."""
+def key(fn: dict) -> str:
+    """A function's segment and name: overlays loaded at the same address have functions with the same names."""
+    return f"{fn['seg']}/{fn['name']}"
+
+
+def objects(as_asm: frozenset[str] = frozenset()) -> tuple[list[tuple[str, str, str]], dict[str, str]]:
+    """[(kind, source, object)] to build, and function (key()) -> the object that provides it. Functions in `as_asm`
+    are built from their assembly even when they have C."""
     out, provides = [], {}
     for a in B["assembly"]:
         out.append(("asm", a["src"], a["obj"]))
     for fn in B["functions"]:
-        c = c_source(fn)
+        c = c_source(fn) if key(fn) not in as_asm else None
         if c:
             obj = f"build/{Path(c).with_suffix('.o').as_posix()}"
             out.append(("c", c, obj))
         else:
-            wrap = ROOT / "build" / "wrap" / f"{fn['name']}.s"
+            wrap = ROOT / "build" / "wrap" / fn["seg"] / f"{fn['name']}.s"
             wrap.parent.mkdir(parents=True, exist_ok=True)
             wrap.write_text(PREAMBLE[B["platform"]] + f'.include "{fn["asm"]}"\n', encoding="utf-8")
             obj = f"build/{Path(fn['asm']).with_suffix('.o').as_posix()}"
             out.append(("asm", wrap.relative_to(ROOT).as_posix(), obj))
-        provides[fn["name"]] = obj
+        provides[key(fn)] = obj
     return out, provides
 
 
@@ -129,32 +136,69 @@ def trim(path: Path) -> None:
     path.write_bytes(bytes(data))
 
 
+def as_bytes(path: Path) -> str:
+    """A function's assembly with each instruction replaced by its bytes, from splat's /* rom vram bytes */ comments."""
+    out = []
+    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        m = re.match(r"\s*/\*\s*[0-9A-Fa-f]+\s+[0-9A-Fa-f]{8}\s+([0-9A-Fa-f]{8})\s*\*/", line)
+        if m:
+            out.append(".byte " + ", ".join(f"0x{m.group(1)[i:i + 2]}" for i in range(0, 8, 2)))
+        else:
+            out.append(line)
+    return "\n".join(out) + "\n"
+
+
 def compiler_for(fn: dict | None):
     """The project's compiler, or the function's own (a game built with two compiler versions)."""
     return compiler_config(ROOT, {"compiler": with_toolchain(B["compiler"], (fn or {}).get("toolchain"))})
 
 
 def build_objects(todo: list[tuple[str, str, str]]) -> None:
+    from concurrent.futures import ThreadPoolExecutor
+
     owner = {c_source(fn): fn for fn in B["functions"] if fn.get("toolchain")}
     cfgs = {}
     as_ = binutils("as")
+    headers = max((h.stat().st_mtime for h in (ROOT / "include").glob("**/*") if h.is_file()), default=0)
+    compiles = []
     for kind, src, obj in todo:
         target = ROOT / obj
         target.parent.mkdir(parents=True, exist_ok=True)
-        if target.exists() and target.stat().st_mtime > (ROOT / src).stat().st_mtime and kind == "asm":
+        if target.exists() and target.stat().st_mtime > max((ROOT / src).stat().st_mtime,
+                                                             headers if kind == "c" else 0):
             continue
         if kind == "asm":
-            run([as_, *B["as_flags"], "-o", obj, src])
+            res = subprocess.run([as_, *B["as_flags"], "-o", obj, src], cwd=ROOT, capture_output=True, text=True,
+                                 encoding="utf-8", errors="replace")
+            if res.returncode != 0 and src.startswith("build/wrap/"):
+                # instructions this processor doesn't have (data splat took for code): the bytes as they are
+                original = re.search(r'\.include "([^"]+)"\s*$', (ROOT / src).read_text(encoding="utf-8")).group(1)
+                (ROOT / src).write_text(PREAMBLE[B["platform"]] + as_bytes(ROOT / original), encoding="utf-8")
+                res = subprocess.run([as_, *B["as_flags"], "-o", obj, src], cwd=ROOT, capture_output=True, text=True,
+                                     encoding="utf-8", errors="replace")
+            if res.returncode != 0:
+                fail(f"assembling {src} failed:\n{(res.stdout + res.stderr)[-3000:]}")
         else:
             fn = owner.get(src)
             if (key := src if fn else None) not in cfgs:
                 cfgs[key] = compiler_for(fn)
-            cfg = cfgs[key]
-            argv = [a.replace("{src}", src).replace("{obj}", obj).replace("{include}", "include") for a in cfg.cmd]
-            res = run_in(cfg, ROOT, argv, inputs=[src, "include"], outputs=[obj])
-            if res.returncode != 0 or not target.exists():
-                fail(f"compiling {src} failed:\n{(res.stdout + res.stderr)[-3000:]}")
-            trim(target)
+            compiles.append((cfgs[key], src, obj))
+
+    def compile_one(job) -> str | None:
+        cfg, src, obj = job
+        argv = [a.replace("{src}", src).replace("{obj}", obj).replace("{include}", "include") for a in cfg.cmd]
+        res = run_in(cfg, ROOT, argv, inputs=[src, "include"], outputs=[obj])
+        if res.returncode != 0 or not (ROOT / obj).exists():
+            return f"compiling {src} failed:\n{(res.stdout + res.stderr)[-3000:]}"
+        trim(ROOT / obj)
+        return None
+
+    if compiles:
+        print(f"compiling {len(compiles)} C files")
+    with ThreadPoolExecutor(max_workers=os.cpu_count() or 4) as pool:
+        for err in pool.map(compile_one, compiles):
+            if err:
+                fail(err)
 
 
 def _size(obj: str, sections: tuple[str, ...]) -> int:
@@ -175,7 +219,7 @@ def fill_gaps(provides: dict[str, str]) -> list[tuple[int, str]]:
             continue
         end = seg["end"] if seg["end"] is not None else len(image)
         covered = [(p["vram"], _size(p["obj"], (".text", ".data", ".rodata", ".sdata", ".rdata"))) for p in seg["pieces"]]
-        covered += [(fn["vram"], _size(provides[fn["name"]], (".text",))) for fn in B["functions"]
+        covered += [(fn["vram"], _size(provides[key(fn)], (".text",))) for fn in B["functions"]
                     if fn["rom"] is not None and seg["start"] <= fn["rom"] < end]
         pos = seg["vram"]
         for vram, size in sorted(covered) + [(seg["vram"] + end - seg["start"], 0)]:
@@ -193,10 +237,15 @@ def fill_gaps(provides: dict[str, str]) -> list[tuple[int, str]]:
     return extra
 
 
-def linker_script(provides: dict[str, str], gaps: list[tuple[int, str]]) -> str:
+def linker_script(provides: dict[str, str], gaps: list[tuple[int, str]], segments: list[dict] | None = None,
+                  elsewhere: dict[str, int] | None = None, fixed: dict[str, int] | None = None) -> str:
+    """The linker script for `segments` (default: all of them); `elsewhere`: what the other links define, for the
+    names these segments use from them (an overlay calling into the main program, the main program into an overlay);
+    `fixed`: names defined outright (the main program's, in an overlay's link)."""
+    segments = B["segments"] if segments is None else segments
     lines = ["/* Generated by build.py from build.json: every function and data block at its original address. */",
              "SECTIONS", "{"]
-    for seg in B["segments"]:
+    for seg in segments:
         if seg["kind"] == "raw":
             objs = " ".join(f"{o}(.data .text .rodata)" for o in seg["objects"])
             lines.append(f"    .{seg['name']} 0x{seg['start']:X} : AT(0x{seg['start']:X}) {{ {objs} }}")
@@ -207,7 +256,7 @@ def linker_script(provides: dict[str, str], gaps: list[tuple[int, str]]) -> str:
         items += [(v, f"{obj}(.data)") for v, obj in gaps if vram <= v < vram + end - start]
         for fn in B["functions"]:
             if fn["rom"] is not None and start <= fn["rom"] < end:
-                items.append((fn["vram"], f"{provides[fn['name']]}(.text)"))
+                items.append((fn["vram"], f"{provides[key(fn)]}(.text)"))
         lines += [f"    .{seg['name']} 0x{vram:08X} : AT(0x{start:X}) SUBALIGN(4)", "    {"]
         lines += [f"        . = 0x{v - vram:X}; {what}" for v, what in sorted(items)]
         lines.append("    }")
@@ -217,10 +266,13 @@ def linker_script(provides: dict[str, str], gaps: list[tuple[int, str]]) -> str:
             lines += [f"        . = 0x{b['vram'] - bss_vram:X}; {b['obj']}(.bss .sbss)" for b in seg["bss"]]
             lines.append("    }")
     n = 0
+    names = {seg["name"] for seg in segments}
     for fn in B["functions"]:
         for section, base in (fn.get("own") or {}).items():
-            if c_source(fn):
-                lines.append(f"    .own_{n} 0x{base:08X} (NOLOAD) : {{ {provides[fn['name']]}({section}) }}")
+            if key(fn) in provides and provides[key(fn)].startswith("build/src/") and fn["seg"] in names:
+                # SUBALIGN(1): at the address the matcher found, not moved up to the section's alignment (a jump
+                # table GCC aligns to 8 at an address that's 4 past one)
+                lines.append(f"    .own_{n} 0x{base:08X} (NOLOAD) : SUBALIGN(1) {{ {provides[key(fn)]}({section}) }}")
                 n += 1
     # own data of C functions nobody placed yet: kept out of the image; `build.py check` places it
     lines.append(f"    .unplaced 0xF0000000 (NOLOAD) : {{ build/src/*({OWN}) }}")
@@ -230,10 +282,13 @@ def linker_script(provides: dict[str, str], gaps: list[tuple[int, str]]) -> str:
     lines += [f"{name} = 0x{addr:08X};" for name, addr in B["symbols"].items()]
     # jump tables in the data point at labels inside functions (.L001006F8); with one object per function those
     # labels are local to another object, so give them their addresses (which their names spell out)
-    labels = set()
-    for path in (ROOT / "asm" / "data").glob("**/*.s"):
-        labels.update(re.findall(r"\.word\s+\.L([0-9A-Fa-f]{8})\b", path.read_text(errors="replace", encoding="utf-8")))
-    lines += [f'".L{label}" = 0x{label};' for label in sorted(labels)]
+    # (and a branch into another function's label: splat split one routine in two)
+    lines += [f'".L{label}" = 0x{label};' for label in sorted(_cross_labels())]
+    # an auto-named symbol a function uses that its link doesn't define (inside a bigger data block, or another
+    # overlay's): where its name says
+    lines += [f"PROVIDE({name} = 0x{name.rsplit('_', 1)[1]});" for name in sorted(_spelled_names(provides) - set(elsewhere or {}) - set(fixed or {}))]
+    lines += [f"PROVIDE({name} = 0x{addr:08X});" for name, addr in sorted((elsewhere or {}).items())]
+    lines += [f"{name} = 0x{addr:08X};" for name, addr in sorted((fixed or {}).items()) if name not in B["symbols"]]
     # the segment symbols splat projects use (start-up code clears .bss with them)
     image_size = (ROOT / B["image"]).stat().st_size
     for seg in B["segments"]:
@@ -250,17 +305,150 @@ def linker_script(provides: dict[str, str], gaps: list[tuple[int, str]]) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _code(seg: dict, image_size: int) -> tuple[int, int]:
+    return seg["vram"], seg["vram"] + (seg["end"] if seg["end"] is not None else image_size) - seg["start"]
+
+
+_CACHE: dict[str, set[str]] = {}
+
+
+def _cross_labels() -> set[str]:
+    if "labels" not in _CACHE:
+        found = set()
+        for path in (ROOT / "asm").glob("**/*.s"):
+            text = path.read_text(errors="replace", encoding="utf-8")
+            if path.is_relative_to(ROOT / "asm" / "data"):
+                found.update(re.findall(r"\.word\s+\.L([0-9A-Fa-f]{8})\b", text))
+            else:
+                here = set(re.findall(r"^\s*\.L([0-9A-Fa-f]{8}):", text, re.M))
+                found.update(set(re.findall(r"\.L([0-9A-Fa-f]{8})\b", text)) - here)
+        _CACHE["labels"] = found
+    return _CACHE["labels"]
+
+
+def _spelled_names(provides: dict[str, str]) -> set[str]:
+    key = "spelled" + str(len(provides))
+    if key not in _CACHE:
+        found = set()
+        sources = [ROOT / Path(obj).relative_to("build").with_suffix(".c") for obj in set(provides.values())
+                   if obj.startswith("build/src/")] + list((ROOT / "asm" / "nonmatchings").glob("**/*.s"))
+        for src in sources:
+            found.update(re.findall(r"\b(?:D|func|jtbl)_[0-9A-F]{8}\b", src.read_text(errors="replace", encoding="utf-8")))
+        _CACHE[key] = found - set(B["symbols"])
+    return _CACHE[key]
+
+
+def links() -> list[list[dict]]:
+    """The segments linked together. One link for everything, unless code segments share addresses (overlays loaded
+    at the same place in turn): then each of those is its own link, and the rest go with the first."""
+    size = (ROOT / B["image"]).stat().st_size
+    code = [seg for seg in B["segments"] if seg["kind"] == "code"]
+    spans = [_code(seg, size) for seg in code]
+    if not any(a[0] < b[1] and b[0] < a[1] for i, a in enumerate(spans) for b in spans[i + 1:]):
+        return [B["segments"]]
+    return [[seg for seg in B["segments"] if seg["kind"] != "code"] + code[:1]] + [[seg] for seg in code[1:]]
+
+
+_LABEL = re.compile(r"^\s*(?:glabel|dlabel|jlabel)\s+(\w+)\s*\n\s*/\*\s*[0-9A-Fa-f]+\s+([0-9A-Fa-f]{8})\s", re.M)
+
+
+def _labels(src: str) -> dict[str, int]:
+    text = (ROOT / src).read_text(encoding="utf-8", errors="replace")
+    for inc in re.findall(r'\.include "([^"]+)"', text):  # a function's wrapper: its assembly
+        if inc != "macro.inc":
+            text += (ROOT / inc).read_text(encoding="utf-8", errors="replace")
+    return {m.group(1): int(m.group(2), 16) for m in _LABEL.finditer(text)}
+
+
+def oversized(provides: dict[str, str]) -> list[tuple[str, int, int]]:
+    """C functions whose code is longer than the room before the next function or data block: (name, size, room)."""
+    image_size = (ROOT / B["image"]).stat().st_size
+    out = []
+    for seg in B["segments"]:
+        if seg["kind"] != "code":
+            continue
+        end = _code(seg, image_size)[1]
+        at = sorted({p["vram"] for p in seg["pieces"]} | {fn["vram"] for fn in B["functions"]
+                                                          if fn["rom"] is not None and seg["name"] == fn["seg"]} | {end})
+        for fn in B["functions"]:
+            obj = provides.get(key(fn), "")
+            if fn["seg"] != seg["name"] or not obj.startswith("build/src/"):
+                continue
+            room = next(a for a in at if a > fn["vram"]) - fn["vram"]
+            if (size := _size(obj, (".text",))) > room:
+                out.append((key(fn), size, room))
+    return out
+
+
 def build() -> bool:
     setup()
     todo, provides = objects()
     build_objects(todo)
+    too_big = oversized(provides)
+    if too_big:  # its object holds more than the function (and would overwrite what follows): its assembly instead
+        for name, size, room in too_big:
+            print(f"warning: {name}'s C compiles to 0x{size:X} bytes, 0x{room:X} fit: built from its assembly")
+        todo, provides = objects(frozenset(name for name, _, _ in too_big))
+        build_objects(todo)
     gaps = fill_gaps(provides)
-    (ROOT / "build" / "game.ld").write_text(linker_script(provides, gaps), encoding="utf-8")
-    objs = sorted({obj for _, _, obj in todo} | {obj for _, obj in gaps})
-    run([binutils("ld"), *B["ld_flags"], "-T", "build/game.ld", "-o", "build/game.elf", *objs])
-    run([binutils("objcopy"), "-O", "binary", "build/game.elf", B["output"]])
-    out, base = (ROOT / B["output"]).read_bytes(), (ROOT / B["image"]).read_bytes()
-    c_count = sum(1 for fn in B["functions"] if c_source(fn))
+    if gaps:
+        print(f"note: {len(gaps)} stretches no function or data block covers were copied from {B['image']}")
+    groups = links()
+    # which link each object goes into: its segment's; assembly that isn't in any segment goes with the first
+    seg_of = {}
+    for seg in B["segments"]:
+        for o in seg.get("objects", []):
+            seg_of[o] = seg["name"]
+        for piece in seg.get("pieces", []) + seg.get("bss", []):
+            seg_of[piece["obj"]] = seg["name"]
+    for fn in B["functions"]:
+        seg_of[provides[key(fn)]] = fn["seg"]
+    image_size = (ROOT / B["image"]).stat().st_size
+    for vram, obj in gaps:
+        seg_of[obj] = next(seg["name"] for seg in B["segments"] if seg["kind"] == "code"
+                           and _code(seg, image_size)[0] <= vram < _code(seg, image_size)[1])
+    group_of = {seg["name"]: i for i, group in enumerate(groups) for seg in group}
+    srcs = {obj: src for _, src, obj in todo}
+    members: list[list[str]] = [[] for _ in groups]
+    for obj in sorted({obj for _, _, obj in todo} | {obj for _, obj in gaps}):
+        members[group_of.get(seg_of.get(obj, ""), 0)].append(obj)
+    defined = [{} for _ in groups]  # the labels each link defines, for the others' PROVIDEs
+    if len(groups) > 1:
+        for i, objs in enumerate(members):
+            for obj in objs:
+                if obj in srcs and not srcs[obj].endswith(".c"):
+                    defined[i].update(_labels(srcs[obj]))
+        for fn in B["functions"]:
+            defined[group_of.get(fn["seg"], 0)][fn["name"]] = fn["vram"]
+    out = bytearray()
+    for i, group in enumerate(groups):
+        tag = "game" if len(groups) == 1 else f"game.{group[-1]['name']}"
+        elsewhere = {}
+        for j, other in enumerate(defined):
+            if j != i:
+                for name, addr in other.items():
+                    elsewhere.setdefault(name, addr)
+        for name in defined[i]:
+            elsewhere.pop(name, None)
+        # an overlay gets the main program's names as definitions, not PROVIDEs: a variable the shared header declares
+        # without `extern` is a common in every C object, and only a definition puts it where the main program has it
+        fixed = {name: addr for name, addr in defined[0].items() if name not in defined[i]} if i else {}
+        for name in fixed:
+            elsewhere.pop(name, None)
+        (ROOT / "build" / f"{tag}.ld").write_text(linker_script(provides, gaps, group, elsewhere, fixed),
+                                                  encoding="utf-8")
+        run([binutils("ld"), *B["ld_flags"], "-T", f"build/{tag}.ld", "-o", f"build/{tag}.elf", *members[i]])
+        run([binutils("objcopy"), "-O", "binary", f"build/{tag}.elf", f"build/{tag}.bin"])
+        part = (ROOT / "build" / f"{tag}.bin").read_bytes()
+        at = min(seg["start"] for seg in group)
+        if len(out) < at + len(part):
+            out.extend(bytes(at + len(part) - len(out)))
+        out[at:at + len(part)] = part
+    base = (ROOT / B["image"]).read_bytes()
+    if len(out) < len(base) and not base[len(out):].strip(b"\0"):
+        out.extend(bytes(len(base) - len(out)))  # the image's zero padding at the end
+    (ROOT / B["output"]).write_bytes(bytes(out))
+    c_count = sum(1 for p in provides.values() if p.startswith("build/src/"))
     if out == base:
         print(f"identical: {B['output']} matches {B['image']} byte for byte "
               f"({c_count} of {len(B['functions'])} functions in C)")

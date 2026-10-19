@@ -60,16 +60,24 @@ def _first_address(path: Path) -> tuple[int | None, int | None]:
 def _symbol_lines(net, proj) -> list[str]:
     """symbol_addrs.txt entries for every function and every named symbol, so splat writes the project's names."""
     syms = net.symbols(proj["id"])
-    rows = net.store.all("SELECT name, vram, size, rom_offset FROM functions WHERE project_id=? ORDER BY vram, rom_offset",
-                         proj["id"])
+    rows = net.store.all("SELECT name, vram, size, rom_offset, unit FROM functions WHERE project_id=? "
+                         "ORDER BY vram, rom_offset", proj["id"])
     funcs = {r["vram"] for r in rows}
     lines = []
     for r in rows:  # with its ROM offset: overlays share addresses, and splat then names it in its own overlay only
         rom = f" rom:0x{r['rom_offset']:X}" if r["rom_offset"] is not None else ""
         lines.append(f"{r['name']} = 0x{r['vram']:08X}; // type:func{rom}")
+    segs = [s for s in net.cfg(proj).get("segments") or [] if s.get("vram") is not None]
     for s in sorted(syms.by_name.values(), key=lambda s: s.address):
         if s.address in funcs or AUTO_NAME.match(s.name):
             continue
+        at = [g for g in segs if g["vram"] <= s.address < g["vram"] + g["rom_end"] - g["rom_start"]]
+        if len(at) > 1:  # overlays share this address: only where it isn't inside one of their functions
+            free = [g for g in at if not any(r["unit"] == g["name"] and r["vram"] <= s.address < r["vram"] + r["size"]
+                                             for r in rows)]
+            if len(free) == 1:
+                lines.append(f"{s.name} = 0x{s.address:08X}; // segment:{free[0]['name']}")
+            continue  # (otherwise unknown: splat would put it in every one of them; C still links by its address)
         lines.append(f"{s.name} = 0x{s.address:08X};")
     return lines
 
@@ -92,10 +100,25 @@ def _segments(config: dict) -> list[dict]:
     return out
 
 
+def _defined_name(head: str) -> str | None:
+    """The function a definition's head (everything before its `{`) defines: the name right before its last,
+    balanced, parameter list (not a macro's, earlier on: `#define F(p) (...)` then `void f(void) {`)."""
+    k = len(head.rstrip())
+    if not k or head[k - 1] != ")":
+        return None
+    depth = 0
+    for i in range(k - 1, -1, -1):
+        depth += {")": 1, "(": -1}.get(head[i], 0)
+        if depth == 0:
+            m = re.search(r"\b([A-Za-z_]\w*)\s*$", head[:i])
+            return m.group(1) if m else None
+    return None
+
+
 def own_source(source: str, name: str, functions: set[str]) -> str:
     """A function's matched source with only its own definition: agents often match several functions with one
     compile, and each keeps that whole source. The other functions' definitions become prototypes (calls keep their
-    argument types); everything else (types, externs, globals) stays."""
+    argument types), except inline ones; everything else (types, externs, globals) stays."""
     from ..forks.csource import _blank
 
     flat = _blank(source)
@@ -103,9 +126,7 @@ def own_source(source: str, name: str, functions: set[str]) -> str:
     for k, ch in enumerate(flat):
         if ch == "{":
             if depth == 0:
-                head = flat[start:k]
-                m = re.search(r"\b([A-Za-z_]\w*)\s*\([^;{}]*\)\s*$", head, re.S)  # name(params) right before {
-                cuts.append([m.group(1) if m else None, start, k, None])
+                cuts.append([_defined_name(flat[start:k]), start, k, None])
             depth += 1
         elif ch == "}":
             depth -= 1
@@ -119,6 +140,8 @@ def own_source(source: str, name: str, functions: set[str]) -> str:
     for fname, head_at, brace, end in cuts:
         if fname is None or fname == name or fname not in functions or end is None:
             continue
+        if re.search(r"\binline\b|__inline", flat[head_at:brace]):
+            continue  # an inline helper is compiled into the function: its body stays
         out += [source[at:brace].rstrip(), ";"]
         at = end
     return "".join(out) + source[at:]
