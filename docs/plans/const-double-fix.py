@@ -17,6 +17,13 @@ Assumes sizeof (REAL_VALUE_TYPE) == 2 * sizeof (HOST_WIDE_INT): a host double an
 import pathlib, re, sys
 
 root = pathlib.Path(sys.argv[1])
+
+
+def write(f, text, **kw):  # the tarballs' files are read-only
+    f.chmod(f.stat().st_mode | 0o200)
+    f.write_text(text, **kw)
+
+
 MACROS = '''
 /* arm64 port: the halves of a CONST_DOUBLE live in separate rtunion slots, copy them one by one (const-double-fix.py) */
 #define CONST_DOUBLE_TO_BYTES(r, p) \\
@@ -31,13 +38,13 @@ s = real.read_text()
 if 'CONST_DOUBLE_TO_BYTES' not in s:
     s, n = re.subn(r'(#define CONST_DOUBLE_HIGH\(r\) XWINT \(r, 3\)\n)', lambda m: m.group(1) + MACROS, s, count=1)
     assert n == 1, 'CONST_DOUBLE_HIGH not found in real.h'
-    real.write_text(s)
+    write(real, s)
 
 old = real.read_text()
 new = re.sub(r'(#define REAL_VALUE_TO_TARGET_(?:SINGLE|DOUBLE)\(IN, OUT\)(?:[^\n]*\\\n)+[^\n]*)',
              lambda m: m.group(1).replace('*(long *) &f', '*(unsigned int *) &f').replace('((long *) &in)', '((unsigned int *) &in)'), old)
 if new != old:
-    real.write_text(new)
+    write(real, new)
     print('real.h: host-format REAL_VALUE_TO_TARGET_* read unsigned int')
 
 EXPR = r'((?:[^()]|\((?:[^()]|\([^()]*\))*\))*)'          # an expression with up to two levels of parentheses
@@ -51,7 +58,7 @@ for f in list(root.glob('*.c')) + list(root.glob('*.h')) + list(root.glob('confi
     u, n2 = FROM.subn(r'CONST_DOUBLE_FROM_BYTES (\2, \1)', u)
     u, n3 = EQ.subn(r'CONST_DOUBLE_BYTES_EQ (\1, \2)', u)
     if n1 + n2 + n3:
-        f.write_text(u, errors='surrogateescape')
+        write(f, u, errors='surrogateescape')
         print(f'{f.relative_to(root)}: {n1} to, {n2} from, {n3} compares')
         total += n1 + n2 + n3
 built = list(root.glob('*.c')) + list(root.glob('*.h')) + list(root.glob('config/mips/*'))   # the MIPS target is all that is built

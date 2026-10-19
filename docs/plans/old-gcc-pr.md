@@ -39,8 +39,9 @@ the arm64 crashes in the existing macOS builds
 is confirmed on the official macOS builds of both (old-gcc 0.17 release assets, run on an Apple Silicon laptop):
 `double f(void) { return 1.5; }` at `-O2 -G8` emits `.word 0x00000000` for both halves, and a `float` constant used
 inside a function is emitted as `0x00000000`. The 2.95.2 build with `const-double-fix.py` emits the right words. Their
-arm64 builds also crash on warnings for the reason in points 1 and 2 (the README's `-w` workaround). We have not applied
-the fixes to 2.7.2 and 2.8.1: there the `(error)` trick of point 1 needs declarations first, because `error`, `warning`
+arm64 builds also crash on warnings for the reason in points 1 and 2 (the README's `-w` workaround). The PR applies
+`const-double-fix.py` to both scripts (`gcc-2.7.2-psx-macos.sh`, `gcc-2.8.1-psx-macos.sh`): the rebuilt arm64 builds are byte-identical
+to the Linux builds on the eight float/double files. The warning crashes are not fixed for them: there the `(error)` trick of point 1 needs declarations first, because `error`, `warning`
 and `pedwarn` are declared without prototypes.
 
 ## Evidence
