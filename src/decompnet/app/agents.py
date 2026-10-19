@@ -183,16 +183,16 @@ HAIKU, SONNET, OPUS = "haiku", "sonnet", "opus"  # Claude Code's aliases: Anthro
 # tier -> (model, effort), per agent; thresholds are fractions of the worst score (n_insns * 100: all wrong)
 TIERS = {
     "escalated": (OPUS, "high"),       # still far off after STALL_ATTEMPTS attempts: the structure isn't found yet
-    "near_miss": (HAIKU, "low"),       # within NEAR_MISS: operands and registers left, compile and adjust
-    "mechanical": (HAIKU, "low"),      # within MECHANICAL: the structure is there, keep adjusting
+    "near_miss": (HAIKU, "medium"),       # within NEAR_MISS: operands and registers left, compile and adjust
+    "mechanical": (HAIKU, "medium"),      # within MECHANICAL: the structure is there, keep adjusting
     "fresh": (SONNET, "medium"),       # nothing compiled yet: the first structural attempt
     "structural": (SONNET, "medium"),  # far off: the structure is still to find
 }
 # Codex: Astra for the hardest, Sol (the workhorse) for normal work, Luna (fast, cheap) for near misses
 CODEX_TIERS = {
     "escalated": ("gpt-6-astra", "high"),
-    "near_miss": ("gpt-6-luna", "low"),
-    "mechanical": ("gpt-6-luna", "low"),
+    "near_miss": ("gpt-6-luna", "medium"),
+    "mechanical": ("gpt-6-luna", "medium"),
     "fresh": ("gpt-6.1-sol", "medium"),
     "structural": ("gpt-6.1-sol", "medium"),
 }
