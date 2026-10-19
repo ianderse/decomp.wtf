@@ -61,7 +61,7 @@ build also rejects (missing headers, project macros) are dropped.
 
 2.6.0 and 2.6.3 hardly compile any of these files (`//` comments, modern C), so their evidence is thin: three files.
 
-**On a real game:** in one retail PS1 game (NTSC-U, PSY-Q GCC 2.7.2 era), 244 functions match the original byte for
+**On a real game:** in one retail PS1 game (NTSC-U, PSY-Q GCC 2.7.2 era), 247 functions match the original byte for
 byte with the native arm64 `gcc-2.6.3-psx` build, and 10 with `gcc-2.6.0-psx` at `-O1` (each match re-checked against
 these builds). Nothing matched with 2.8.0, 2.91.66 or 2.95.2 in a sample of its 600 most-attempted unmatched functions,
 so the game says nothing about those three. The arm64 and Intel builds of all five versions also produce identical
@@ -91,7 +91,7 @@ the results and ran the builds and comparisons myself. Tell me if the project pr
 
 ## Before submitting (checklist, not part of the PR text)
 
-- [x] Game check done (244 + 10 matches with 2.6.3 / 2.6.0), game not named
+- [x] Game check done (247 + 10 matches with 2.6.3 / 2.6.0), game not named
 - [x] Arm64 and Intel builds vs decompals' official Linux builds (Docker): identical for all five versions after the 2.6.x float fix
 - [x] Scripts renamed to the repository's convention, README and CI matrix updated, all five built through `make` from a
       clean clone (branch `macos-native-arm64-psx`); output compared with the earlier builds: 0 assembly differences
