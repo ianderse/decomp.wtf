@@ -86,3 +86,10 @@ the results and ran the builds and comparisons myself. Tell me if the project pr
 - [ ] Apple's Rosetta timeline is not cited in the PR (it was only recalled, not checked)
 - [ ] The identity and wording of the AI disclosure is right
 - [ ] Squash into one or two commits per decompals's habits
+
+## Evidence from decomp.wtf's laptop (2026-10-19)
+
+The double-constant problem reproduces with the **official** macOS builds of gcc-2.7.2-psx and gcc-2.8.1-psx
+(old-gcc 0.17 release assets): `double f(void) { return 1.5; }` at `-O2 -G8` emits `.word 0x00000000` for both
+halves, and a `float` constant used inside a function is emitted as `0x00000000`. The rebuilt 2.95.2 with
+const-double-fix.py emits the right words.

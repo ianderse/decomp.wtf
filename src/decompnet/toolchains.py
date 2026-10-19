@@ -352,13 +352,24 @@ def binary(tid: str) -> Path:
     raise ToolchainError(f"{tid} is installed but {name} wasn't found in {base}")
 
 
+def stale(tid: str) -> bool:
+    """Installed, but the registry now pins other files for this computer (a rebuilt package: a fix)."""
+    have = installed(tid)
+    if have is None:
+        return False
+    want = {p.get("sha256") for p in get(tid).parts_for() if p.get("sha256")}
+    got = {p.get("sha256") for p in have.get("parts") or [] if isinstance(p, dict)}
+    return bool(want) and bool(got) and want != got
+
+
 def ensure(tid: str, log=print) -> Path:
-    """Install a free tool on first use and return its folder. Proprietary ones must be installed explicitly."""
-    if installed(tid) is None:
+    """Install a free tool on first use (or again when the registry pins a rebuilt package) and return its folder.
+    Proprietary ones must be installed explicitly."""
+    if installed(tid) is None or stale(tid):
         tc = get(tid)
         if tc.proprietary:
             raise ToolchainError(f"{tc.name} is proprietary: install it from Setup if you accept its license")
-        install(tid, log=log)
+        install(tid, log=log, force=installed(tid) is not None)
     return path(tid)
 
 

@@ -286,3 +286,17 @@ is not yet proof they agree with decompals's Linux builds. The survey on the lap
 Remaining: the diagnostics of 2.8.0 and 2.6.x on arm64 (still `-w` and `explain_with`, or use the Intel builds under
 Rosetta while it lasts), 2.5.7, the SLUS-01252 check, 2.7.2 and 2.8.1 Intel builds, and the upstream pull request
 (draft in `docs/plans/old-gcc-pr.md`, not opened: it waits for the SLUS-01252 check).
+
+### Checked on the laptop with SLUS-01252 (2026-10-19)
+
+- **arm64 against Intel, on this game's code:** 400 random matched functions (own definitions with the shared header,
+  `-O2 -G8`) compiled with both builds of 2.6.0, 2.6.3, 2.8.0, 2.91.66 and 2.95.2: identical assembly for every
+  function both compile (2 fail on both builds of 2.6.x).
+- **The rebuilt 2.6.x packages:** all 233 functions matched with 2.6.0 or 2.6.3 still match.
+- **The double-constant bug is real in decompals's official macOS builds of 2.7.2 and 2.8.1** (the ones in use):
+  `double f(void) { return 1.5; }` compiles to `.word 0x00000000` twice, and a float constant inside a function to
+  `0x00000000`; global initializers come out right. 2.95.2 (fixed here) is correct. No function of SLUS-01252 uses a
+  float or double literal (fixed-point code), so it doesn't affect this game, but it belongs in the upstream PR, and
+  rebuilding 2.7.2 and 2.8.1 with `const-double-fix.py` is the next step for them.
+- The app now reinstalls a compiler when the registry pins a rebuilt package (`toolchains.stale`), and surveys again
+  when one changes.

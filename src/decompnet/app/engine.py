@@ -1680,10 +1680,17 @@ class RomNetwork(Network):
         return sorted(t.id for t in toolchains.registry().values()
                       if t.platform == "PS1" and t.kind == "compiler" and t.supported and not t.proprietary)
 
+    def _survey_stamp(self) -> str:
+        """The PS1 compilers on hand, each with its build (a rebuilt one, a fix, is surveyed again)."""
+        def build(tid):
+            parts = [p.get("sha256", "")[:8] for p in toolchains.get(tid).parts_for()]
+            return f"{tid}:{''.join(parts)}"
+        return "|".join(build(t) for t in self._survey_compilers())
+
     def survey_due(self, proj) -> bool:
         cfg = json.loads(proj["config"])
         return (cfg.get("platform") == "psx" and not self.fork_slug(proj["slug"]) and "toolchain" in cfg.get("compiler", {})
-                and (cfg.get("survey") or {}).get("stamp") != "|".join(self._survey_compilers()))
+                and (cfg.get("survey") or {}).get("stamp") != self._survey_stamp())
 
     def survey(self, proj, state: dict, workers: int = 3) -> dict | None:
         """Which compilers and assemblers built this game, from its own stuck code: every PS1 compiler this computer
@@ -1751,7 +1758,7 @@ class RomNetwork(Network):
         relied = {self.fn_toolchain(r) for r in self.store.all(
             "SELECT meta FROM functions WHERE project_id=? AND status='matched' AND meta LIKE '%toolchain%'", proj["id"])}
         alternates = useful + sorted(v for v in relied - set(useful) - {None, main})
-        summary = {"stamp": "|".join(ids), "sampled": len(rows), "matches": dict(sorted(hits.items(), key=lambda x: -x[1])),
+        summary = {"stamp": self._survey_stamp(), "sampled": len(rows), "matches": dict(sorted(hits.items(), key=lambda x: -x[1])),
                    "at": time.time()}
         with self.store.tx() as db:
             c = json.loads(db.execute("SELECT config FROM projects WHERE id=?", (proj["id"],)).fetchone()["config"])
