@@ -4,12 +4,12 @@
 # skipped, and the loop goes on (fixing it is the M5 Ultra agent's job: see m5-psx-compilers.md, "The agent's task").
 #
 # Usage (from the repository root): docs/plans/psx-gcc-build-all.sh <path to a checkout of decompals/old-gcc> [versions]
-# Intel builds: arch -x86_64 docs/plans/psx-gcc-build-all.sh ...   (needs Rosetta: softwareupdate --install-rosetta)
+# Intel builds: BUILD_ARCH=x86_64 docs/plans/psx-gcc-build-all.sh ...   (needs Rosetta: softwareupdate --install-rosetta)
 set -u
 OLDGCC="$(cd "$1" && pwd)"; shift
 VERSIONS="${*:-2.5.7 2.6.0 2.6.3 2.8.0 2.91.66 2.95.2}"
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
-ARCH="$(uname -m)"
+ARCH="${BUILD_ARCH:-$(uname -m)}"
 LOGS="$ROOT/toolchain-builds/logs"
 mkdir -p "$LOGS"
 cd "$ROOT/toolchain-builds"

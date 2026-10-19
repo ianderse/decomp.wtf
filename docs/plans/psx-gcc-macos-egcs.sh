@@ -7,13 +7,16 @@ VERSION="$1"
 OLDGCC="$(cd "$2" && pwd)"
 PATCHES="$OLDGCC/patches"
 HERE="$(cd "$(dirname "$0")" && pwd)"
-ARCH="$(uname -m)"
+ARCH="${BUILD_ARCH:-$(uname -m)}"
 OUTDIR="$(pwd)/build-gcc-$VERSION-psx-macos-$ARCH"
 WORKDIR="${WORKDIR:-$(mktemp -d)}"
 [ -n "$KEEP" ] || trap 'rm -rf "$WORKDIR"' EXIT
 
 export PATH="/usr/bin:/bin:/usr/sbin:/sbin:$PATH"
 unset CC CXX
+# BUILD_ARCH=x86_64 makes an Intel build from an arm64 shell (the Command Line Tools' xcrun is arm64 only, so
+# "arch -x86_64 bash ..." can't find a compiler); the Intel tools it builds run through Rosetta
+if [ "$ARCH" != "$(uname -m)" ]; then export CC="cc -arch $ARCH" CFLAGS_ARCH="-arch $ARCH"; fi
 
 cd "$WORKDIR"
 mkdir "gcc-$VERSION"
@@ -36,7 +39,7 @@ touch gcc/insn-config.h
 
 # Apple's arm64 variadic ABI (see arm64-varargs.h): the header widens the arguments of every variadic call, so the
 # names in prototypes and definitions that mention "..." go in parentheses first, to keep the macros off them
-if [ "$(uname -m)" = arm64 ]; then
+if [ "$ARCH" = arm64 ]; then
     names="$(sed -n 's/^#define \([a-z_]*\)(a1.*/\1/p' "$HERE/arm64-varargs.h" | paste -sd'|' -)"
     sed -E -i '' "s/(^|[^A-Za-z0-9_(])($names)([[:space:]]+P?V?PROTO)/\1(\2)\3/" gcc/*.c gcc/*.h
     touch gcc/cstamp-h.in   # depends on acconfig.h, which sed just rewrote: don't let make try to regenerate it
@@ -59,9 +62,11 @@ for d in . gcc libiberty; do
 done
 
 cp "$PATCHES/xm-darwin.h" gcc/config/
-# 2.9x needs a 64-bit HOST_WIDE_INT for the target's DImode masks (it picks long on this LP64 host itself); the
-# 32-bit one the older versions' xm-darwin.h forces makes machmode.def's shifts overflow
-sed -i '' '/HOST_BITS_PER_WIDE_INT/d; /define HOST_WIDE_INT/d' gcc/config/xm-darwin.h
+# A double constant came out with garbage in one .word: the sources copy a CONST_DOUBLE's two 32-bit halves as one
+# block, which the 8-byte slots of this LP64 host break (see const-double-fix.py). The 32-bit HOST_WIDE_INT of
+# xm-darwin.h stays: the old sources assume it (a 64-bit one changes the code, e.g. li $18,-65536 becomes
+# li $18,4294901760), as the official i386 builds have it.
+python3 "$(dirname "$0")/const-double-fix.py" gcc
 chmod +w gcc/configure
 awk '/^\t\*\)$/ { buf=$0; next }
      buf != "" { if (!done && /echo.*Configuration.*not supported/) {
@@ -71,8 +76,8 @@ awk '/^\t\*\)$/ { buf=$0; next }
 mv gcc/configure.tmp gcc/configure
 chmod +x gcc/configure
 
-HOST="$(./config.guess)"
-export CFLAGS="-std=gnu89 -w -Wno-int-conversion -Wno-implicit-function-declaration -Wno-return-mismatch"
+HOST="$(./config.guess | sed "s/^[a-z0-9_]*-/$ARCH-/")"
+export CFLAGS="-std=gnu89 -w -Wno-int-conversion -Wno-implicit-function-declaration -Wno-return-mismatch ${CFLAGS_ARCH:-}"
 GCC_CFLAGS="$CFLAGS ${WIDEN:-}"
 for d in libiberty gcc; do
     (cd $d && ./configure \
@@ -88,8 +93,8 @@ done
 sed -i '' -e 's/^extern int sys_nerr;/extern const int sys_nerr;/' \
     -e 's/^extern char \*sys_errlist\[\];/extern const char *const sys_errlist[];/' libiberty/strerror.c
 
-nice -n 10 make -C libiberty --jobs "$(sysctl -n hw.ncpu)" CFLAGS="$CFLAGS"
-nice -n 10 make -C gcc --jobs "$(sysctl -n hw.ncpu)" cpp cc1 xgcc CFLAGS="$GCC_CFLAGS"
+nice -n 10 make -C libiberty --jobs "$(sysctl -n hw.ncpu)" CC="${CC:-gcc}" CFLAGS="$CFLAGS"
+nice -n 10 make -C gcc --jobs "$(sysctl -n hw.ncpu)" cpp cc1 xgcc CC="${CC:-gcc}" CFLAGS="$GCC_CFLAGS"
 
 cd gcc
 ./cc1 -version </dev/null 2>&1 | grep -- -msoft-float

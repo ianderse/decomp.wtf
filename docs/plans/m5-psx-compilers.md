@@ -243,3 +243,46 @@ SDK 4.70 pointed at it), then 2.91.66, the diagnostics fix for 2.6.x/2.7.2/2.8.x
   macros emit `((void (*)()) error)(...)`-style calls with explicit declarations, or fix the cause of their garbled
   warnings directly: the plan's step 2 (reproduce one in lldb first). They keep `no_warnings_on` meanwhile.
 - **2.5.7: not attempted** (K&R varargs throughout).
+
+### The proof, and what it found (2026-10-19, later)
+
+Rosetta is installed now. Intel builds (`BUILD_ARCH=x86_64 docs/plans/psx-gcc-build-all.sh ...`: the Command Line Tools'
+`xcrun` is arm64 only, so `arch -x86_64 bash ...` can't find a compiler; the script builds with `cc -arch x86_64` and
+the Intel tools run through Rosetta) of 2.6.0, 2.6.3, 2.8.0, 2.91.66 and 2.95.2 are in `toolchain-builds/` with
+`macos-x86_64` parts. They print warnings and errors properly.
+
+`scripts/compare-compilers.sh` compiles the 4,133 C files of nine public PS1 decomps (`~/Decomp/compiler-corpus/`,
+INCLUDE_ASM lines removed) with the Intel and the arm64 build of each version, at `-O2 -G8` and `-O1`, and compares
+the assembly and the stderr. Most files don't compile standalone (the reference rejects them too: "dropped"), so the
+useful corpus is 388 files for 2.95.2, 191 for 2.91.66, 161 for 2.8.0 and only 3 for 2.6.x (`//` comments, modern C).
+Final result of the arm64 builds against the Intel ones:
+
+| version | files compared | assembly differences | stderr/exit differences |
+|---|---|---|---|
+| 2.95.2 | 388 | 0 | 0 |
+| 2.91.66 | 191 | 0 | 0 |
+| 2.8.0 | 161 | 0 | 30 (garbled/crashing diagnostics, the known problem) |
+| 2.6.3, 2.6.0 | 3 | 0 | 58 (same) |
+
+Not yet: the SLUS-01252 matched functions (they live in the laptop's database), and a comparison with the official
+Linux i386 build, which can't run here; Intel and arm64 share my patch scripts, so they agree with each other but this
+is not yet proof they agree with decompals's Linux builds. The survey on the laptop is that check.
+
+**What the comparison found (all fixed, all in the committed scripts):**
+
+1. A **double constant came out with garbage in one `.word`** (`.word 0x00000077`, differently from run to run, on both
+   architectures: the Intel builds had it too). The sources copy a `CONST_DOUBLE`'s two 32-bit halves as one block
+   (`real.h`: "use &CONST_DOUBLE_LOW(r) as the address of an array of ints"), but each rtx slot is 8 bytes on an LP64
+   host, so the copy took padding for the high half. `const-double-fix.py` rewrites those copies (6 to 8 per version)
+   to move the halves one by one. A first fix that moved both halves into one slot was wrong: the generic rtx code fills
+   slots 2 and 3 by format, so constants built that way read garbage. The official macOS builds of 2.7.2 and 2.8.1 use
+   the same `xm-darwin.h` and probably have the same bug: worth telling decompals.
+2. **`HOST_WIDE_INT` must stay the 32-bit `int`** of `xm-darwin.h`, not the 64-bit `long` my first 2.9x builds used:
+   those old sources assume the host word is the target word, and with `long` the code changes (`li $18,-65536`
+   became `li $18,4294901760` and the delay slots moved; 33 of 388 files differed). The official i386 builds are 32-bit.
+   (The 2.9x `machmode.def` "shift count >= width of type" warnings are the same on the official builds.)
+3. Comments in the assembly (`# 0x00000001`) differ with a 64-bit `HOST_WIDE_INT`; `NO_COMMENTS=1` compares without them.
+
+Remaining: the diagnostics of 2.8.0 and 2.6.x on arm64 (still `-w` and `explain_with`, or use the Intel builds under
+Rosetta while it lasts), 2.5.7, the SLUS-01252 check, 2.7.2 and 2.8.1 Intel builds, and the upstream pull request
+(`docs/plans/old-gcc-pr.md` is not written yet).

@@ -119,8 +119,12 @@ sha256 = "5a612cd28344e5b410c3344ec5dcfb92d9d03947756f190cd12404055b4a624d"
 platforms = ["linux-x86_64"]
 [["gcc-2.6.0-psx".parts]]
 url = "https://raw.githubusercontent.com/ianderse/decomp.wtf/main/toolchain-builds/gcc-2.6.0-psx-macos-arm64.tar.gz"
-sha256 = "570c87542cff393a10ef46db0521c1f59a68e9914ff4236cfc1fd4ca796b2e26"
+sha256 = "1e7b6b14112be89e78e410e0db233a248f6e6fc52de574ce25421f22d30e22b7"
 platforms = ["macos-arm64"]
+[["gcc-2.6.0-psx".parts]]
+url = "https://raw.githubusercontent.com/ianderse/decomp.wtf/main/toolchain-builds/gcc-2.6.0-psx-macos-x86_64.tar.gz"
+sha256 = "9db611605199485e36c36b5cfe752276a193bad423e0eace03a410203fc4dbe0"
+platforms = ["macos-x86_64"]
 [["gcc-2.6.0-psx".parts]]
 url = "https://github.com/decompals/mips-binutils-2.6/releases/download/v0.3/binutils-2.6-mac.tar.gz"
 sha256 = "ab21ad5908fb7776a4b0c596cc82f216876e3b5d108c7c7c1f33543b3f3fce4c"
@@ -155,8 +159,12 @@ sha256 = "5a612cd28344e5b410c3344ec5dcfb92d9d03947756f190cd12404055b4a624d"
 platforms = ["linux-x86_64"]
 [["gcc-2.6.3-psx".parts]]
 url = "https://raw.githubusercontent.com/ianderse/decomp.wtf/main/toolchain-builds/gcc-2.6.3-psx-macos-arm64.tar.gz"
-sha256 = "42ceccb136e09461078eef122f1b5ac5b9e4552f8a7e58e99ec9fdf482fb6119"
+sha256 = "4bf3548007739a09aaf168d115a2bf699e86b459c0264d1522252a359d6aac79"
 platforms = ["macos-arm64"]
+[["gcc-2.6.3-psx".parts]]
+url = "https://raw.githubusercontent.com/ianderse/decomp.wtf/main/toolchain-builds/gcc-2.6.3-psx-macos-x86_64.tar.gz"
+sha256 = "ca10ec27544a7bf15fb8c7011cfd0135fecde1307045ad3059fb0d86579233eb"
+platforms = ["macos-x86_64"]
 [["gcc-2.6.3-psx".parts]]
 url = "https://github.com/decompals/mips-binutils-2.6/releases/download/v0.3/binutils-2.6-mac.tar.gz"
 sha256 = "ab21ad5908fb7776a4b0c596cc82f216876e3b5d108c7c7c1f33543b3f3fce4c"
@@ -224,8 +232,12 @@ sha256 = "5a612cd28344e5b410c3344ec5dcfb92d9d03947756f190cd12404055b4a624d"
 platforms = ["linux-x86_64"]
 [["gcc-2.8.0-psx".parts]]
 url = "https://raw.githubusercontent.com/ianderse/decomp.wtf/main/toolchain-builds/gcc-2.8.0-psx-macos-arm64.tar.gz"
-sha256 = "bf52b54925252f3a14f12650e167c7668fe59f7d4bdf53e6c2edda961aed476d"
+sha256 = "b41535ca54910379b7fb1c4aa69ea35ce4100aa360e00e8f75344eee586165e0"
 platforms = ["macos-arm64"]
+[["gcc-2.8.0-psx".parts]]
+url = "https://raw.githubusercontent.com/ianderse/decomp.wtf/main/toolchain-builds/gcc-2.8.0-psx-macos-x86_64.tar.gz"
+sha256 = "4b13835d702e9c41b2f9935a4ec2a67e01d92fe3b4677eac301adb96d7d61867"
+platforms = ["macos-x86_64"]
 [["gcc-2.8.0-psx".parts]]
 url = "https://github.com/decompals/mips-binutils-2.6/releases/download/v0.3/binutils-2.6-mac.tar.gz"
 sha256 = "ab21ad5908fb7776a4b0c596cc82f216876e3b5d108c7c7c1f33543b3f3fce4c"
@@ -256,8 +268,12 @@ sha256 = "5a612cd28344e5b410c3344ec5dcfb92d9d03947756f190cd12404055b4a624d"
 platforms = ["linux-x86_64"]
 [["gcc-2.91.66-psx".parts]]
 url = "https://raw.githubusercontent.com/ianderse/decomp.wtf/main/toolchain-builds/gcc-2.91.66-psx-macos-arm64.tar.gz"
-sha256 = "f6afe6ab365d85368f55d501558c27f57707eb71459f6f9556f7bf3950a59065"
+sha256 = "f7395ecfa35cf985cf3013940caaf76235114561445bccc0918792d2b3893ccd"
 platforms = ["macos-arm64"]
+[["gcc-2.91.66-psx".parts]]
+url = "https://raw.githubusercontent.com/ianderse/decomp.wtf/main/toolchain-builds/gcc-2.91.66-psx-macos-x86_64.tar.gz"
+sha256 = "f4ede3b05c28f696abd90c6a609d09573a233416d14bf55588b355e38e8c3d11"
+platforms = ["macos-x86_64"]
 [["gcc-2.91.66-psx".parts]]
 url = "https://github.com/decompals/mips-binutils-2.6/releases/download/v0.3/binutils-2.6-mac.tar.gz"
 sha256 = "ab21ad5908fb7776a4b0c596cc82f216876e3b5d108c7c7c1f33543b3f3fce4c"
@@ -287,8 +303,12 @@ sha256 = "5a612cd28344e5b410c3344ec5dcfb92d9d03947756f190cd12404055b4a624d"
 platforms = ["linux-x86_64"]
 [["gcc-2.95.2-psx".parts]]
 url = "https://raw.githubusercontent.com/ianderse/decomp.wtf/main/toolchain-builds/gcc-2.95.2-psx-macos-arm64.tar.gz"
-sha256 = "0a995efd632a5b551751952f6661fca6f52d33122ff3efc540e989e2043cc38f"
+sha256 = "cace95e697d4fecaad5cacb4c96c65a480d13d9cd65c1a089ac86cb4e9a172bc"
 platforms = ["macos-arm64"]
+[["gcc-2.95.2-psx".parts]]
+url = "https://raw.githubusercontent.com/ianderse/decomp.wtf/main/toolchain-builds/gcc-2.95.2-psx-macos-x86_64.tar.gz"
+sha256 = "62d9b66d19ccdf10a12cca964dc373b7764d1d609a66670300840cceb91fbfa8"
+platforms = ["macos-x86_64"]
 [["gcc-2.95.2-psx".parts]]
 url = "https://github.com/decompals/mips-binutils-2.6/releases/download/v0.3/binutils-2.6-mac.tar.gz"
 sha256 = "ab21ad5908fb7776a4b0c596cc82f216876e3b5d108c7c7c1f33543b3f3fce4c"

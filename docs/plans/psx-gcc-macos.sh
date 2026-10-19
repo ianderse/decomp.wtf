@@ -1,7 +1,7 @@
 #!/bin/bash
 # Build an old PSY-Q GCC (2.6.0, 2.6.3 or 2.8.0; 2.91.66 and 2.95.2 are in psx-gcc-macos-egcs.sh) natively on macOS, from decompals/old-gcc's patches.
 # Usage: psx-gcc-macos.sh <version> <path to a checkout of decompals/old-gcc>
-# For an Intel build run it as: arch -x86_64 bash psx-gcc-macos.sh ...
+# For an Intel build: BUILD_ARCH=x86_64 bash psx-gcc-macos.sh ...
 # Output: ./build-gcc-<version>-psx-macos-<arch>/{gcc,cc1,cpp}
 set -e
 
@@ -10,7 +10,7 @@ case "$1" in 2.91.66|2.95.2) exec bash "$(dirname "$0")/psx-gcc-macos-egcs.sh" "
 VERSION="$1"
 OLDGCC="$(cd "$2" && pwd)"
 PATCHES="$OLDGCC/patches"
-ARCH="$(uname -m)"
+ARCH="${BUILD_ARCH:-$(uname -m)}"
 OUTDIR="$(pwd)/build-gcc-$VERSION-psx-macos-$ARCH"
 WORKDIR="${WORKDIR:-$(mktemp -d)}"
 [ -n "$KEEP" ] || trap 'rm -rf "$WORKDIR"' EXIT
@@ -20,12 +20,15 @@ case "$VERSION" in
     2.6.0) URL="http://www.nic.funet.fi/index/gnu/funet/historical-funet-gnu-area-from-early-1990s/gcc-$VERSION.tar.gz" ;;
     2.8.0) URL="https://mirrors.kernel.org/gnu/gcc/gcc-2.8.0.tar.gz" ;;
     # 2.5.7 isn't here: it is written in K&R varargs (va_alist, va_dcl) throughout, which Apple's arm64 calling
-    # convention can't run; try it as an Intel build (arch -x86_64) with its patches from gcc-2.5.7-psx.Dockerfile
+    # convention can't run; try it as an Intel build (BUILD_ARCH=x86_64) with its patches from gcc-2.5.7-psx.Dockerfile
     *) echo "unsupported version $VERSION"; exit 1 ;;
 esac
 
 export PATH="/usr/bin:/bin:/usr/sbin:/sbin:$PATH"
 unset CC CXX
+# BUILD_ARCH=x86_64 makes an Intel build from an arm64 shell (the Command Line Tools' xcrun is arm64 only, so
+# "arch -x86_64 bash ..." can't find a compiler); the Intel tools it builds run through Rosetta
+if [ "$ARCH" != "$(uname -m)" ]; then export CC="cc -arch $ARCH" CFLAGS_ARCH="-arch $ARCH"; fi
 
 cd "$WORKDIR"
 curl -fL "$URL" | tar xz
@@ -71,6 +74,11 @@ sed -i '' 's/| hiux\* | abug | nacl\*/| psx* \\\
 '"$(printf '\t')"'     | hiux* | abug | nacl*/' config.sub
 
 cp "$PATCHES/xm-darwin.h" config/
+# A double constant came out with garbage in one .word: the sources copy a CONST_DOUBLE's two 32-bit halves as one
+# block, which the 8-byte slots of this LP64 host break (see const-double-fix.py). The 32-bit HOST_WIDE_INT of
+# xm-darwin.h stays: the old sources assume it (a 64-bit one changes the code, e.g. li $18,-65536 becomes
+# li $18,4294901760), as the official i386 builds have it.
+python3 "$(dirname "$0")/const-double-fix.py" .
 chmod +w configure
 awk '/^\t\*\)$/ { buf=$0; next }
      buf != "" { if (!done && /echo.*Configuration.*not supported/) {
@@ -81,20 +89,20 @@ mv configure.tmp configure
 chmod +x configure
 
 # configure's own compiler test (main(){return(0);}) needs these under modern clang
-export CFLAGS="-std=gnu89 -w -Wno-int-conversion -Wno-implicit-function-declaration -Wno-return-mismatch"
+export CFLAGS="-std=gnu89 -w -Wno-int-conversion -Wno-implicit-function-declaration -Wno-return-mismatch ${CFLAGS_ARCH:-}"
 ./configure \
     --target=mips-sony-psx \
     --prefix=/opt/cross \
     --with-endian-little \
     --with-gnu-as \
-    --host="$(./config.guess)" \
-    --build="$(./config.guess)"
+    --host="$(./config.guess | sed "s/^[a-z0-9_]*-/$ARCH-/")" \
+    --build="$(./config.guess | sed "s/^[a-z0-9_]*-/$ARCH-/")"
 
 # 2.5.7 and 2.6.0's configure take the host for a MIPS box and add its cc flags (-Olimit 3000), which clang rejects
 sed -i '' -e 's/-Wf,-XNg1500,-XNh2000//' -e 's/-Olimit 3000//' Makefile
 
-nice -n 10 make --jobs "$(sysctl -n hw.ncpu)" cpp cc1 xgcc \
-    CFLAGS="-std=gnu89 -w -Wno-int-conversion -Wno-implicit-function-declaration -Wno-return-mismatch -DHAVE_STRERROR"
+nice -n 10 make --jobs "$(sysctl -n hw.ncpu)" cpp cc1 xgcc CC="${CC:-cc}" \
+    CFLAGS="-std=gnu89 -w -Wno-int-conversion -Wno-implicit-function-declaration -Wno-return-mismatch -DHAVE_STRERROR ${CFLAGS_ARCH:-}"
 
 ./cc1 -quiet -O2 "$OLDGCC/tests/little_endian.c" -o little_endian.s
 grep -E 'lbu\s\$2,0\(\$4\)' little_endian.s
