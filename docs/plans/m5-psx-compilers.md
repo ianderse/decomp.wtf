@@ -156,23 +156,44 @@ stack slot, and a 4-byte `int` written there leaves the upper half undefined.
    `#define DW(x) _Generic((x), double: (x), float: (double)(x), default: (long)(x))`, applied with a
    fixed-arity FOR_EACH macro (up to 16 arguments). Pointers and longs are unchanged, ints are sign-extended to 64
    bits (so a literal 0 read as a pointer is NULL), doubles untouched. Clang accepts `_Generic` in gnu89 mode. List
-   the variadic functions per version with `grep -n '\.\.\.\|va_dcl' *.c *.h`.
-2. **Diagnostics with real prototypes:** convert `error`, `warning`, `pedwarn`, `fatal`, `error_with_file_and_line`
-   and their siblings to `stdarg` with `const char *fmt, ...`, and make every `v_*` helper take a `va_list`. Check
-   with the smoke test's warning and error files: the message must print, not crash or show garbage.
+   the variadic functions per version with `grep -n '\.\.\.\|va_dcl' *.c *.h`. Each macro needs its function's
+   fixed-argument count (`gen_rtx` 2, `gen_rtvec` 1, `error` 1, `error_with_file_and_line` 3...), so the header is
+   a table, not magic. **Watch the definitions:** a function-like macro also expands at the function's own
+   definition and prototype (`gen_rtx VPROTO((...))` is rescanned into `gen_rtx (...)`). Define the macros so they
+   don't (a per-file `#include` after the definitions, or a `#define gen_rtx(...)` that is `#undef`ed around the
+   definition), or call the real function through a parenthesised name, `(gen_rtx) (...)`.
+2. **Diagnostics: reproduce first.** In 2.6.0, `error`, `warning` and `pedwarn` in `toplev.c` are already
+   `VPROTO((char *s, ...))` (stdarg), so the K&R-`int`-parameter theory for the garbled warnings
+   (`warning: *aV makes integer from pointer`) is unverified. Before converting anything, reproduce one garbled
+   warning in lldb and find where the pointer is cut to 32 bits (the `v_*` helpers, the `vfprintf` path, a K&R
+   function with `int` parameters). The cheapest fix that works wins: changing a parameter type to `long` or
+   `char *` before rewriting a family to `stdarg`.
 3. **2.5.7:** convert its `varargs.h` users to `stdarg.h` (as the 2.6+ scripts already sed), and drop its
    `gvarargs.h` in favour of the system's `stdarg.h`.
 
-**Proof (required before using or publishing a build):** the native compiler's assembly output must be byte-identical
-to a reference build of the same version (the Rosetta build, or decompals's Linux build) on a large corpus: every
-matched function of SLUS-01252 (export them with their headers) and the C files of the public PS1 decomps listed in
-qwen-fine-tuning.md, at `-O2 -G8` and `-O1`. Any difference is a bug in the port, not noise. A script for it:
-compile each file with both compilers, `cmp` the `.s` outputs, list the differences.
+**Proof (required before using or publishing a build).** What counts as the truth, in order:
+
+1. **The matched functions of SLUS-01252** (from the laptop's database): each one matched with the official
+   compiler, so each must still assemble to the same bytes with the port. This is independent of my scripts and
+   patches, which a comparison against a Rosetta build of the same patched source is not.
+2. **A reference build of the same version** (the Rosetta build): the native compiler's assembly (`-S`) must be
+   byte-identical on a corpus of the C files of the public PS1 decomps listed in qwen-fine-tuning.md, at `-O2 -G8`
+   and `-O1`, and its stderr (warnings and errors) must be identical too. A file the reference compiler itself
+   rejects (missing headers, project-specific macros) is dropped from the corpus, not counted as a difference. Any
+   difference is a bug in the port, not noise.
+
+`scripts/compare-compilers.sh` (to be created; the repo has no `scripts/` folder yet) takes two compiler folders and
+a corpus folder, compiles each file with both, `cmp`s the `.s` files and the stderr, and lists the differences and
+the dropped files. The corpus lives outside the repo (`~/Decomp/compiler-corpus/`; say how to rebuild it in the
+script's header).
 
 **Upstream:** once one version passes the proof, open a pull request to decompals/old-gcc with the header, the
 diagnostic patches, the macOS build scripts (`psx-gcc-macos.sh`, `psx-gcc-macos-egcs.sh`), and the identical-output
 results as evidence. Same license as old-gcc's patches (GPL-2.0, as GCC). Describe it as AI-assisted in the PR, as
-the decomp community expects to know.
+the decomp community expects to know. **Licensing here:** the GCC binaries in `toolchain-builds/` are GPL-2.0, so
+`toolchain-builds/README.md` names the exact source tarball and patch set (decompals/old-gcc at a commit) each one
+was built from, as the `source =` lines in `toolchains.toml` do. Check Apple's own Rosetta announcement before the
+PR or README cites its timeline: the paragraph at the top of this section is from memory.
 
 **Order:** Rosetta builds first (quick, and they're the reference for the proof), then 2.95.2 natively (the newest;
 SDK 4.70 pointed at it), then 2.91.66, the diagnostics fix for 2.6.x/2.7.2/2.8.x (which retires `-w` and
@@ -184,7 +205,8 @@ SDK 4.70 pointed at it), then 2.91.66, the diagnostics fix for 2.6.x/2.7.2/2.8.x
 > docs/plans/m5-psx-compilers.md. First build the Intel references: install Rosetta if it isn't
 > (`softwareupdate --install-rosetta --agree-to-license`; ask me if it needs a password), then
 > `arch -x86_64 docs/plans/psx-gcc-build-all.sh ../old-gcc 2.5.7 2.6.0 2.6.3 2.7.2 2.8.0 2.8.1 2.91.66 2.95.2`.
-> Then port 2.95.2 to native arm64 with the widening header and stdarg diagnostics, and write the identical-output
+> (Rosetta wasn't installed when this was written and I had said not to install it: ask before installing. If I say
+> no, skip the Rosetta references and use the matched-functions proof only.) Then port 2.95.2 to native arm64 with the widening header and stdarg diagnostics, and write the identical-output
 > check (scripts/compare-compilers.sh: two compiler folders and a corpus folder in, a list of differing files out).
 > Build the corpus from the public PS1 decomps (shallow clones, INCLUDE_ASM lines removed, as qwen-fine-tuning.md
 > describes) and from SLUS-01252's matched functions if the laptop's database is copied over. A port is done only
