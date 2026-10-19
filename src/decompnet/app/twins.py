@@ -406,6 +406,11 @@ class Twins:
                     with self.net.store.tx() as db:
                         db.execute("UPDATE functions SET status='open', meta=? WHERE id=? AND status='asm'",
                                    (json.dumps(meta) if meta else None, r["id"]))
+        if platform == "psx":  # Sony's library functions (once per signature install; after the GTE reopening above)
+            try:
+                self.net.identify_psyq(proj["slug"])
+            except Exception:  # without them, as before
+                pass
         marks = []
         for r in self.net.store.all("SELECT id, target, meta FROM functions WHERE project_id=? AND status='open'", proj["id"]):
             if json.loads(r["meta"] or "{}").get("for_agents"):

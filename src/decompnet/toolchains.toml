@@ -523,3 +523,14 @@ description = "Game Boy Advance disassembler: finds the functions in a ROM and w
 git = "https://github.com/aarant/luvdis"
 commit = "ec3a4e3ee3afe3e9b4a9c7ae8fffc65e1ea2096c"
 pip_extra = ["setuptools<70"]
+
+[psyq-signatures]
+name = "PSY-Q library signatures (lab313ru)"
+kind = "tool"
+license = "none given (fetched for your own use, never bundled)"
+source = "lab313ru/psx_psyq_signatures @ e9e46e7 (2022-01-08)"
+description = "Byte signatures of Sony's PSY-Q library objects, per SDK version: finds the library functions in a PS1 game, names them and sets them aside."
+[[psyq-signatures.parts]]
+url = "https://github.com/lab313ru/psx_psyq_signatures/archive/e9e46e7e133ef275a79bfce650924f98edb086bc.tar.gz"
+sha256 = "3e06ce2bdd4e6ed215a9f465856d5406554f1281c119075f8489a18d774896ac"
+subdir = "psx_psyq_signatures-e9e46e7e133ef275a79bfce650924f98edb086bc"

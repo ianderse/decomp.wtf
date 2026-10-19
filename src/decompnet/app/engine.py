@@ -70,6 +70,7 @@ TOOLS = {
     "mwcc": "CodeWarrior, the compilers of GameCube and Wii games (proprietary)",
     "mwccarm": "CodeWarrior for DS, the compilers of DS games (proprietary)",
     "dsd": "ds-decomp: analyses DS ROMs and rebuilds them",
+    "psyq-signatures": "PS1: finds Sony's library functions (PSY-Q) in a game, names them and sets them aside for agents",
 }
 # Functions this small are handed out in batches (claim_function count): agents match most on the first try.
 BATCH_INSNS = 48
@@ -615,7 +616,7 @@ class RomNetwork(Network):
             bios = {r["vram"]: m.group(1) for r in self.store.all(  # BIOS call stubs: what they call
                 f"SELECT vram, meta FROM functions WHERE project_id=? AND status='asm' AND vram IN "
                 f"({','.join('?' * len(calls[:30]))})", proj["id"], *calls[:30])
-                if (m := re.search(r"a BIOS call stub, (bios_\w+)", r["meta"] or ""))}
+                if (m := re.search(r"(?:a BIOS call stub|a Sony library function), (\w+)", r["meta"] or ""))}
             lines.append("calls: " + ", ".join(syms.label(a) + (f" (= {bios[a]})" if a in bios else "") for a in calls[:30]))
         if callers:
             lines.append("called by: " + ", ".join(syms.label(a) for a in callers[:30]))
@@ -1190,6 +1191,49 @@ class RomNetwork(Network):
         if fn["status"] != "open" or score <= 0 or (fn["best_score"] is not None and score >= fn["best_score"]):
             return
         self._record(fn, agent, score, source, self._context(fn["project_id"], fn["unit"])["version"], via="room")
+
+    def identify_psyq(self, slug: str, force: bool = False) -> dict:
+        """Sony's library functions in a PS1 game (rom/psyq.py, with the signatures installed from Compilers & tools):
+        each one a signature covers whole, in its own overlay, is set aside with its real name. Once per install."""
+        from ..rom import psyq
+        proj = self._project(slug)
+        cfg = self.cfg(proj)
+        if cfg.get("platform") != "psx" or self.fork_slug(slug) or toolchains.installed("psyq-signatures") is None:
+            return {}
+        stamp = toolchains.get("psyq-signatures").source
+        if not force and (cfg.get("psyq") or {}).get("stamp") == stamp:
+            return cfg["psyq"]
+        if getattr(self, "_psyq_sigs", None) is None:
+            self._psyq_sigs = psyq.load(toolchains.path("psyq-signatures"))
+        image = (Path(proj["root"]) / cfg["rom"]["file"]).read_bytes()
+        regions = [(sg["name"], image[sg["rom_start"]:sg["rom_end"]], sg["vram"], sg["rom_start"])
+                   for sg in cfg.get("segments") or [] if sg.get("rom_end")]
+        res = psyq.scan(regions, self._psyq_sigs)
+        rows = {(r["unit"], r["vram"]): r for r in self.store.all(
+            "SELECT id, name, unit, vram, size, rom_offset, status, meta FROM functions WHERE project_id=?", proj["id"])}
+        aside = []
+        for h in res["hits"]:
+            r = rows.get((h["unit"], h["address"])) or rows.get(("", h["address"]))
+            if r is None or r["status"] != "open" or r["rom_offset"] is None or h["end"] < r["rom_offset"] + r["size"]:
+                continue  # not a function start, already decided, or the signature doesn't cover all of it
+            meta = json.loads(r["meta"] or "{}")
+            if meta.get("for_agents") or meta.get("review"):
+                continue  # a person's decision stands
+            meta["library"] = {"name": h["name"], "objects": h["objects"][:4], "sdk": h["versions"][:6]}
+            meta["asm_code"] = (f"a Sony library function, {h['name']} ({', '.join(h['objects'][:2])} in PSY-Q "
+                                f"{'/'.join(h['versions'][:4])}): linked from Sony's precompiled libraries, not the game's code")
+            aside.append((json.dumps(meta), r["id"]))
+        summary = {"stamp": stamp, "found": len(res["hits"]), "set_aside": len(aside),
+                   "sdk": [v for v, _ in res["versions"][:3]], "truncated": res["truncated"]}
+        with self.store.tx() as db:
+            db.executemany("UPDATE functions SET status='asm', meta=? WHERE id=? AND status='open'", aside)
+            c = json.loads(db.execute("SELECT config FROM projects WHERE id=?", (proj["id"],)).fetchone()["config"])
+            c["psyq"] = summary
+            db.execute("UPDATE projects SET config=? WHERE id=?", (json.dumps(c), proj["id"]))
+            if aside:
+                self._event(db, proj["id"], None, "autopilot", f"{len(aside)} of Sony's library functions set aside "
+                            f"(PSY-Q signatures; the SDK looks like {', '.join(summary['sdk'][:2])})")
+        return summary
 
     def flag_for_review(self, agent: Agent, function: str, reason: str, project: str | None = None) -> str:
         """An agent sets a function aside for a person: it can't come from C as it stands (data split as code, a wrong

@@ -828,8 +828,19 @@ def build(net: RomNetwork, home: Path, port: int, secret: str):
             return bad
         data = await body(request)
         tid, accept = str(data.get("id", "")), bool(data.get("accept_license"))
-        return JSONResponse({"job": jobs.start("toolchain", lambda log: (toolchains.install(tid, accept_license=accept, log=log)
-                                                                         and {"id": tid}))})
+
+        def work(log):
+            toolchains.install(tid, accept_license=accept, log=log)
+            if tid == "psyq-signatures":  # find Sony's library functions in the PS1 projects there are, now
+                for row in net.store.all("SELECT slug FROM projects"):
+                    try:
+                        if (found := net.identify_psyq(row["slug"], force=True)):
+                            log(f"{row['slug']}: {found['set_aside']} library functions set aside "
+                                f"({found['found']} library symbols recognized)")
+                    except Exception as e:
+                        log(f"{row['slug']}: library scan failed: {e}")
+            return {"id": tid}
+        return JSONResponse({"job": jobs.start("toolchain", work)})
 
     @mcp.custom_route("/api/agents/install", methods=["POST"])
     async def api_agent_install(request: Request) -> Response:
