@@ -334,3 +334,7 @@ sign-extended into the `long` printed with `%08lx`). 2.6.0 and 2.6.3 rebuilt for
 x86_64, 8/8 on `scripts/float-corpus`, identical to the official Linux builds. The laptop should rerun it on its 400
 functions (402/402 expected for 2.6.x too).
 
+
+**Rerun after the 2.6.x float fix (0a7baf4), laptop:** 2.6.0 and 2.6.3, arm64 and x86_64, are now byte-identical to the
+official Linux builds on the whole corpus (402/402, float file included). Every PS1 build of ours (2.6.0, 2.6.3, 2.8.0,
+2.91.66, 2.95.2) is identical to old-gcc's Linux builds on it.

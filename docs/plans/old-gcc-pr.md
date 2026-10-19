@@ -98,3 +98,7 @@ the results and ran the builds and comparisons myself. Tell me if the project pr
 - [ ] Apple's Rosetta timeline is not cited in the PR (it was only recalled, not checked)
 - [x] The AI disclosure wording is approved
 - [ ] Squash into one or two commits per decompals's habits
+
+**After the 2.6.x float fix:** every build of ours (2.6.0, 2.6.3, 2.8.0, 2.91.66, 2.95.2; arm64 and x86_64) is
+byte-identical to old-gcc's official Linux builds on the 400-function corpus plus the float/double files (402/402),
+and the game's 247 gcc-2.6.3 and 10 gcc-2.6.0 (-O1) matches all hold with the rebuilt 2.6.x.
