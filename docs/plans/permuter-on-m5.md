@@ -1,6 +1,10 @@
 # decomp-permuter on the M5 Ultra, for the laptop's near misses
 
-Status: ready to run (2026-10-19). The export and import are built and tested; nothing has run on the M5 yet.
+Status (2026-10-19): automated. Set **Settings → Permuter machine** to the M5's SSH name (it must be reachable
+without a password: `ssh-copy-id`) and the app does the rest every 20 minutes (app/remote_permuter.py): results come
+back and through the judge, and a fresh batch of near misses starts there whenever the permuter isn't running or its
+batch is 12 hours old (with `--stack-diffs`, so stack offsets count, as they do for the judge). The first hand-run
+batch matched 50 functions. The steps below are what it automates, for doing it by hand.
 
 ## Why
 

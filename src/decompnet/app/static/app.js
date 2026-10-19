@@ -1481,6 +1481,11 @@ function renderSessions(sessions) {
       <span class="last">on ${S.claims.filter((c) => c.agent === a).map((c) => fnLink(c.name)).join(", ")}</span></div>`).join(""));
   box.querySelectorAll(".fn").forEach((x) => { x.onclick = () => openFn(x.dataset.fn); });
   $("noSessions").hidden = sessions.length + outside.length > 0;
+  const pr = S.stats?.permuter_remote;
+  if (pr && pr.host) {  // decomp-permuter on another machine (app/remote_permuter.py)
+    const li = pr.last_import;
+    box.insertAdjacentHTML("beforeend", `<div class="session ext"><span class="facts-line"><b>Permuter on ${esc(pr.host)}</b>: ${pr.error ? esc(pr.error) : pr.running ? "running" : "starting a batch"}${li ? ` · last import ${clock(li.at).slice(0, 5)}: ${li.matched || 0} matched, ${li.improved || 0} improved` : ""}</span></div>`);
+  }
   const ab = S.stats?.memory_ab || [];
   if (ab.length) {  // the memory A/B: per agent, matches per claim with and without what memory recalled
     const by = {};
@@ -2566,7 +2571,9 @@ async function showSettingsPage() {
     <label class="field"><span>Budget: stop helper agents when a project's agents have spent this much (US dollars, as the agents report it; 0 = no limit)</span><input id="budgetSet" type="number" min="0" step="0.5" value="${st.settings.budget_usd || 0}"></label>
     <label class="check"><input type="checkbox" id="autopilotSet" ${st.settings.autopilot !== false ? "checked" : ""}><span><b>Autopilot after each import</b>: try every function's machine draft first, so free matches cost no agent time.</span></label>
     <label class="field"><span>Long-term memory: a Hindsight server's address (e.g. http://my-mac-studio:8888). Every verified match is remembered in a bank per compiler, tagged with its game, and claim briefs carry what it recalls, for every agent. Empty = off.</span><input id="memoryUrl" type="url" placeholder="http://host:8888" value="${esc(st.settings.memory_url || "")}"></label>
-    <label class="check"><input type="checkbox" id="memoryAb" ${st.settings.memory_ab !== false ? "checked" : ""}><span><b>Measure it</b>: half the claims, chosen at random, go without memory, so the project page can show whether it helps.</span></label>`;
+    <label class="check"><input type="checkbox" id="memoryAb" ${st.settings.memory_ab !== false ? "checked" : ""}><span><b>Measure it</b>: half the claims, chosen at random, go without memory, so the project page can show whether it helps.</span></label>
+    <label class="field"><span>Permuter machine: an SSH name this computer reaches without a password (e.g. a Mac Studio). PS1 near misses are sent there in batches for decomp-permuter, and what it finds comes back through the judge every 20 minutes. It needs decomp.wtf's compilers and decomp-permuter in ~/decomp-permuter (see docs/plans/permuter-on-m5.md). Empty = off.</span><input id="permHost" placeholder="my-mac-studio" value="${esc(st.settings.permuter_host || "")}"></label>
+    <label class="field"><span>Cores the permuter uses there</span><input id="permJobs" type="number" min="1" max="256" value="${st.settings.permuter_jobs || 16}"></label>`;
   const theme = savedTheme();
   $("setComputer").innerHTML = `
     <div class="field"><span>Appearance</span><div class="seg" id="themeSeg">${[["", "System"], ["light", "Light"], ["dark", "Dark"]].map(([k, l]) => `<button type="button" data-theme="${k}" class="${theme === k ? "on" : ""}">${l}</button>`).join("")}</div></div>
@@ -2603,6 +2610,8 @@ async function showSettingsPage() {
   $("budgetSet").onchange = () => save({ budget_usd: Number($("budgetSet").value) || 0 }, "Budget saved.");
   $("memoryUrl").onchange = () => save({ memory_url: $("memoryUrl").value.trim() }, $("memoryUrl").value.trim() ? "Memory on." : "Memory off.");
   $("memoryAb").onchange = () => save({ memory_ab: $("memoryAb").checked }, "Saved.");
+  $("permHost").onchange = () => save({ permuter_host: $("permHost").value.trim() }, $("permHost").value.trim() ? "The permuter runs there: the first batch starts within a minute or so." : "Remote permuter off.");
+  $("permJobs").onchange = () => save({ permuter_jobs: Number($("permJobs").value) || 16 }, "Saved (the next batch uses it).");
 }
 
 /* ------------------------------------------------------------------ updates (app/updates.py)

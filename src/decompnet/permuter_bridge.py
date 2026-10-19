@@ -54,7 +54,7 @@ _TC_ROOT = "$HOME/Library/Application Support/decompnet/toolchains"
 # maspsx needs Python 3.10 or newer, and a Mac's /usr/bin/python3 is 3.9: PY=/path/to/python overrides the search
 _FIND_PYTHON = (
     'if [ -z "$PY" ]; then\n'
-    '  for p in python3.14 python3.13 python3.12 python3.11 python3.10 python3 python; do\n'
+    '  PATH="$PATH:/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin"; for p in python3.14 python3.13 python3.12 python3.11 python3.10 python3 python $(ls -d "$HOME"/.local/share/uv/python/cpython-3.1*/bin/python3 2>/dev/null); do\n'
     '    q="$(command -v $p 2>/dev/null)" && "$q" -c "import sys; sys.exit(sys.version_info < (3, 10))" 2>/dev/null && PY="$q" && break\n'
     '  done\n'
     'fi\n'
@@ -201,16 +201,24 @@ def import_results(net, slug: str, src: Path, log=print) -> dict:
     for d in sorted(p for p in src.iterdir() if p.is_dir() and (p / "decomp.json").exists()):
         stats["directories"] += 1
         meta = json.loads((d / "decomp.json").read_text(encoding="utf-8"))
-        outs = sorted(d.glob("output-*/source.c"), key=lambda p: int(re.match(r"output-(\d+)", p.parent.name).group(1)))
+        # outputs not judged yet (a judged one gets a .judged file: an import every 20 minutes doesn't judge it again)
+        outs = sorted((p for p in d.glob("output-*/source.c") if not (p.parent / ".judged").exists()),
+                      key=lambda p: int(re.match(r"output-(\d+)", p.parent.name).group(1)))
         if not outs:
             continue
+
+        def judged() -> None:  # its best judged: the rest of this batch of outputs scored worse in the permuter
+            for p in outs:
+                (p.parent / ".judged").touch()
         text = outs[0].read_text(encoding="utf-8", errors="replace")
         span = csource.find(text, meta["function"])
         if span is None:
+            judged()
             continue
         stats["candidates"] += 1
         fn = net.store.one("SELECT * FROM functions WHERE project_id=? AND name=?", proj["id"], meta["function"])
         if fn is None or fn["status"] != "open" or not fn["best_source"]:
+            judged()
             continue
         # the new definition in place of the old one, in the agent's source (its externs and prototypes stay)
         source = csource.replace(fn["best_source"], meta["function"], text[span[0]:span[1]].strip())
@@ -219,6 +227,7 @@ def import_results(net, slug: str, src: Path, log=print) -> dict:
         except Exception as e:  # claimed by an agent right now: next import
             log(f"{meta['function']}: {e}")
             continue
+        judged()
         if res["matched"]:
             stats["matched"] += 1
         elif res["score"] is not None and fn["best_score"] is not None and res["score"] < fn["best_score"]:
