@@ -180,7 +180,7 @@ _models: dict[str, tuple[float, list[dict]]] = {}
 # helper whose model (and --effort) is picked per function, right before each session, which runs one function.
 TIERED = "tiered"
 HAIKU, SONNET, OPUS = "haiku", "sonnet", "opus"  # Claude Code's aliases: Anthropic's latest of each kind
-# tier -> (model, --effort); thresholds are fractions of the worst score (n_insns * 100: every instruction wrong)
+# tier -> (model, effort), per agent; thresholds are fractions of the worst score (n_insns * 100: all wrong)
 TIERS = {
     "escalated": (OPUS, "high"),       # still far off after STALL_ATTEMPTS attempts: the structure isn't found yet
     "near_miss": (HAIKU, "low"),       # within NEAR_MISS: operands and registers left, compile and adjust
@@ -188,25 +188,32 @@ TIERS = {
     "fresh": (SONNET, "medium"),       # nothing compiled yet: the first structural attempt
     "structural": (SONNET, "medium"),  # far off: the structure is still to find
 }
+# Codex: Astra for the hardest, Sol (the workhorse) for normal work, Luna (fast, cheap) for near misses
+CODEX_TIERS = {
+    "escalated": ("gpt-6-astra", "high"),
+    "near_miss": ("gpt-6-luna", "low"),
+    "mechanical": ("gpt-6-luna", "low"),
+    "fresh": ("gpt-6.1-sol", "medium"),
+    "structural": ("gpt-6.1-sol", "medium"),
+}
+TIER_TABLES = {"claude": TIERS, "codex": CODEX_TIERS}
 NEAR_MISS = 0.10
 MECHANICAL = 0.40
 STALL_ATTEMPTS = 10  # attempts (every agent's) after which a far-off function goes to Opus
 EFFORTS = ("low", "medium", "high", "xhigh", "max")  # what Claude Code's --effort takes
 
 
-def tier_for(state: dict) -> tuple[str, str, str]:
+def tier_for(state: dict, kind: str = "claude") -> tuple[str, str, str]:
     """(model, effort, tier) for a function: best_score (None = nothing compiled yet), n_insns, attempts."""
+    table = TIER_TABLES.get(kind, TIERS)
     best = state.get("best_score")
     if best is None:
-        return *TIERS["fresh"], "fresh"
-    frac = float(best) / (max(int(state.get("n_insns") or 0), 1) * 100)
-    if int(state.get("attempts") or 0) >= STALL_ATTEMPTS and frac > MECHANICAL:
-        return *TIERS["escalated"], "escalated"
-    if frac <= NEAR_MISS:
-        return *TIERS["near_miss"], "near_miss"
-    if frac <= MECHANICAL:
-        return *TIERS["mechanical"], "mechanical"
-    return *TIERS["structural"], "structural"
+        tier = "fresh"
+    else:
+        frac = float(best) / (max(int(state.get("n_insns") or 0), 1) * 100)
+        tier = ("escalated" if int(state.get("attempts") or 0) >= STALL_ATTEMPTS and frac > MECHANICAL else
+                "near_miss" if frac <= NEAR_MISS else "mechanical" if frac <= MECHANICAL else "structural")
+    return *table[tier], tier
 
 
 def next_function(net, slug: str, agent_id: int = 0):
@@ -276,6 +283,8 @@ def models(kind: str, path: str | None) -> list[dict]:
     if kind == "claude":
         return [{"id": TIERED, "name": "Tiered", "note": "Haiku, Sonnet or Opus picked per function"}] + \
             [{"id": i, "name": n, "note": note} for i, n, note in CLAUDE_MODELS]
+    if kind == "codex":
+        return [{"id": TIERED, "name": "Tiered", "note": "Astra, Sol or Luna picked per function"}]
     if kind not in ("opencode", "antigravity") or not path:
         return []
     cached = _models.get(kind)
@@ -639,8 +648,8 @@ class Manager:
         if kind not in KINDS:
             raise ValueError(f"unknown agent kind {kind!r}")
         if options.get("model") == TIERED:
-            if kind != "claude":
-                raise ValueError("tiered models (Haiku, Sonnet or Opus per function) are for Claude Code helpers")
+            if kind not in TIER_TABLES:
+                raise ValueError("a model picked per function is for Claude Code and Codex helpers")
             options["per_session"] = 1  # one function per session: the next claim gets its own model
         ids = []
         self._prepare(slug)
@@ -895,7 +904,7 @@ class Manager:
             fn = None
         if fn is not None:
             state, name = {"best_score": fn["best_score"], "n_insns": fn["n_insns"], "attempts": fn["attempts"]}, fn["name"]
-        model, effort, tier = tier_for(state)
+        model, effort, tier = tier_for(state, s.kind)
         return model, effort, tier, name
 
     def prompt(self, s: Session) -> str:
@@ -971,6 +980,8 @@ class Manager:
                     "-c", 'approval_policy="never"']
             if model:
                 cmd += ["-m", model]
+            if s.tiered and s.routed_effort:
+                cmd += ["-c", f'model_reasoning_effort="{s.routed_effort}"']
             cmd.append("-")  # the prompt comes from stdin
         elif s.kind == "antigravity":
             # the workspace's own MCP config; tool permission comes from the user's rule for decomp's tools (AGY_ALLOW)
