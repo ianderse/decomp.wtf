@@ -285,4 +285,4 @@ is not yet proof they agree with decompals's Linux builds. The survey on the lap
 
 Remaining: the diagnostics of 2.8.0 and 2.6.x on arm64 (still `-w` and `explain_with`, or use the Intel builds under
 Rosetta while it lasts), 2.5.7, the SLUS-01252 check, 2.7.2 and 2.8.1 Intel builds, and the upstream pull request
-(`docs/plans/old-gcc-pr.md` is not written yet).
+(draft in `docs/plans/old-gcc-pr.md`, not opened: it waits for the SLUS-01252 check).
