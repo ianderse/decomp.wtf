@@ -26,7 +26,7 @@ from pathlib import Path
 from .. import scoring, seeds, similarity, toolchains
 from ..elfobj import FunctionObj
 from ..network import ALTERNATES, Agent, Network, NetworkError, _hash_token
-from ..project import compiler_config
+from ..project import compiler_config, toolchain_id
 from ..rom import detect, match, split
 from ..rom.symbols import AUTO_NAME, IDENT, Symbol, SymbolTable
 
@@ -44,11 +44,13 @@ COMPILERS = {
     "ido-5.3": "early N64 games (1996-97)",
     "gcc-2.7.2-psx": "PlayStation games (PSY-Q era GCC)",
     "gcc-2.8.1-psx": "later PlayStation games",
+    "gcc-2.6.3-psx": "earlier PlayStation games, and parts of later ones (PSY-Q's GCC 2.6.3)",
+    "gcc-2.6.0-psx": "early PlayStation games (PSY-Q's GCC 2.6.0)",
     "ee-gcc-2.96": "PlayStation 2 games (Sony's EE GCC)",
     "agbcc": "Game Boy Advance games (pret's agbcc, GCC 2.95)",
 }
 SHORT_NAMES = {"gcc-2.7.2-kmc": "KMC GCC 2.7.2", "ido-7.1": "IDO 7.1", "ido-5.3": "IDO 5.3",
-               "gcc-2.7.2-psx": "GCC 2.7.2 (PS1)", "gcc-2.8.1-psx": "GCC 2.8.1 (PS1)", "ee-gcc-2.96": "EE-GCC 2.96",
+               "gcc-2.7.2-psx": "GCC 2.7.2 (PS1)", "gcc-2.8.1-psx": "GCC 2.8.1 (PS1)", "gcc-2.6.3-psx": "GCC 2.6.3 (PS1)", "gcc-2.6.0-psx": "GCC 2.6.0 (PS1)", "ee-gcc-2.96": "EE-GCC 2.96",
                "agbcc": "agbcc"}
 # CodeWarrior versions in the `mwcc` pack (GameCube, Wii) and the `mwccarm` pack (DS), for games started from scratch.
 MW_VERSIONS = {
@@ -1675,6 +1677,13 @@ class RomNetwork(Network):
         if sig is None or self.cfg(proj).get("judged_with") == sig:
             return
         state["phase"] = "rejudge"
+        main = self.cfg(proj).get("compiler", {}).get("toolchain")
+        for tid in dict.fromkeys(toolchain_id(t) for t in ALTERNATES.get(main, ())):  # the free ones it'll try
+            try:
+                if toolchains.get(tid).supported and not toolchains.get(tid).proprietary:
+                    toolchains.ensure(tid, log=lambda *_: None)
+            except Exception:  # one that can't install is skipped, as before
+                pass
         log = logging.getLogger("decomp.wtf")
         matched = self.store.all("SELECT * FROM functions WHERE project_id=? AND status='matched' AND matched_source IS NOT NULL",
                                  proj["id"])
