@@ -16,7 +16,9 @@ from __future__ import annotations
 
 import json
 import re
+import os
 import shlex
+import shutil
 import subprocess
 import tempfile
 from pathlib import Path
@@ -82,10 +84,41 @@ def _compile_sh(net, proj, fn) -> str:
         else:
             words.append(shlex.quote(a))
     return ("#!/bin/sh\n# decomp.wtf's compile command for " + fn["name"] + "\n"
-            'export TC="$HOME/Library/Application Support/decompnet/toolchains"\n'
+            'export TC="${TC:-$HOME/Library/Application Support/decompnet/toolchains}"\n'
             + _FIND_PYTHON +
             'IN="$1"; OUT="$3"\n'
             "exec " + " ".join(words) + "\n")
+
+
+def _compiles(d: Path) -> tuple[bool, str]:
+    """Whether the directory's base.c compiles with its own compile.sh, and the compiler's messages if it doesn't."""
+    with tempfile.TemporaryDirectory() as t:
+        r = subprocess.run(["/bin/sh", str(d / "compile.sh"), str(d / "base.c"), "-o", str(Path(t) / "o.o")],
+                           capture_output=True, text=True, errors="replace", cwd=d,
+                           env={**os.environ, "TC": str(toolchains.root())})
+    return r.returncode == 0, r.stderr
+
+
+def repair_base(d: Path, tries: int = 6) -> tuple[bool, int]:
+    """Makes base.c compile. An attempt that declares something the project header has since declared differently
+    stops compiling ("conflicting types for"); the attempt's own later declaration goes (the header's wins), when it is
+    a one-line declaration. Returns (compiles, declarations dropped); the permuter stops on the first base that
+    doesn't compile, so one stale attempt would end a whole run."""
+    dropped = 0
+    for _ in range(tries):
+        ok, err = _compiles(d)
+        if ok:
+            return True, dropped
+        lines = (d / "base.c").read_text(encoding="utf-8").split("\n")
+        bad = sorted({int(m.group(1)) for m in re.finditer(r"base\.c:(\d+): conflicting types for", err)}, reverse=True)
+        bad = [n for n in bad if n <= len(lines) and lines[n - 1].rstrip().endswith(";") and "{" not in lines[n - 1]]
+        if not bad:
+            return False, dropped
+        for n in bad:
+            del lines[n - 1]
+        dropped += len(bad)
+        (d / "base.c").write_text("\n".join(lines), encoding="utf-8")
+    return _compiles(d)[0], dropped
 
 
 def export(net, slug: str, out: Path, max_miss: float = 0.05, limit: int = 400, log=print) -> int:
@@ -139,6 +172,13 @@ def export(net, slug: str, out: Path, max_miss: float = 0.05, limit: int = 400, 
                                          f'objdump_command = "OBJDUMP"\n', encoding="utf-8")
         (d / "decomp.json").write_text(json.dumps({"slug": slug, "function": fn["name"], "best_score": fn["best_score"],
                                                    "n_insns": fn["n_insns"]}), encoding="utf-8")
+        ok, dropped = repair_base(d)
+        if not ok:
+            log(f"{fn['name']}: base.c does not compile with this app's compiler, skipped")
+            shutil.rmtree(d)
+            continue
+        if dropped:
+            log(f"{fn['name']}: dropped {dropped} declaration(s) of the attempt that conflict with the header")
         written += 1
     (out / "setup.sh").write_text(
         '#!/bin/sh\n# Run once on the permuter machine: points every directory at its MIPS objdump.\n'
