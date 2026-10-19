@@ -889,7 +889,7 @@ def build(net: RomNetwork, home: Path, port: int, secret: str):
         # remembered, so the next start is one click; models typed in come back as suggestions
         model = str(options.get("model") or "")
         settings.data["launcher"] = {"kind": kind, "model": model, "count": count} | ({"endpoints": picked} if picked else {})
-        if model and kind != "api":
+        if model and kind != "api" and model != agents.TIERED:  # offered already, not a typed name
             recent = settings.data.setdefault("recent_models", {}).setdefault(kind, [])
             settings.data["recent_models"][kind] = [model] + [m for m in recent if m != model][:7]
         settings.save()

@@ -1471,6 +1471,7 @@ function renderSessions(sessions) {
         <span class="state ${s.state === "error" ? "err" : ""}">${esc(STATE_TEXT[s.state] || s.state)}</span>
         <button class="ghost" data-stop="${esc(s.id)}" data-remove="${live ? "" : "1"}" type="button">${live ? "Stop" : "Remove"}</button></div>
       <span class="facts-line">${facts.join(" · ")}</span>
+      ${s.tiered ? `<span class="facts-line">tiered · ${s.model ? `${esc(s.model)}${s.effort ? ` (${esc(s.effort)} effort)` : ""}` : "picking a model"}${s.tier ? ` · ${esc(s.tier.replace("_", " "))}` : ""}${s.tier_function ? ` for ${esc(s.tier_function)}` : ""}</span>` : ""}
       ${s.state === "error" ? `<span class="state err">${esc(s.error)}</span>` : ""}
       ${claim ? `<span class="last">on ${fnLink(claim.name)}</span>` : ""}</div>`;
   }).join("");
@@ -1577,11 +1578,13 @@ function renderLauncher(box, compact = false) {
       <p class="muted small">${eps.length > 1 ? "Tick several to spread the sessions across them. " : ""}<a class="link" href="#/agents">Manage endpoints</a> · <button type="button" class="link-btn" data-act="add-ep">Add one</button></p>`
       : `<div class="lz-fields">${endpointFields({ provider: "deepseek" }, compact)}</div>${eps.length ? `<p class="muted small"><button type="button" class="link-btn" data-act="pick-ep">Back to your endpoints</button></p>` : ""}`;
   } else {
-    const opts = modelOptions(a);
+    const opts = modelOptions(a).filter((o) => o.id !== "tiered");  // (Claude Code's tiers: the switch below)
+    const tiered = a.id === "claude" && LZ.model === "tiered";
     const known = opts.some((o) => o.id === LZ.model);
-    body = `<label class="field"><span>Model</span><select data-f="model">${opts.map((o) => `<option value="${esc(o.id)}" ${known && o.id === LZ.model ? "selected" : ""}>${esc(o.name)}${o.note ? ` — ${esc(o.note)}` : ""}</option>`).join("")}
+    const tierSwitch = a.id === "claude" ? `<label class="check"><input type="checkbox" data-f="tiered" ${tiered ? "checked" : ""}><span><b>Pick the model per function</b>: Haiku for near misses, Sonnet for new or far-off functions, Opus for ones still stuck after 10 attempts. Each session does one function.</span></label>` : "";
+    body = tierSwitch + (tiered ? "" : `<label class="field"><span>Model</span><select data-f="model">${opts.map((o) => `<option value="${esc(o.id)}" ${known && o.id === LZ.model ? "selected" : ""}>${esc(o.name)}${o.note ? ` — ${esc(o.note)}` : ""}</option>`).join("")}
         <option value="__other" ${known ? "" : "selected"}>Another model…</option></select></label>
-      <input data-f="custom" class="mono lz-custom" placeholder="model name, as ${esc(a.name)} calls it" value="${known ? "" : esc(LZ.model)}" ${known ? "hidden" : ""}>`;
+      <input data-f="custom" class="mono lz-custom" placeholder="model name, as ${esc(a.name)} calls it" value="${known ? "" : esc(LZ.model)}" ${known ? "hidden" : ""}>`);
   }
   const ready = a.installed;
   box.innerHTML = `<div class="lz-kinds">${kinds}</div>
@@ -1600,6 +1603,11 @@ function renderLauncher(box, compact = false) {
   const label = () => { const btn = box.querySelector('[data-act="start"]'); if (btn) btn.textContent = launchLabel(a, LZ.model, LZ.count); };
   if (sel) sel.onchange = () => { if (sel.value === "__other") { custom.hidden = false; custom.focus(); LZ.model = custom.value.trim(); } else { custom.hidden = true; LZ.model = sel.value; } label(); };
   if (custom) custom.oninput = () => { LZ.model = custom.value.trim(); label(); };
+  const tierBox = box.querySelector('[data-f="tiered"]');
+  if (tierBox) tierBox.onchange = () => {
+    if (tierBox.checked) { LZ.untiered = LZ.model; LZ.model = "tiered"; } else { LZ.model = LZ.untiered && LZ.untiered !== "tiered" ? LZ.untiered : ""; }
+    rerender();
+  };
   box.querySelectorAll("[data-step]").forEach((b) => { b.onclick = () => { LZ.count = Math.max(1, Math.min(8, LZ.count + Number(b.dataset.step))); box.querySelector(".stepper output").textContent = LZ.count; label(); }; });
   const per = box.querySelector('[data-f="per"]');
   if (per) per.onchange = () => { LZ.per = Math.max(1, Math.min(20, Number(per.value) || 4)); };

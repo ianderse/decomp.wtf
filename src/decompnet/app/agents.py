@@ -175,6 +175,67 @@ def no_credit(said: str) -> str | None:
 _versions: dict[str, tuple[float, str | None]] = {}
 _models: dict[str, tuple[float, list[dict]]] = {}
 
+# ------------------------------------------------------------------- tiered Claude Code helpers
+# Ported from SynapticDreams/decomp.wtf (MIT; written there from Nexhas28/decomp.wtf). model="tiered": a Claude Code
+# helper whose model (and --effort) is picked per function, right before each session, which runs one function.
+TIERED = "tiered"
+HAIKU, SONNET, OPUS = "haiku", "sonnet", "opus"  # Claude Code's aliases: Anthropic's latest of each kind
+# tier -> (model, --effort); thresholds are fractions of the worst score (n_insns * 100: every instruction wrong)
+TIERS = {
+    "escalated": (OPUS, "high"),       # still far off after STALL_ATTEMPTS attempts: the structure isn't found yet
+    "near_miss": (HAIKU, "low"),       # within NEAR_MISS: operands and registers left, compile and adjust
+    "mechanical": (HAIKU, "low"),      # within MECHANICAL: the structure is there, keep adjusting
+    "fresh": (SONNET, "medium"),       # nothing compiled yet: the first structural attempt
+    "structural": (SONNET, "medium"),  # far off: the structure is still to find
+}
+NEAR_MISS = 0.10
+MECHANICAL = 0.40
+STALL_ATTEMPTS = 10  # attempts (every agent's) after which a far-off function goes to Opus
+EFFORTS = ("low", "medium", "high", "xhigh", "max")  # what Claude Code's --effort takes
+
+
+def tier_for(state: dict) -> tuple[str, str, str]:
+    """(model, effort, tier) for a function: best_score (None = nothing compiled yet), n_insns, attempts."""
+    best = state.get("best_score")
+    if best is None:
+        return *TIERS["fresh"], "fresh"
+    frac = float(best) / (max(int(state.get("n_insns") or 0), 1) * 100)
+    if int(state.get("attempts") or 0) >= STALL_ATTEMPTS and frac > MECHANICAL:
+        return *TIERS["escalated"], "escalated"
+    if frac <= NEAR_MISS:
+        return *TIERS["near_miss"], "near_miss"
+    if frac <= MECHANICAL:
+        return *TIERS["mechanical"], "mechanical"
+    return *TIERS["structural"], "structural"
+
+
+def next_function(net, slug: str, agent_id: int = 0):
+    """The function a helper would most likely get from claim_function next (read-only), or None: a claim it holds,
+    then the project's ★ pins, then its claim order (the routing's, see Manager._route, or the default)."""
+    from .. import network as netmod
+
+    if agent_id:
+        held = net.store.one("SELECT f.* FROM claims c JOIN functions f ON f.id=c.function_id WHERE c.agent_id=?", agent_id)
+        if held is not None:
+            return held
+    proj = net.project_row(slug)
+    fork = bool(net.fork_slug(slug))
+    if not fork:
+        for name in net.cfg(proj).get("priority", []):
+            row = net.store.one("SELECT f.* FROM functions f WHERE f.project_id=? AND f.name=? AND f.status='open' "
+                                "AND f.id NOT IN (SELECT function_id FROM claims)", proj["id"], name)
+            if row is not None:
+                return row
+    strategy = getattr(net, "agent_strategy", {}).get(agent_id) or ("finish" if fork else "easiest")
+    return net.store.one(
+        f"""SELECT f.* FROM functions f WHERE f.project_id=? AND f.status='open'
+            AND f.id NOT IN (SELECT function_id FROM claims)
+            AND f.name NOT IN (SELECT detail FROM events WHERE project_id=? AND agent_id=? AND kind='release')
+            ORDER BY f.name IN (SELECT detail FROM events WHERE project_id=? AND kind='release'
+                                AND created_at > ?), {netmod.STRATEGIES[strategy]} LIMIT 1""",
+        proj["id"], proj["id"], agent_id, proj["id"], time.time() - netmod.RELEASE_COOLDOWN)
+
+
 # Claude Code's aliases always point at Anthropic's latest model of each kind.
 CLAUDE_MODELS = [("fable", "Fable", "Anthropic's most capable model"), ("opus", "Opus", "very capable"),
                  ("sonnet", "Sonnet", "fast and capable, cheaper"), ("haiku", "Haiku", "fastest, cheapest")]
@@ -213,7 +274,8 @@ def models(kind: str, path: str | None) -> list[dict]:
     """Models to offer for this agent: [{"id", "name", "note"}]. Claude Code's aliases; opencode's and Antigravity's
     own lists (what the user's sign-in offers); for Codex the user's default plus any model name they type."""
     if kind == "claude":
-        return [{"id": i, "name": n, "note": note} for i, n, note in CLAUDE_MODELS]
+        return [{"id": TIERED, "name": "Tiered", "note": "Haiku, Sonnet or Opus picked per function"}] + \
+            [{"id": i, "name": n, "note": note} for i, n, note in CLAUDE_MODELS]
     if kind not in ("opencode", "antigravity") or not path:
         return []
     cached = _models.get(kind)
@@ -523,6 +585,15 @@ class Session:
     signed_out: bool = False  # the agent CLI isn't signed in: trying again won't help
     throttled: bool = False  # the last run ended on the provider's limit of requests at once: not a failure
     plan_limited: bool = False  # the last run ended on the plan's usage limit: wait it out
+    routed_model: str = ""  # tiered helpers: the model picked for the current run
+    routed_effort: str = ""  # ...its --effort
+    tier: str = ""  # ...the tier that picked it (tier_for)
+    tier_function: str = ""  # ...and the function it was picked for
+    agent_id: int = 0  # the agent's id, once the run has it
+
+    @property
+    def tiered(self) -> bool:
+        return self.options.get("model") == TIERED
     silent: bool = False  # the last run was ended for printing nothing for SILENT_MINUTES
 
     def push(self, kind: str, text: str) -> None:
@@ -532,7 +603,9 @@ class Session:
     def snapshot(self, since: int = 0) -> dict:
         return {"id": self.id, "kind": self.kind, "label": self.label, "slug": self.slug, "agent": self.agent_name,
                 "state": self.state, "runs": self.runs, "error": self.error, "started_at": self.started_at,
-                "model": self.options.get("model") or "", "usd": round(self.usd, 4), "tokens": self.tokens,
+                "model": (self.routed_model if self.tiered else self.options.get("model")) or "",
+                "tiered": self.tiered, "tier": self.tier, "tier_function": self.tier_function,
+                "effort": self.routed_effort if self.tiered else "", "usd": round(self.usd, 4), "tokens": self.tokens,
                 "feed": [f for f in self.feed if f["seq"] > since]}
 
 
@@ -565,6 +638,10 @@ class Manager:
             options.pop("model", None)  # a Gemini CLI model name may mean nothing to Antigravity: use its default
         if kind not in KINDS:
             raise ValueError(f"unknown agent kind {kind!r}")
+        if options.get("model") == TIERED:
+            if kind != "claude":
+                raise ValueError("tiered models (Haiku, Sonnet or Opus per function) are for Claude Code helpers")
+            options["per_session"] = 1  # one function per session: the next claim gets its own model
         ids = []
         self._prepare(slug)
         with self._lock:
@@ -748,6 +825,11 @@ class Manager:
             s.runs += 1
             t0 = time.time()
             before = self._progress(agent.id)
+            s.agent_id = agent.id
+            if s.tiered:  # the model for the function this session is about to claim
+                s.routed_model, s.routed_effort, s.tier, s.tier_function = self.tier(s)
+                s.push("info", f"session {s.runs}: {s.tier.replace('_', ' ')} -> {s.routed_model} ({s.routed_effort} effort)"
+                               + (f" for {s.tier_function}" if s.tier_function else ""))
             try:
                 ok = self._run_api(s, agent) if s.kind == "api" else self._run_cli(s, token, workdir)
             except Fatal as e:  # needs the user first: retrying can't help
@@ -804,6 +886,18 @@ class Manager:
         with self.net.store.tx() as db:  # release any claim the agent still holds so others can take it
             db.execute("DELETE FROM claims WHERE agent_id=?", (agent.id,))
 
+    def tier(self, s: Session) -> tuple[str, str, str, str]:
+        """(model, effort, tier, function) for a tiered session's next run (tier_for on what it'll claim next)."""
+        state, name = {}, ""
+        try:
+            fn = next_function(self.net, s.slug, s.agent_id)
+        except Exception:  # best effort: a helper still starts
+            fn = None
+        if fn is not None:
+            state, name = {"best_score": fn["best_score"], "n_insns": fn["n_insns"], "attempts": fn["attempts"]}, fn["name"]
+        model, effort, tier = tier_for(state)
+        return model, effort, tier, name
+
     def prompt(self, s: Session) -> str:
         text = self._prompt(s)
         # the know-how every session reads first, given up front (saves each session its first tool calls)
@@ -848,7 +942,9 @@ class Manager:
         # with: that bridge works as this session's agent when it finds this, not as a new agent of the user's
         env["DECOMP_SESSION_TOKEN"] = token
         prompt = self.prompt(s)
-        model = s.options.get("model") or ""
+        if s.tiered and not s.routed_model:  # started outside the run loop: pick now
+            s.routed_model, s.routed_effort, s.tier, s.tier_function = self.tier(s)
+        model = (s.routed_model if s.tiered else s.options.get("model")) or ""
         if s.kind == "claude":
             cfg = workdir / "mcp.json"
             cfg.write_text(json.dumps({"mcpServers": {"decomp": {"type": "http", "url": self.mcp_url,
@@ -859,6 +955,8 @@ class Manager:
                    "Bash,Edit,Write,NotebookEdit,WebFetch,WebSearch"]
             if model:
                 cmd += ["--model", model]
+            if s.tiered and s.routed_effort in EFFORTS:
+                cmd += ["--effort", s.routed_effort]
         elif s.kind == "codex":
             env["DECOMP_TOKEN"] = token
             # The worker's own server, under a name of its own: `-c` settings merge into the user's config, and
