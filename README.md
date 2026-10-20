@@ -35,6 +35,15 @@ produces, and respect the rules of projects that don't want AI-made contribution
 - **Sony's library functions found and set aside.** Install "PSY-Q library signatures" from Compilers & tools
   (lab313ru's public set, fetched on request and never bundled), and functions a signature covers whole are set
   aside with their real names. The matcher is ported from SynapticDreams.
+- **Signatures from Sony's own libraries, per function.** Put PSY-Q SDK libraries in `<workspace>/psyq-sdk/`:
+  Sony's Runtime Library discs (zip/7z/rar or .bin/.iso, any release), SDK archives, or folders of .LIB/.OBJ files.
+  decomp.wtf reads PSY-Q's own object format (rom/psyq_sdk.py), keeps the library files in `psyq-sdk/libs/<version>`
+  (the images can go afterwards) and makes one signature per function, with the bytes the linker fills in left open,
+  so a game's copy of a library object that differs anywhere is still found function by function. On SLUS-01252: 48
+  more library functions than the public set found. You supply the libraries; none are bundled.
+- **Compiler hints from assembler fingerprints.** A function whose code has an older ASPSX's `ori` for small
+  constants compiles, from the first try, with the setup its nearest matched neighbours with the same fingerprint
+  used (when its best attempt agrees); its brief says which and why.
 - **Compiler crashes explained.** The Apple Silicon builds of the old PS1 GCCs crash on some warnings and errors.
   Warnings are turned off there (they never change the code), and when an error still crashes the compiler, the
   same GCC version built for Intel reports the real message.

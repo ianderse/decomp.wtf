@@ -1322,10 +1322,18 @@ class RomNetwork(Network):
         if cfg.get("platform") != "psx" or self.fork_slug(slug) or toolchains.installed("psyq-signatures") is None:
             return {}
         stamp = toolchains.get("psyq-signatures").source
+        # and signatures made from Sony's own libraries, when there are some in <workspace>/psyq-sdk (rom/psyq_sdk.py):
+        # one per function, so a game's slightly different copy of a library object is still found function by function
+        from ..rom import psyq_sdk
+        made = self.workspace / ".decomp" / "psyq-sdk-signatures"
+        sdk = psyq_sdk.prepare(self.workspace / "psyq-sdk", made, log=logging.getLogger("decomp.wtf").info)
+        if sdk:
+            stamp += f" + SDK libraries {sdk}"
         if not force and (cfg.get("psyq") or {}).get("stamp") == stamp:
             return cfg["psyq"]
-        if getattr(self, "_psyq_sigs", None) is None:
-            self._psyq_sigs = psyq.load(toolchains.path("psyq-signatures"))
+        if getattr(self, "_psyq_sigs", None) is None or getattr(self, "_psyq_stamp", None) != stamp:
+            self._psyq_sigs = psyq.load(toolchains.path("psyq-signatures")) + (psyq.load(made) if sdk else [])
+            self._psyq_stamp = stamp
         image = (Path(proj["root"]) / cfg["rom"]["file"]).read_bytes()
         regions = [(sg["name"], image[sg["rom_start"]:sg["rom_end"]], sg["vram"], sg["rom_start"])
                    for sg in cfg.get("segments") or [] if sg.get("rom_end")]
