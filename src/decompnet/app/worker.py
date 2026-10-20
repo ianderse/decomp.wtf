@@ -153,6 +153,7 @@ def main(argv: list[str]) -> int:
                                       proj["id"])["n"]
                     if n != last:
                         state["templates"] = net.refresh_alikes(slug, stop)
+                        state["compiler_hints"] = net.refresh_toolchain_hints(slug)  # fingerprints -> compilers
                         state["refreshed_at"], last = time.time(), n
                     stop.wait(600)
             finally:

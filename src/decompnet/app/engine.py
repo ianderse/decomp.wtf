@@ -13,6 +13,7 @@ Everything stays on this computer.
 
 from __future__ import annotations
 
+import collections
 import hashlib
 import json
 import logging
@@ -82,6 +83,14 @@ BATCH_INSNS = 48
 RELINK_EVERY = 100  # new matches between two rebuilt-game checks (relink)
 RELINK_LIMIT = 0.02  # more failing matches than this share at once: listed, not reopened (the check may be wrong)
 RELINK_PLATFORMS = ("n64", "psx", "ps2")  # the ones rom/export.py rebuilds
+# assembler fingerprints in a function's own code: what the compiler setup that built it leaves behind
+FINGERPRINTS = {
+    # older ASPSX versions load small constants with `ori rX, $zero, imm` (2.7.2's default with ASPSX 2.56 uses
+    # addiu): on SLUS-01252 every GCC 2.8.1 + ASPSX 2.34 match has it, 2% of the plain 2.7.2 ones do (Sony's
+    # libraries, built with the older tools, are full of it)
+    "ori for li": re.compile(r"\bori\s+\$\w+,\s*\$zero,", re.IGNORECASE),
+}
+HINT_NEIGHBOURS, HINT_AGREE = 8, 3  # refresh_toolchain_hints: matched functions to look at, and to agree
 PLATFORM_COMPILERS = {"n64": ["gcc-2.7.2-kmc", "ido-7.1", "ido-5.3"], "psx": ["gcc-2.7.2-psx", "gcc-2.8.1-psx"],
                       "ps2": ["ee-gcc-2.96"], "gba": ["agbcc"]}
 _AUTO_TOKEN = re.compile(r"\b(?:func|D|B|jtbl|RO|STR|FLT|DBL)_[0-9A-F]{8}\b")
@@ -650,6 +659,11 @@ class RomNetwork(Network):
         x = self.xrefs(proj)
         lines = ["", "### Where it lives",
                  f"address 0x{fn['vram']:08X}, ROM offset 0x{fn['rom_offset']:X}, segment {fn['unit']}"]
+        if fn["status"] != "matched" and (hint := json.loads(fn["meta"] or "{}").get("toolchain_hint")):
+            lines += ["", (f"### Compiler: {self.fn_toolchain(fn)}, not the project's "
+                           f"{self.cfg(proj).get('compiler', {}).get('toolchain')}"),
+                      (f"Your compiles of this function use it: {hint}. (If the code looks like the game's own after "
+                       "all, the judge still tries the project's setup on near misses.)")]
         calls = sorted(x["calls"].get(fn["vram"], ()))
         callers = sorted(x["called_by"].get(fn["vram"], ()))
         if calls:
@@ -779,6 +793,73 @@ class RomNetwork(Network):
             db.executemany("UPDATE functions SET meta=json_set(COALESCE(meta, '{}'), '$.alike', ?, '$.alike_sim', ?) "
                            "WHERE id=?", updates)
         return found
+
+
+    def refresh_toolchain_hints(self, slug: str) -> int:
+        """Each open function whose code carries an assembler fingerprint (FINGERPRINTS) gets, as its own compiler,
+        the setup most of the nearest matched functions with the same fingerprint matched with (HINT_NEIGHBOURS
+        nearest, HINT_AGREE of them and half agreeing): agents then compile with it from the first try, where the
+        project's setup scored so far off that the judge never tried the right one. Kept up to date as matches
+        come in (functions.meta toolchain + toolchain_hint; a compiler set any other way is left alone)."""
+        proj = self._project(slug)
+        cfg = self.cfg(proj)
+        main = cfg.get("compiler", {}).get("toolchain")
+        if cfg.get("platform") != "psx" or not main or self.fork_slug(slug):
+            return 0
+        rows = self.store.all("SELECT * FROM functions WHERE project_id=? AND status IN ('open', 'matched') "
+                              "AND asm IS NOT NULL", proj["id"])
+        units = self._unit_contexts(proj["id"])
+
+        def scores_better(fn, tc: str) -> bool:
+            """Its best attempt does at least as well with `tc` as with the project's setup (or it has none)."""
+            if not fn["best_source"]:
+                return True
+            header = self._context(proj["id"], self._effective_unit(fn, units))["header"]
+            got = {}
+            for t in (main, tc):
+                res = self._compile(proj, header, fn["best_source"], fn, toolchain=t)
+                cand, exact, _ = self._evaluate(fn, proj, res.obj) if res.ok else (None, None, [])
+                got[t] = 0 if exact else scoring.diff(self._target_obj(fn, proj), cand).score if cand else 1 << 30
+            return got[tc] <= got[main]
+        changed = 0
+        updates = []
+        for label, rx in FINGERPRINTS.items():
+            marked = [r for r in rows if rx.search(r["asm"])]
+            done = [(r["unit"], r["vram"], self.fn_toolchain(r) or main) for r in marked if r["status"] == "matched"]
+            for r in marked:
+                if r["status"] != "open":
+                    continue
+                meta = json.loads(r["meta"] or "{}")
+                if meta.get("toolchain") and not meta.get("toolchain_hint"):
+                    continue  # set some other way: not ours to change
+                near = sorted((abs(v - r["vram"]), tc) for u, v, tc in done if u == r["unit"])[:HINT_NEIGHBOURS]
+                votes = collections.Counter(tc for _, tc in near)
+                best, n = votes.most_common(1)[0] if votes else (None, 0)
+                want = best if best and best != main and n >= HINT_AGREE and 2 * n >= len(near) else None
+                if want:  # and its best attempt agrees (one tuned close to a match with the project's setup: no)
+                    seen = meta.get("hint_checked")
+                    if seen and seen[0] == want and seen[1] == r["best_score"]:
+                        ok = seen[2]
+                    else:
+                        ok = scores_better(r, want)
+                        meta["hint_checked"] = [want, r["best_score"], ok]
+                        updates.append((json.dumps(meta), r["id"]))
+                    want = want if ok else None
+                if want == meta.get("toolchain"):
+                    continue
+                if want:
+                    meta["toolchain"] = want
+                    meta["toolchain_hint"] = (f"its code has the {label} fingerprint, like {n} of the {len(near)} "
+                                              f"nearest matched functions with it, which matched with {want}")
+                else:
+                    meta.pop("toolchain", None)
+                    meta.pop("toolchain_hint", None)
+                updates.append((json.dumps(meta) if meta else None, r["id"]))
+        if updates:
+            with self.store.tx() as db:
+                db.executemany("UPDATE functions SET meta=? WHERE id=? AND status='open'", updates)
+            changed = len(updates)
+        return changed
 
     def start_alikes(self, slug: str) -> None:
         """Keep the look-alikes current while agents work (worker.py: its own process, as it compares thousands)."""
