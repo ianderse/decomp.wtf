@@ -2645,7 +2645,7 @@ async function showSettingsPage() {
     <label class="field"><span>Long-term memory: a Hindsight server's address (e.g. http://my-mac-studio:8888). Every verified match is remembered in a bank per compiler, tagged with its game, and claim briefs carry what it recalls, for every agent. Empty = off.</span><input id="memoryUrl" type="url" placeholder="http://host:8888" value="${esc(st.settings.memory_url || "")}"></label>
     <label class="check"><input type="checkbox" id="memoryAb" ${st.settings.memory_ab !== false ? "checked" : ""}><span><b>Measure it</b>: half the claims, chosen at random, go without memory, so the project page can show whether it helps.</span></label>
     <label class="field"><span>Permuter machine: an SSH name this computer reaches without a password (e.g. a Mac Studio). PS1 near misses are sent there in batches for decomp-permuter, and what it finds comes back through the judge every 20 minutes. It needs decomp.wtf's compilers and decomp-permuter in ~/decomp-permuter (see docs/plans/permuter-on-m5.md). Empty = off.</span><input id="permHost" placeholder="my-mac-studio" value="${esc(st.settings.permuter_host || "")}"></label>
-    <label class="field"><span>Cores the permuter uses there</span><input id="permJobs" type="number" min="1" max="256" value="${st.settings.permuter_jobs || 16}"></label>`;
+    <label class="field"><span>Cores the permuter uses there</span><input id="permJobs" type="number" min="1" max="256" placeholder="all its cores but 6" value="${st.settings.permuter_jobs || ""}"></label>`;
   const theme = savedTheme();
   $("setComputer").innerHTML = `
     <div class="field"><span>Appearance</span><div class="seg" id="themeSeg">${[["", "System"], ["light", "Light"], ["dark", "Dark"]].map(([k, l]) => `<button type="button" data-theme="${k}" class="${theme === k ? "on" : ""}">${l}</button>`).join("")}</div></div>
@@ -2683,7 +2683,7 @@ async function showSettingsPage() {
   $("memoryUrl").onchange = () => save({ memory_url: $("memoryUrl").value.trim() }, $("memoryUrl").value.trim() ? "Memory on." : "Memory off.");
   $("memoryAb").onchange = () => save({ memory_ab: $("memoryAb").checked }, "Saved.");
   $("permHost").onchange = () => save({ permuter_host: $("permHost").value.trim() }, $("permHost").value.trim() ? "The permuter runs there: the first batch starts within a minute or so." : "Remote permuter off.");
-  $("permJobs").onchange = () => save({ permuter_jobs: Number($("permJobs").value) || 16 }, "Saved (the next batch uses it).");
+  $("permJobs").onchange = () => save({ permuter_jobs: Number($("permJobs").value) || "" }, "Saved (the next batch uses it).");
 }
 
 /* ------------------------------------------------------------------ updates (app/updates.py)

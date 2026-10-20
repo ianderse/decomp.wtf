@@ -7,7 +7,8 @@ password, e.g. a Mac Studio over Tailscale):
    matches are saved, improvements become functions' best attempts, and a judged output isn't judged again;
 2. when the permuter isn't running there, or its batch is older than ROTATE, a fresh batch of near misses is
    exported (improvements are their new starting points), copied there (rsync --delete) and started (setup.sh, then
-   decomp-permuter with --best-only --stack-diffs: stack offsets count, as they do for the judge).
+   decomp-permuter with --best-only --stack-diffs: stack offsets count, as they do for the judge), with one job per
+   core there but SPARE_CORES unless Settings says how many.
 
 Nothing here is required: no host, or a host that doesn't answer, and the app works as before. What it needs there:
 decomp.wtf's toolchains installed (its Compilers & tools page, or `uv run decomp setup`) and decomp-permuter cloned
@@ -27,7 +28,9 @@ from pathlib import Path
 
 log = logging.getLogger("decomp.wtf")
 TICK = 20 * 60
-ROTATE = 12 * 3600
+ROTATE = 3 * 3600  # a batch's matches come in its first 2-3 hours (SLUS-01252); then a fresh one
+MAX_MISS = 0.08  # near misses this close go in a batch
+SPARE_CORES = 6  # left to the permuter machine's other work (a local model, Hindsight)
 SSH = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=15"]
 
 
@@ -36,6 +39,7 @@ class RemotePermuter:
         self.net, self.home, self.settings = net, Path(home), settings
         self.status: dict[str, dict] = {}  # slug -> what the agents panel shows
         self._lock = threading.Lock()
+        self._cores: int | None = None  # the permuter machine's, once read
 
     # -- settings
     @property
@@ -44,7 +48,16 @@ class RemotePermuter:
 
     @property
     def jobs(self) -> int:
-        return max(1, min(int(self.settings.data.get("permuter_jobs") or 16), 256))
+        """Settings' number, or the permuter machine's cores less SPARE_CORES (read there once)."""
+        if self.settings.data.get("permuter_jobs"):
+            return max(1, min(int(self.settings.data["permuter_jobs"]), 256))
+        if self._cores is None:
+            try:
+                out = self._ssh("sysctl -n hw.ncpu 2>/dev/null || nproc", timeout=30).stdout.split()
+                self._cores = int(out[0]) if out else 0
+            except (OSError, subprocess.SubprocessError, ValueError):
+                self._cores = 0
+        return max(4, self._cores - SPARE_CORES) if self._cores else 16
 
     @property
     def permuter_dir(self) -> str:
@@ -118,7 +131,7 @@ class RemotePermuter:
         if local.exists():
             import shutil
             shutil.rmtree(local)
-        res = self._cli("export", slug, str(local))
+        res = self._cli("export", slug, str(local), "--max-miss", str(MAX_MISS))
         n = sum(1 for p in local.glob("*/decomp.json")) if local.exists() else 0
         if n == 0:
             st["error"] = "no near misses to permute" if res.returncode == 0 else f"export failed: {res.stderr[-200:]}"

@@ -200,7 +200,7 @@ class Settings:
                 "autopilot": self.data.get("autopilot", True), "budget_usd": self.data.get("budget_usd") or 0,
                 "auto_update": bool(self.data.get("auto_update")), "check_updates": self.data.get("check_updates", True) is not False,
                 "memory_url": self.data.get("memory_url") or "", "memory_ab": self.data.get("memory_ab", True) is not False,
-                "permuter_host": self.data.get("permuter_host") or "", "permuter_jobs": self.data.get("permuter_jobs") or 16,
+                "permuter_host": self.data.get("permuter_host") or "", "permuter_jobs": self.data.get("permuter_jobs") or "",
                 "launcher": _launcher(self.data.get("launcher") or {}), "recent_models": self.data.get("recent_models") or {}}
 
 
@@ -1017,7 +1017,10 @@ def build(net: RomNetwork, home: Path, port: int, secret: str):
         if "permuter_host" in data:
             settings.data["permuter_host"] = str(data["permuter_host"] or "").strip()
         if "permuter_jobs" in data:
-            settings.data["permuter_jobs"] = max(1, min(int(data["permuter_jobs"] or 16), 256))
+            if data["permuter_jobs"]:
+                settings.data["permuter_jobs"] = max(1, min(int(data["permuter_jobs"]), 256))
+            else:  # empty: the permuter machine's cores but a few (remote_permuter.SPARE_CORES)
+                settings.data.pop("permuter_jobs", None)
         settings.save()
         return JSONResponse(settings.public())
 
