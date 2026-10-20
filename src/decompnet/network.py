@@ -33,7 +33,8 @@ RELEASE_COOLDOWN = 15 * 60
 # while half the game was open)
 OWN_RELEASE_WINDOW = 6 * 3600
 ALTERNATES_FROM = 90  # a miss this close (percent) is tried with the project's other compiler setups
-ALTERNATES_SMALL, ALTERNATES_SMALL_FROM = 40, 50  # functions of up to 40 instructions: from 50%
+ALTERNATES_SMALL, ALTERNATES_SMALL_FROM = 80, 50  # functions of up to 80 instructions: from 50% (41-66-instruction
+# functions GCC 2.6.0 matches scored 83-90% with 2.7.2)
 # the other compiler versions of a platform, tried on a near miss: a game is sometimes built with two of them
 # (":gnu-as": without maspsx, for code that wasn't built with Sony's assembler, like some library code)
 # ("@2.34": an older version of Sony's assembler; on SLUS-01252 62 stuck best attempts matched that way)
