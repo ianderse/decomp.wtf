@@ -46,6 +46,15 @@ CREATE TABLE IF NOT EXISTS symbols(
 CREATE INDEX IF NOT EXISTS idx_symbols_addr ON symbols(project_id, address);
 CREATE TABLE IF NOT EXISTS memory_ab(
   function_id INTEGER NOT NULL, agent_id INTEGER NOT NULL, project_id INTEGER, arm TEXT NOT NULL, claimed_at REAL);
+-- every change to a project's symbols bumps its stamp: processes that cache the symbol table (the app, its workers)
+-- see a rename another one made (a worker kept judging with the names it started with)
+CREATE TABLE IF NOT EXISTS symbols_stamp(project_id INTEGER PRIMARY KEY, v INTEGER NOT NULL DEFAULT 0);
+CREATE TRIGGER IF NOT EXISTS symbols_stamp_ins AFTER INSERT ON symbols BEGIN
+  INSERT INTO symbols_stamp(project_id, v) VALUES(NEW.project_id, 1) ON CONFLICT(project_id) DO UPDATE SET v=v+1; END;
+CREATE TRIGGER IF NOT EXISTS symbols_stamp_upd AFTER UPDATE ON symbols BEGIN
+  INSERT INTO symbols_stamp(project_id, v) VALUES(NEW.project_id, 1) ON CONFLICT(project_id) DO UPDATE SET v=v+1; END;
+CREATE TRIGGER IF NOT EXISTS symbols_stamp_del AFTER DELETE ON symbols BEGIN
+  INSERT INTO symbols_stamp(project_id, v) VALUES(OLD.project_id, 1) ON CONFLICT(project_id) DO UPDATE SET v=v+1; END;
 CREATE TABLE IF NOT EXISTS experiments(
   id INTEGER PRIMARY KEY, project_id INTEGER NOT NULL, factor TEXT NOT NULL, arms TEXT NOT NULL, seed TEXT NOT NULL,
   started_at REAL, stopped_at REAL, note TEXT);

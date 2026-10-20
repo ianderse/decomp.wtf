@@ -149,6 +149,7 @@ class RomNetwork(Network):
         super().__init__(db_path, claim_ttl=claim_ttl)
         self.workspace = Path(workspace)
         self._syms: dict[int, SymbolTable] = {}
+        self._sym_stamps: dict[int, int] = {}  # project id -> the symbols_stamp its cached table was read at
         self._sym_override: dict[int, SymbolTable] = {}
         self._roms: dict[int, tuple[bytes, list[split.Segment]]] = {}
         self._xrefs: dict[int, dict] = {}
@@ -202,9 +203,13 @@ class RomNetwork(Network):
     def symbols(self, project_id: int) -> SymbolTable:
         if project_id in self._sym_override:
             return self._sym_override[project_id]
-        if project_id not in self._syms:
+        # reloaded when another process (the app, a worker) changed them: symbols_stamp, bumped by triggers
+        row = self.store.one("SELECT v FROM symbols_stamp WHERE project_id=?", project_id)
+        stamp = row["v"] if row else 0
+        if project_id not in self._syms or self._sym_stamps.get(project_id) != stamp:
             rows = self.store.all("SELECT name, address, size, kind FROM symbols WHERE project_id=?", project_id)
             self._syms[project_id] = SymbolTable([Symbol(r["name"], r["address"], r["size"], r["kind"]) for r in rows])
+            self._sym_stamps[project_id] = stamp
         return self._syms[project_id]
 
     def _rom(self, proj) -> tuple[bytes, list[split.Segment]]:
