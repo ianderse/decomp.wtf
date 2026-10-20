@@ -183,6 +183,7 @@ TIERED = "tiered"
 HAIKU, SONNET, OPUS = "haiku", "sonnet", "opus"  # Claude Code's aliases: Anthropic's latest of each kind
 # tier -> (model, effort), per agent; thresholds are fractions of the worst score (n_insns * 100: all wrong)
 TIERS = {
+    "big": (OPUS, "high"),             # BIG_INSNS instructions or more: the most code per match, the hardest
     "escalated": (OPUS, "high"),       # still far off after STALL_ATTEMPTS attempts: the structure isn't found yet
     "near_miss": (HAIKU, "medium"),       # within NEAR_MISS: operands and registers left, compile and adjust
     "mechanical": (HAIKU, "medium"),      # within MECHANICAL: the structure is there, keep adjusting
@@ -191,6 +192,7 @@ TIERS = {
 }
 # Codex: Sol (the workhorse) for normal work and, on high effort, the hardest; Luna (fast, cheap) for near misses
 CODEX_TIERS = {
+    "big": ("gpt-6.1-sol", "high"),
     "escalated": ("gpt-6.1-sol", "high"),
     "near_miss": ("gpt-6-luna", "medium"),
     "mechanical": ("gpt-6-luna", "medium"),
@@ -199,6 +201,8 @@ CODEX_TIERS = {
 }
 TIER_TABLES = {"claude": TIERS, "codex": CODEX_TIERS}
 NEAR_MISS = 0.10
+BIG_INSNS = 150  # this many instructions or more: the strongest tier from the first try (SLUS-01252's tier
+# experiment: 75% of functions matched on the strongest tier, 59% on the table's choice, 2026-10-20)
 MECHANICAL = 0.40
 STALL_ATTEMPTS = 10  # attempts (every agent's) after which a far-off function goes to Opus
 EFFORTS = ("low", "medium", "high", "xhigh", "max")  # what Claude Code's --effort takes
@@ -208,7 +212,9 @@ def tier_for(state: dict, kind: str = "claude") -> tuple[str, str, str]:
     """(model, effort, tier) for a function: best_score (None = nothing compiled yet), n_insns, attempts."""
     table = TIER_TABLES.get(kind, TIERS)
     best = state.get("best_score")
-    if best is None:
+    if int(state.get("n_insns") or 0) >= BIG_INSNS:
+        tier = "big"
+    elif best is None:
         tier = "fresh"
     else:
         frac = float(best) / (max(int(state.get("n_insns") or 0), 1) * 100)
@@ -234,7 +240,8 @@ def next_function(net, slug: str, agent_id: int = 0):
                                 "AND f.id NOT IN (SELECT function_id FROM claims)", proj["id"], name)
             if row is not None:
                 return row
-    strategy = getattr(net, "agent_strategy", {}).get(agent_id) or ("finish" if fork else "easiest")
+    strategy = (getattr(net, "agent_lane", {}).get(agent_id) or getattr(net, "agent_strategy", {}).get(agent_id)
+                or ("finish" if fork else "easiest"))
     return net.store.one(
         f"""SELECT f.* FROM functions f WHERE f.project_id=? AND f.status='open'
             AND f.id NOT IN (SELECT function_id FROM claims)
@@ -845,6 +852,12 @@ class Manager:
             s.agent_id = agent.id
             if s.tiered and hasattr(self.net, "tiered_agents"):
                 self.net.tiered_agents.add(agent.id)  # its claims count in a tier experiment (the others' can't)
+                # every other session takes the biggest open function, on the strongest tier (tier_for: "big"):
+                # most of what's left is in a few big functions, and the strongest models match ~16 points more
+                if s.runs % 2 == 0:
+                    self.net.agent_lane[agent.id] = "biggest"
+                else:
+                    self.net.agent_lane.pop(agent.id, None)
             if s.tiered:  # the model for the function this session is about to claim
                 s.routed_model, s.routed_effort, s.tier, s.tier_function = self.tier(s)
                 s.push("info", f"session {s.runs}: {s.tier.replace('_', ' ')} -> {s.routed_model} ({s.routed_effort} effort)"

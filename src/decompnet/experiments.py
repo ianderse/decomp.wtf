@@ -94,10 +94,16 @@ def enroll(store, project_id: int, function_id: int, skip: tuple[str, ...] = ())
 
 
 def charge(store, agent_id: int, usd: float, tokens: int) -> None:
-    """What a session spent goes to the function its agent holds, in every running experiment it's in."""
+    """What a session spent goes to the function its agent holds (or claimed last: a CLI agent reports its cost
+    when its session ends), in every running experiment it's in."""
     if not (usd or tokens):
         return
     row = store.one("SELECT function_id FROM claims WHERE agent_id=?", agent_id)
+    if row is None:  # a session's cost comes when it ends, after its claim: the function it claimed last
+        last = store.one("SELECT e.detail, e.project_id FROM events e WHERE e.agent_id=? AND e.kind='claim' "
+                         "AND e.created_at > ? ORDER BY e.id DESC LIMIT 1", agent_id, time.time() - 7200)
+        row = last and store.one("SELECT id AS function_id FROM functions WHERE project_id=? AND name=?",
+                                 last["project_id"], last["detail"])
     if row is None:
         return
     with store.tx() as db:

@@ -6,7 +6,16 @@ Results so far:
 - **Whole-game compiler survey (step 1), on the M5:** 1,152 open functions' best attempts, each with every PS1
   compiler setup: **none matched**. What's left on SLUS-01252 is source-level (registers, statement order, types),
   not the compiler or assembler; no alternates experiment needed.
-- **Tier experiment (step 2):** started 2026-10-19 18:15, to 300 functions per arm.
+- **Tier experiment (step 2):** 2026-10-19 18:15 to 2026-10-20 08:20, stopped early at about 150 functions per arm
+  (the routing changed because of it). Matched before the stop: **auto 58.9%** [51, 66] (151), **strong 75.2%**
+  [68, 81] (165), **cheap 61.6%** [54, 69] (146). Strong vs auto: **+16.2 points [6, 26]**, clear; cheap vs auto:
+  +2.7 [-9, 13], too noisy. (Stopped early, so the strong arm's lead is somewhat overstated; it's large enough to
+  act on.) Cost per match wasn't measured: Claude Code reports its cost when a session ends, after its claim, and
+  the charge went nowhere (fixed: it goes to the function the agent claimed last).
+  **Acted on:** functions of 150+ instructions go to the strongest tier from the first try, and every other tiered
+  session takes the biggest open function (agents.py BIG_INSNS, the "biggest" claim order).
+  **Next:** with cost recorded, a tier experiment on the smaller functions (auto vs strong) to see whether the
+  strong tier pays for itself there too.
 
 ## What's built
 

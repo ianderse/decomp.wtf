@@ -71,6 +71,9 @@ STRATEGIES = {
     "strong": _TWINS + "(COALESCE(json_extract(f.meta, '$.alike_sim'), 0) >= 0.6 AND f.n_insns <= 120) ASC, "
                        "f.abandons > 0, f.n_insns ASC",
     "random": "RANDOM()",
+    # the biggest first (the most code each match), those given up on again and again after: for the strongest
+    # models' turns (agents.Manager: every other tiered session)
+    "biggest": "f.abandons > 2, f.n_insns DESC",
 }
 
 
@@ -182,6 +185,7 @@ class Network:
         self.store = Store(db_path)
         self.agent_strategy: dict[int, str] = {}  # agent id -> its default claim order (helpers, see agents.Manager)
         self.tiered_agents: set[int] = set()  # agents in tiered helper sessions (the tier experiment counts only theirs)
+        self.agent_lane: dict[int, str] = {}  # agent id -> this session's claim order, before agent_strategy (agents.py)
         self.memory = None  # long-term memory across games (memory.Memory: a Hindsight server), when set up
         self.claim_ttl = claim_ttl
         self._pool = ThreadPoolExecutor(max_workers=8)
