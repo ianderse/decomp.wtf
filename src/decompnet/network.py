@@ -71,9 +71,11 @@ STRATEGIES = {
     "strong": _TWINS + "(COALESCE(json_extract(f.meta, '$.alike_sim'), 0) >= 0.6 AND f.n_insns <= 120) ASC, "
                        "f.abandons > 0, f.n_insns ASC",
     "random": "RANDOM()",
-    # the biggest first (the most code each match), those given up on again and again after: for the strongest
-    # models' turns (agents.Manager: every other tiered session)
-    "biggest": "f.abandons > 2, f.n_insns DESC",
+    # big functions (BIG_INSNS+), the ones closest to matching first, then the untried, then the far-off; those given up
+    # on again and again last: the strongest models' turns (agents.Manager: every other tiered session). (Biggest
+    # first gave Opus the 600-instruction ones nobody had got near, session after session, and it matched none.)
+    "biggest": "f.n_insns < 150, f.abandons > 2, COALESCE(CAST(f.best_score AS REAL) / (f.n_insns * 100), 0.5) ASC, "
+               "f.n_insns DESC",
 }
 
 
