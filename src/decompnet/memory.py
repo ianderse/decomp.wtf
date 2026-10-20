@@ -26,10 +26,10 @@ log = logging.getLogger("decomp.wtf")
 
 
 class Memory:
-    def __init__(self, url: str, share: float = 0.5, timeout: float = 4.0):
+    def __init__(self, url: str, share: float = 0.5, timeout: float = 12.0):
         self.url = url.rstrip("/")
         self.share = share  # the part of claims whose brief gets memory (the rest: the comparison, see memory_ab)
-        self.timeout = timeout
+        self.timeout = timeout  # (a recall took 4.1 s once the bank had a few thousand matches: 4 s timed out half the claims)
         self._pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="memory")
         self._lock = threading.Lock()
         self._cache: dict[tuple[str, str], tuple[float, list[str]]] = {}
