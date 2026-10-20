@@ -74,8 +74,10 @@ STRATEGIES = {
     # big functions (BIG_INSNS+), the ones closest to matching first, then the untried, then the far-off; those given up
     # on again and again last: the strongest models' turns (agents.Manager: every other tiered session). (Biggest
     # first gave Opus the 600-instruction ones nobody had got near, session after session, and it matched none.)
-    "biggest": "f.n_insns < 150, f.abandons > 2, COALESCE(CAST(f.best_score AS REAL) / (f.n_insns * 100), 0.5) ASC, "
-               "f.n_insns DESC",
+    # Those with a matched look-alike (functions.meta alike_sim) before the rest: its C is a template (scheduling
+    # functions with matched siblings first is what moved Snowboard Kids 2's LLM-assisted decomp fastest).
+    "biggest": "f.n_insns < 150, f.abandons > 2, COALESCE(json_extract(f.meta, '$.alike_sim'), 0) < 0.7, "
+               "COALESCE(CAST(f.best_score AS REAL) / (f.n_insns * 100), 0.5) ASC, f.n_insns DESC",
 }
 
 
