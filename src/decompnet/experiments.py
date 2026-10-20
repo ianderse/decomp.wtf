@@ -79,9 +79,10 @@ def stop(store, project_id: int, experiment_id: int) -> None:
                    (time.time(), experiment_id, project_id))
 
 
-def enroll(store, project_id: int, function_id: int) -> None:
-    """An agent claimed the function: it's in every running experiment from now on, in its arm."""
-    exps = active(store, project_id)
+def enroll(store, project_id: int, function_id: int, skip: tuple[str, ...] = ()) -> None:
+    """An agent claimed the function: it's in every running experiment from now on, in its arm; except those on a
+    factor in `skip` (one this agent isn't subject to, like the tier model for a helper that isn't tiered)."""
+    exps = [e for e in active(store, project_id) if e["factor"] not in skip]
     if not exps:
         return
     now = time.time()

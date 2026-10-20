@@ -174,6 +174,7 @@ class Network:
     def __init__(self, db_path: str | Path, claim_ttl: int = CLAIM_TTL):
         self.store = Store(db_path)
         self.agent_strategy: dict[int, str] = {}  # agent id -> its default claim order (helpers, see agents.Manager)
+        self.tiered_agents: set[int] = set()  # agents in tiered helper sessions (the tier experiment counts only theirs)
         self.memory = None  # long-term memory across games (memory.Memory: a Hindsight server), when set up
         self.claim_ttl = claim_ttl
         self._pool = ThreadPoolExecutor(max_workers=8)
@@ -623,8 +624,9 @@ class Network:
             f"SELECT n.text, a.name, {wins} FROM notes n LEFT JOIN agents a ON a.id=n.agent_id "
             "WHERE n.project_id=? AND n.function_id IS NULL ORDER BY n.id DESC LIMIT 5", proj["id"])
         if header == "CLAIMED" and agent is not None and fn["status"] != "matched":
-            if agent.name not in MACHINE_AGENTS:
-                experiments.enroll(self.store, proj["id"], fn["id"])
+            if agent.name not in MACHINE_AGENTS:  # (a tier experiment counts only tiered sessions: the model is theirs)
+                experiments.enroll(self.store, proj["id"], fn["id"],
+                                   skip=() if agent.id in self.tiered_agents else ("tier",))
             lines += self._memory_lines(proj, fn, agent)
         if pnotes and project_notes:
             lines += ["", "### Project-wide notes (latest)"] + [f"- ({who(n)}) {n['text']}" for n in pnotes]

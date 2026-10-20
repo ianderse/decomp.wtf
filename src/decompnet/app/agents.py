@@ -840,6 +840,8 @@ class Manager:
             t0 = time.time()
             before = self._progress(agent.id)
             s.agent_id = agent.id
+            if s.tiered and hasattr(self.net, "tiered_agents"):
+                self.net.tiered_agents.add(agent.id)  # its claims count in a tier experiment (the others' can't)
             if s.tiered:  # the model for the function this session is about to claim
                 s.routed_model, s.routed_effort, s.tier, s.tier_function = self.tier(s)
                 s.push("info", f"session {s.runs}: {s.tier.replace('_', ' ')} -> {s.routed_model} ({s.routed_effort} effort)"
