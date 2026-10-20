@@ -346,15 +346,21 @@ class RomNetwork(Network):
 
         from elftools.elf.elffile import ELFFile
 
-        from ..elfobj import _function_symbols
-
         syms = self.symbols(proj["id"])
+        found = set()
         try:
-            defined = _function_symbols(ELFFile(BytesIO(obj)))
+            elf = ELFFile(BytesIO(obj))
+            for sym in elf.get_section_by_name(".symtab").iter_symbols():
+                shndx, kind, bind = sym["st_shndx"], sym["st_info"]["type"], sym["st_info"]["bind"]
+                if not isinstance(shndx, int) or not elf.get_section(shndx)["sh_flags"] & 0x4:  # SHF_EXECINSTR
+                    continue
+                # a function: typed as one, or a global label in code. Not the untyped local labels compilers leave
+                # in code (GCC 2.6.0's line markers LM1, LM2..., gcc2_compiled.): those aren't code of their own
+                if kind == "STT_FUNC" or (bind == "STB_GLOBAL" and kind == "STT_NOTYPE"):
+                    found.add(sym.name)
         except Exception:
             return []
-        return sorted(n for n, (_, _, size) in defined.items()
-                      if n != name and size and not _AUTO_TOKEN.fullmatch(n)
+        return sorted(n for n in found if n and n != name and not _AUTO_TOKEN.fullmatch(n)
                       and getattr(syms.by_name.get(n), "kind", None) != "func")
 
     def _twin_lines(self, proj, fn) -> list[str]:
