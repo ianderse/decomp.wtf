@@ -90,7 +90,9 @@ FINGERPRINTS = {
     # libraries, built with the older tools, are full of it)
     "ori for li": re.compile(r"\bori\s+\$\w+,\s*\$zero,", re.IGNORECASE),
 }
-HINT_NEIGHBOURS, HINT_AGREE = 8, 3  # refresh_toolchain_hints: matched functions to look at, and to agree
+HINT_NEIGHBOURS, HINT_AGREE = 8, 3
+# a set-aside function that is Sony's code: a PSY-Q library function (identify_psyq) or a BIOS call stub
+SONY = "(status='asm' AND (meta LIKE '%\"library\"%' OR meta LIKE '%BIOS call stub%'))"  # refresh_toolchain_hints: matched functions to look at, and to agree
 PLATFORM_COMPILERS = {"n64": ["gcc-2.7.2-kmc", "ido-7.1", "ido-5.3"], "psx": ["gcc-2.7.2-psx", "gcc-2.8.1-psx"],
                       "ps2": ["ee-gcc-2.96"], "gba": ["agbcc"]}
 _AUTO_TOKEN = re.compile(r"\b(?:func|D|B|jtbl|RO|STR|FLT|DBL)_[0-9A-F]{8}\b")
@@ -1702,7 +1704,10 @@ class RomNetwork(Network):
         cfg = self.cfg(proj)
         agg = self.store.one(
             "SELECT COUNT(*) AS total, SUM(status='matched') AS matched, SUM(size) AS bytes, "
-            "SUM(CASE WHEN status='matched' THEN size ELSE 0 END) AS matched_bytes, SUM(attempts) AS attempts "
+            "SUM(CASE WHEN status='matched' THEN size ELSE 0 END) AS matched_bytes, SUM(attempts) AS attempts, "
+            # Sony's code in the game (its libraries, BIOS call stubs), set aside: counted apart from the game's own,
+            # like mature decomps report the SDK on its own
+            f"SUM({SONY}) AS sony_functions, SUM(CASE WHEN {SONY} THEN size ELSE 0 END) AS sony_bytes "
             "FROM functions WHERE project_id=?", proj["id"])
         tc = toolchains.get(cfg["compiler"]["toolchain"])
         return {
@@ -1716,6 +1721,7 @@ class RomNetwork(Network):
                          "why": None if tc.supported else toolchains.unsupported_cpu()},
             "functions": agg["total"] or 0, "matched": agg["matched"] or 0, "bytes": agg["bytes"] or 0,
             "matched_bytes": agg["matched_bytes"] or 0, "attempts": agg["attempts"] or 0,
+            "sony_functions": agg["sony_functions"] or 0, "sony_bytes": agg["sony_bytes"] or 0,
             "context_version": self._context(proj["id"])["version"],
             "folder": proj["root"],
             "export": cfg.get("export"),

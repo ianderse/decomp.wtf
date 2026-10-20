@@ -6,6 +6,8 @@ const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
 const hex8 = (n) => "0x" + (n >>> 0).toString(16).toUpperCase().padStart(8, "0");
 const clock = (t) => new Date(t * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false });
+// progress: of the game's own code (Sony's libraries and BIOS stubs, set aside, counted apart: ov.sony_bytes)
+const gamePct = (o) => { const b = (o.bytes || 0) - (o.sony_bytes || 0); return b > 0 ? (100 * o.matched_bytes) / b : 0; };
 const pctOf = (best, insns) => (best == null ? null : Math.max(0, 1 - best / Math.max(1, insns * 100)));
 /* A match percentage that never reads 100% before the function really matches (99.6% stays 99.6%). */
 const pctText = (p) => (p >= 0.99 ? `${(Math.floor(p * 1000) / 10).toFixed(1)}%` : `${Math.floor(p * 100)}%`);
@@ -146,7 +148,7 @@ function renderNav() {
   const box = $("navProjects");
   if (!S.projects.length) { box.innerHTML = `<p class="nav-empty">None yet: drop in a game.</p>`; return; }
   box.innerHTML = S.projects.map((p) => {
-    const pct = p.bytes ? (100 * p.matched_bytes) / p.bytes : 0;
+    const pct = gamePct(p);
     const short = PLAT_SHORT[p.platform] || (p.platform_name || "").replace("Nintendo ", "") || "?";
     const state = p.working ? `<span class="dot on" title="${p.working} agent${p.working === 1 ? "" : "s"} working"></span>`
       : p.autopilot === "running" ? `<span class="dot work" title="autopilot running"></span>` : "";
@@ -180,7 +182,7 @@ async function showHome() {
   box.innerHTML = "";
   $("recent").hidden = !st.projects.length;
   for (const p of st.projects) {
-    const pct = p.bytes ? (100 * p.matched_bytes) / p.bytes : 0;
+    const pct = gamePct(p);
     const a = document.createElement("a");
     a.className = "card";
     a.href = `#/p/${p.slug}`;
@@ -685,7 +687,7 @@ function renderHeader(ov) {
   if (comp) chips.push(`<span class="chip-s" title="${esc(fork ? "" : ov.compiler.flags.join(" "))}">${esc(comp)}</span>`);
   $("phChips").innerHTML = chips.join("");
   $("phTitle").textContent = ov.title;
-  const pct = ov.bytes ? (100 * ov.matched_bytes) / ov.bytes : 0;
+  const pct = gamePct(ov);
   $("phPct").textContent = pctNum(pct);
   $("phBar").style.width = pct + "%";
   $("phSub").textContent = fork && !ov.ready ? "set up the project to start"
@@ -752,9 +754,12 @@ function linkedText(ov) {
 
 function renderStats(ov) {
   renderHeader(ov);
-  const pct = ov.bytes ? (100 * ov.matched_bytes) / ov.bytes : 0;
+  const pct = gamePct(ov);
   $("pct").textContent = pctNum(pct);
-  $("pctSub").textContent = (ov.bytes ? `${bytes(ov.matched_bytes)} of ${bytes(ov.bytes)}` : "") + linkedText(ov) + (S.today ? ` · ${S.today} matched today` : "");
+  const own = (ov.bytes || 0) - (ov.sony_bytes || 0);
+  $("pctSub").textContent = (ov.bytes ? `${bytes(ov.matched_bytes)} of ${bytes(own)} of the game's own code` : "")
+    + (ov.sony_functions ? ` · Sony's libraries: ${ov.sony_functions.toLocaleString()} functions (${bytes(ov.sony_bytes)}) identified, counted apart · all code ${pctNum(ov.bytes ? (100 * ov.matched_bytes) / ov.bytes : 0)}%` : "")
+    + linkedText(ov) + (S.today ? ` · ${S.today} matched today` : "");
   $("fnCount").textContent = `${ov.matched.toLocaleString()} / ${ov.functions.toLocaleString()}`;
   renderAutopilot(ov);
   renderCompilersUsed(ov);

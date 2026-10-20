@@ -145,10 +145,10 @@ def _project_info(net: RomNetwork, slug: str) -> str:
     if net.fork_slug(slug):
         return net.forks.info(slug)
     ov = net.overview(slug)
-    pct = 100 * ov["matched_bytes"] / (ov["bytes"] or 1)
+    pct = 100 * ov["matched_bytes"] / ((ov["bytes"] - ov.get("sony_bytes", 0)) or 1)  # of the game's own code
     return (f"{ov['title']} ({ov['rom']['game_code']}, {ov['rom']['region']})\n"
             f"compiler: {ov['compiler']['name']} {' '.join(ov['compiler']['flags'])}\n"
-            f"progress: {ov['matched']}/{ov['functions']} functions matched ({pct:.1f}% of code), "
+            f"progress: {ov['matched']}/{ov['functions']} functions matched ({pct:.1f}% of the game's own code, Sony's libraries apart), "
             f"{ov['attempts']} compiles so far, context.h v{ov['context_version']}\n"
             f"Next: claim_function(). Guides: guide().")
 

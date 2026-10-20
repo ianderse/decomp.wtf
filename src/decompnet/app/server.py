@@ -449,7 +449,7 @@ def build(net: RomNetwork, home: Path, port: int, secret: str):
         out = []
         for slug, ov, why in overviews():
             out.append({k: ov.get(k) for k in ("slug", "title", "kind", "origin", "platform", "platform_name", "ready",
-                                                "functions", "matched", "bytes", "matched_bytes", "last_activity")}
+                                                "functions", "matched", "bytes", "matched_bytes", "sony_bytes", "last_activity")}
                        | {"working": running.get(slug, 0), "room": (ov.get("room") or {}).get("role"),
                           "autopilot": (ov.get("autopilot") or {}).get("state")} | ({"broken": why} if why else {}))
         return out

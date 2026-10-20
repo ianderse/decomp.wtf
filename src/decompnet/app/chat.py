@@ -63,7 +63,7 @@ def register(mcp, net, manager, jobs, settings, port: int, secret: str) -> None:
                         f"{name!r} matches several projects: {', '.join(hits)}")
 
     def line(ov: dict) -> str:
-        pct = 100 * ov["matched_bytes"] / (ov["bytes"] or 1)
+        pct = 100 * ov["matched_bytes"] / ((ov["bytes"] - ov.get("sony_bytes", 0)) or 1)  # of the game's own code
         kind = "public decomp" if ov.get("kind") == "fork" and ov.get("origin") != "scratch" else "from scratch"
         return (f"- {ov['slug']}: {ov['title']} ({ov.get('platform_name') or ov.get('platform') or '?'}, {kind}) "
                 f"{ov['matched']}/{ov['functions']} functions, {pct:.1f}% of code")
