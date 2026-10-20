@@ -27,7 +27,7 @@ keep it on your own machines.
 ## On the M5 Ultra: once
 
 ```sh
-cd ~/decomp.wtf && git pull
+cd ~/Projects/decomp.wtf && git pull
 uv run python -c "from decompnet import toolchains; [toolchains.ensure(t) for t in ('gcc-2.6.0-psx', 'gcc-2.6.3-psx', 'gcc-2.7.2-psx', 'gcc-2.8.0-psx', 'gcc-2.8.1-psx', 'maspsx', 'binutils-mips')]"
 git clone --depth 1 https://github.com/simonlindholm/decomp-permuter ~/decomp-permuter
 cd ~/decomp-permuter && uv venv && uv pip install toml pycparser Levenshtein

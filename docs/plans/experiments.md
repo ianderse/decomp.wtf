@@ -66,7 +66,7 @@ rsync -a ~/survey-slus/.decomp/ ians-mac-studio:survey-slus/.decomp/
 On the M5:
 
 ```sh
-cd ~/decomp.wtf && git pull
+cd ~/Projects/decomp.wtf && git pull
 sqlite3 ~/survey-slus/.decomp/decomp.db "UPDATE projects SET root='$HOME/survey-slus/slus-01252' WHERE slug='slus-01252'"
 DECOMP_HOME=~/survey-slus uv run decomp survey slus-01252 --all --dry-run --workers 24 --json ~/survey-slus/survey.json
 ```
