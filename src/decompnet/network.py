@@ -32,6 +32,8 @@ RELEASE_COOLDOWN = 15 * 60
 # tried (agents keep their names across sessions: without a limit, a long-running one ran out of functions to claim
 # while half the game was open)
 OWN_RELEASE_WINDOW = 6 * 3600
+ALTERNATES_FROM = 90  # a miss this close (percent) is tried with the project's other compiler setups
+ALTERNATES_SMALL, ALTERNATES_SMALL_FROM = 40, 50  # functions of up to 40 instructions: from 50%
 # the other compiler versions of a platform, tried on a near miss: a game is sometimes built with two of them
 # (":gnu-as": without maspsx, for code that wasn't built with Sony's assembler, like some library code)
 # ("@2.34": an older version of Sony's assembler; on SLUS-01252 62 stuck best attempts matched that way)
@@ -329,10 +331,27 @@ class Network:
         return CompileResult(False, None, f"{why}\n(the PS1 compiler's macOS build crashed printing this; the same "
                                           "GCC version built for Intel says it)")
 
-    def _alternates_on(self, proj, fn) -> bool:
-        """Whether a near miss gets tried with the other compiler setups (not, in an alternates experiment's "off"
-        arm). Keeping existing matches (re-judging) always tries them."""
+    def _alternates_on(self, proj, fn, d) -> bool:
+        """Whether a miss gets tried with the other compiler setups: a near miss (ALTERNATES_FROM), or a small
+        function from ALTERNATES_SMALL_FROM, where one scheduling difference costs many points (a 9-instruction
+        call-and-return 0 that GCC 2.6.3 matches scores 76% with 2.7.2); not in an alternates experiment's "off" arm.
+        Keeping existing matches (re-judging) always tries them."""
+        small = (fn["n_insns"] or 0) <= ALTERNATES_SMALL
+        if d.percent < (ALTERNATES_SMALL_FROM if small else ALTERNATES_FROM):
+            return False
         return experiments.arm(self.store, proj["id"], fn["id"], "alternates") != "off"
+
+    def _alike_toolchain(self, fn) -> str | None:
+        """The compiler setup of the function's matched look-alike (functions.meta alike), if it isn't the project's."""
+        try:
+            name = json.loads(fn["meta"] or "{}").get("alike")
+        except (KeyError, IndexError, TypeError, ValueError):
+            return None
+        if not name:
+            return None
+        row = self.store.one("SELECT meta FROM functions WHERE project_id=? AND name=? AND status='matched'",
+                             fn["project_id"], name)
+        return self.fn_toolchain(row) if row is not None else None
 
     def _alternate_match(self, fn, proj, header: str, source: str) -> str | None:
         """A near miss that is byte-identical with another compiler version of the platform: that compiler, now
@@ -340,7 +359,9 @@ class Network:
         comp = json.loads(proj["config"]).get("compiler", {})
         main = comp.get("toolchain")
         current = self.fn_toolchain(fn) or main
-        options = [main, *comp.get("alternates", ALTERNATES.get(main, ()))]
+        # the compiler its closest matched look-alike was built with first: same shape, likely the same compiler
+        alike = self._alike_toolchain(fn)
+        options = [*([alike] if alike else []), main, *comp.get("alternates", ALTERNATES.get(main, ()))]
         for tc in dict.fromkeys(t for t in options if t and t != current):
             if toolchains.installed(toolchain_id(tc)) is None:
                 continue
@@ -698,7 +719,7 @@ class Network:
         d = scoring.diff(self._target_obj(fn, proj), cand)
         if verdict is not None:
             d = scoring.DiffResult(0 if verdict else max(1, d.score), d.max_score, d.rows, verdict)
-        if not d.bytes_match and not scratch and d.percent >= 90 and self._alternates_on(proj, fn) and \
+        if not d.bytes_match and not scratch and self._alternates_on(proj, fn, d) and \
                 self._alternate_match(fn, proj, ctx["header"], source):
             d = scoring.DiffResult(0, d.max_score, d.rows, True)
         matched_now = d.bytes_match and not scratch

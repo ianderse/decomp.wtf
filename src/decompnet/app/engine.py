@@ -2069,7 +2069,7 @@ class RomNetwork(Network):
             d = scoring.diff(self._target_obj(fn, proj), cand)
             if verdict is not None:
                 d = scoring.DiffResult(0 if verdict else max(1, d.score), d.max_score, d.rows, verdict)
-            if not d.bytes_match and d.percent >= 90 and self._alternates_on(proj, fn) and \
+            if not d.bytes_match and self._alternates_on(proj, fn, d) and \
                     self._alternate_match(fn, proj, ctx["header"], source):
                 d = scoring.DiffResult(0, d.max_score, d.rows, True)
             self._record(fn, agent, d.score, source, ctx["version"], matched=d.bytes_match)
@@ -2105,7 +2105,7 @@ class RomNetwork(Network):
             d = scoring.diff(self._target_obj(fn, proj), cand)
             if verdict is not None:
                 d = scoring.DiffResult(0 if verdict else max(1, d.score), d.max_score, d.rows, verdict)
-            if not d.bytes_match and d.percent >= 90 and self._alternates_on(proj, fn) and \
+            if not d.bytes_match and self._alternates_on(proj, fn, d) and \
                     self._alternate_match(fn, proj, ctx["header"], source):
                 d = scoring.DiffResult(0, d.max_score, d.rows, True)
             self._record(fn, agent, d.score, source, ctx["version"], matched=d.bytes_match)
