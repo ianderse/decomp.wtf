@@ -656,6 +656,19 @@ def build(net: RomNetwork, home: Path, port: int, secret: str):
             raise ValueError("write the note first")
         return {"message": net.add_note(agent, slug, text[:2000], str(data.get("function", "")) or None)}
 
+    def p_experiments(slug, request, data):
+        """Controlled experiments on how agents match (experiments.py): the report, or start / stop one."""
+        from .. import experiments
+        proj = net.project_row(slug)
+        if request.method == "POST":
+            if data.get("action") == "stop":
+                experiments.stop(net.store, proj["id"], int(data.get("id") or 0))
+            else:
+                experiments.start(net.store, proj["id"], str(data.get("factor", "")), data.get("arms") or None,
+                                  note=str(data.get("note", "")))
+        return {"experiments": experiments.report(net.store, proj["id"]),
+                "factors": {k: list(v) for k, v in experiments.FACTORS.items()}}
+
     def p_reopen(slug, request, data):
         """You give a set-aside function back to agents."""
         net.return_to_agents(slug, str(data.get("name", "")))
@@ -679,6 +692,7 @@ def build(net: RomNetwork, home: Path, port: int, secret: str):
         "/api/try": (p_try, ["POST"]), "/api/release": (p_release, ["POST"]),
         "/api/autopilot": (p_autopilot, ["POST"]), "/api/instructions": (p_instructions, ["POST"]),
         "/api/reopen": (p_reopen, ["POST"]),
+        "/api/experiments": (p_experiments, ["GET", "POST"]),
         "/api/priority": (p_priority, ["POST"]), "/api/note": (p_note, ["POST"]),
         "/api/stats": (lambda s, r, d: net.stats(s) | {"permuter_remote": remote_permuter.status.get(s)}, ["GET"]),
     }

@@ -26,6 +26,7 @@ from pathlib import Path
 
 import httpx
 
+from .. import experiments
 from . import tools
 from .engine import RomNetwork
 
@@ -784,6 +785,8 @@ class Manager:
         s.usd += usd
         s.tokens += tokens
         self.net.add_spend(s.slug, usd, tokens)
+        if s.agent_id:
+            experiments.charge(self.net.store, s.agent_id, usd, tokens)  # to the function it holds, if one
 
     def over_budget(self, slug: str) -> float | None:
         """The budget (USD) when the project's agents have spent it, else None."""
@@ -907,6 +910,12 @@ class Manager:
         if fn is not None:
             state, name = {"best_score": fn["best_score"], "n_insns": fn["n_insns"], "attempts": fn["attempts"]}, fn["name"]
         model, effort, tier = tier_for(state, s.kind)
+        if fn is not None:  # a tier experiment: the strongest tier's model, or the cheapest's, instead
+            forced = {"strong": "escalated", "cheap": "near_miss"}.get(
+                experiments.arm(self.net.store, fn["project_id"], fn["id"], "tier"))
+            if forced:
+                model, effort = TIER_TABLES.get(s.kind, TIERS)[forced]
+                tier = f"{forced} (experiment)"
         return model, effort, tier, name
 
     def prompt(self, s: Session) -> str:

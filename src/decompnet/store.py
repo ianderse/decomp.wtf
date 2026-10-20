@@ -46,6 +46,13 @@ CREATE TABLE IF NOT EXISTS symbols(
 CREATE INDEX IF NOT EXISTS idx_symbols_addr ON symbols(project_id, address);
 CREATE TABLE IF NOT EXISTS memory_ab(
   function_id INTEGER NOT NULL, agent_id INTEGER NOT NULL, project_id INTEGER, arm TEXT NOT NULL, claimed_at REAL);
+CREATE TABLE IF NOT EXISTS experiments(
+  id INTEGER PRIMARY KEY, project_id INTEGER NOT NULL, factor TEXT NOT NULL, arms TEXT NOT NULL, seed TEXT NOT NULL,
+  started_at REAL, stopped_at REAL, note TEXT);
+CREATE TABLE IF NOT EXISTS experiment_units(
+  experiment_id INTEGER NOT NULL, function_id INTEGER NOT NULL, arm TEXT NOT NULL, first_claim REAL,
+  claims INTEGER NOT NULL DEFAULT 0, usd REAL NOT NULL DEFAULT 0, tokens INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY(experiment_id, function_id));
 CREATE TABLE IF NOT EXISTS twin_misses(
   function_id INTEGER NOT NULL, source_hash TEXT NOT NULL, project_id INTEGER, at REAL, why TEXT,
   PRIMARY KEY(function_id, source_hash));

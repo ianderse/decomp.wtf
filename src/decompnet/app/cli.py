@@ -468,6 +468,12 @@ def main(argv: list[str] | None = None) -> int:
     pm.add_argument("folder", help="export: where to write the directories; import: the folder with the results")
     pm.add_argument("--max-miss", type=float, default=0.05, help="export: how far off at most (0.05: 5%%)")
     pm.add_argument("--limit", type=int, default=400, help="export: how many functions at most")
+    su = sub.add_parser("survey", help="PS1: which compiler setups match the open functions' best attempts")
+    su.add_argument("project", help="the project's name (its slug, e.g. slus-01252)")
+    su.add_argument("--all", action="store_true", help="every open function with a best attempt (default: the app's sample)")
+    su.add_argument("--dry-run", action="store_true", help="report only: don't change the project's alternates")
+    su.add_argument("--workers", type=int, default=max(2, (os.cpu_count() or 4) - 2), help="compiles at once")
+    su.add_argument("--json", help="write the summary (with each function's matching setups) to this file")
     m = sub.add_parser("mcp", help="serve decomp.wtf to the AI agent you talk to (stdio MCP; starts the app if needed)")
     m.add_argument("--name", default=os.environ.get("DECOMP_AGENT_NAME") or "chat",
                    help="how this agent shows up in the app (e.g. claude-code; or set DECOMP_AGENT_NAME)")
@@ -476,6 +482,26 @@ def main(argv: list[str] | None = None) -> int:
     if args.cmd == "mcp":
         from .bridge import main as bridge
         return bridge(args.name)
+    if args.cmd == "survey":
+        import json
+        import threading
+
+        from .engine import RomNetwork
+        net = RomNetwork(home_dir() / ".decomp" / "decomp.db", home_dir())
+        proj = net.project_row(args.project)
+        if net.cfg(proj).get("platform") != "psx" or "toolchain" not in net.cfg(proj).get("compiler", {}):
+            print("the survey is for PS1 projects (their compiler setups)")
+            return 1
+        state = {"stop": threading.Event()}
+        res = net.survey(proj, state, workers=args.workers, sample=10 ** 6 if args.all else None,
+                         record=not args.dry_run, force=True)
+        if res is None:
+            return 1
+        print(f"{res['sampled']} best attempts tried; matched with: "
+              + (", ".join(f"{v} {n}" for v, n in res["matches"].items()) or "nothing"))
+        if args.json:
+            Path(args.json).expanduser().write_text(json.dumps(res, indent=1), encoding="utf-8")
+        return 0
     if args.cmd == "permuter":
         from .engine import RomNetwork
         from .. import permuter_bridge

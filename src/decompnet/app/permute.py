@@ -18,7 +18,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 
-from .. import scoring
+from .. import experiments, scoring
 from ..network import NetworkError
 from ..permuter import mutate
 
@@ -79,7 +79,8 @@ class Permuter:
             "SELECT * FROM functions WHERE project_id=? AND status='open' AND best_source IS NOT NULL "
             "AND best_score > 0 AND best_score <= n_insns * 100 * ? AND n_insns <= 400 "
             "AND id NOT IN (SELECT function_id FROM claims) ORDER BY CAST(best_score AS REAL) / (n_insns * 100) LIMIT ?",
-            proj["id"], NEAR, limit * 4) if self._turns.get(r["id"], 0) < MAX_TURNS][:limit]
+            proj["id"], NEAR, limit * 4) if self._turns.get(r["id"], 0) < MAX_TURNS
+            and experiments.arm(self.net.store, proj["id"], r["id"], "permuter") != "off"][:limit]
 
     def _loop(self, slug: str, st: State) -> None:
         agent, _ = self.net.local_agent("permuter")

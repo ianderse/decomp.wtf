@@ -758,6 +758,7 @@ function renderStats(ov) {
   $("fnCount").textContent = `${ov.matched.toLocaleString()} / ${ov.functions.toLocaleString()}`;
   renderAutopilot(ov);
   renderCompilersUsed(ov);
+  renderExperiments(ov);
   renderSteering(ov);
   if (S.tab === "source") renderSource(ov);
   renderCompilerNotice(ov);
@@ -2312,6 +2313,52 @@ function renderCompilersUsed(ov) {
   box.innerHTML = `<p class="col-title">Compilers in this game</p>
     <table class="mini"><tr><th>Setup</th><th>Matched</th><th>Code</th></tr>${rows.map((r) => `<tr><td>${label(r.spec)}${r.main ? ' <span class="muted small">(the project\'s)</span>' : ""}</td><td>${r.matched.toLocaleString()} <span class="muted small">${Math.round((100 * r.matched) / total)}%</span></td><td>${(r.bytes / 1024).toFixed(1)} KB</td></tr>`).join("")}</table>
     ${sv ? `<p class="muted small">Last compiler survey ${clock(sv.at).slice(0, 5)}, ${new Date(sv.at * 1000).toLocaleDateString()}: ${sv.sampled} stuck functions tried with every setup; matched: ${found}.</p>` : ""}`;
+}
+
+/* Controlled experiments (experiments.py): one factor, arms fixed per function by a seed, match rate and cost per
+   match per arm with 95% intervals. Loaded on its own (the intervals are bootstrapped), at most once a minute. */
+const EXP = { slug: null, at: 0, data: null };
+const EXP_HELP = {
+  memory: "what long-term memory recalls goes into the brief, or doesn't",
+  tier: "tiered helpers use the model the tier table picks, always the strongest, or always the cheapest",
+  permuter: "the permuters work on the function's near misses, or leave it alone",
+  alternates: "near misses are tried with the game's other compiler setups, or aren't",
+};
+async function renderExperiments(ov, force = false) {
+  const box = $("experiments");
+  if (ov.kind === "fork") { box.hidden = true; return; }
+  if (force || EXP.slug !== S.slug || Date.now() - EXP.at > 60000) {
+    EXP.slug = S.slug; EXP.at = Date.now();
+    try { EXP.data = await api(`/api/experiments?slug=${S.slug}`); } catch (e) { EXP.data = null; }
+  }
+  const d = EXP.data;
+  if (!d) { box.hidden = true; return; }
+  box.hidden = false;
+  const pc = (x) => (x == null ? "–" : `${(100 * x).toFixed(1)}%`);
+  const ci = (c, f) => (c ? ` <span class="muted small">[${f(c[0])}, ${f(c[1])}]</span>` : "");
+  const usd = (x) => (x == null ? "–" : `$${x.toFixed(2)}`);
+  const pp = (x) => `${x >= 0 ? "+" : ""}${(100 * x).toFixed(1)}`;
+  const running = new Set(d.experiments.filter((e) => !e.stopped_at).map((e) => e.factor));
+  const free = Object.keys(d.factors).filter((f) => !running.has(f));
+  box.innerHTML = `<p class="col-title">Experiments</p>
+    <p class="muted small">One thing changed for part of the functions (which part: fixed per function by a seed), everything else as usual. A function counts once an agent claims it; it's a success if it matches before the experiment stops.</p>
+    ${d.experiments.map((e) => `<div class="exp">
+      <div class="row"><b>${esc(e.factor)}</b><span class="muted small">${esc(e.arms.join(" vs "))} · seed <code>${esc(e.seed)}</code> · ${e.stopped_at ? `stopped ${since(e.stopped_at)}` : `running since ${since(e.started_at)}`} · ${e.needed_per_arm.toLocaleString()} per arm needed to see a 5-point difference</span>${e.stopped_at ? "" : `<button class="ghost small-btn" data-exp-stop="${e.id}" type="button">Stop</button>`}</div>
+      <table class="mini"><tr><th>Arm</th><th>Functions</th><th>Matched</th><th>Rate [95%]</th><th>vs ${esc(e.arms[0])}, points [95%]</th><th>Cost per match [95%]</th></tr>
+      ${e.arms_report.map((r, i) => `<tr><td>${esc(r.arm)}</td><td>${r.n.toLocaleString()}</td><td>${r.matched.toLocaleString()}</td><td>${pc(r.rate)}${ci(r.rate_ci, pc)}</td>
+        <td>${i === 0 ? '<span class="muted small">baseline</span>' : r.diff == null ? "–" : `${pp(r.diff)}${ci(r.diff_ci, pp)}${r.too_noisy ? ' <span class="warn-text small">too noisy to act on</span>' : ' <b class="ok">clear</b>'}`}</td>
+        <td>${usd(r.usd_per_match)}${ci(r.usd_per_match_ci, usd)}</td></tr>`).join("")}</table></div>`).join("")}
+    ${free.length ? `<div class="row"><select id="expFactor">${free.map((f) => `<option value="${f}">${esc(f)}: ${esc(EXP_HELP[f] || "")}</option>`).join("")}</select><button class="ghost small-btn" id="expStart" type="button">Start an experiment</button></div>` : ""}`;
+  box.querySelectorAll("[data-exp-stop]").forEach((b) => {
+    b.onclick = async () => {
+      try { EXP.data = await api("/api/experiments", { method: "POST", body: { slug: S.slug, action: "stop", id: +b.dataset.expStop } }); renderExperiments(ov); }
+      catch (e) { toast(esc(e.message), "err"); }
+    };
+  });
+  if ($("expStart")) $("expStart").onclick = async () => {
+    try { EXP.data = await api("/api/experiments", { method: "POST", body: { slug: S.slug, factor: $("expFactor").value } }); renderExperiments(ov); toast("Experiment started: functions join it as agents claim them.", "match"); }
+    catch (e) { toast(esc(e.message), "err"); }
+  };
 }
 
 function renderAutopilot(ov) {

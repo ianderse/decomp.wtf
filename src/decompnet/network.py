@@ -18,7 +18,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import policy, scoring, toolchains
+from . import experiments, policy, scoring, toolchains
 from .compiler import CompileResult, compile_source
 from .elfobj import FunctionObj, Reloc, extract_function
 from .project import compiler_config, toolchain_id, with_toolchain
@@ -324,6 +324,11 @@ class Network:
         return CompileResult(False, None, f"{why}\n(the PS1 compiler's macOS build crashed printing this; the same "
                                           "GCC version built for Intel says it)")
 
+    def _alternates_on(self, proj, fn) -> bool:
+        """Whether a near miss gets tried with the other compiler setups (not, in an alternates experiment's "off"
+        arm). Keeping existing matches (re-judging) always tries them."""
+        return experiments.arm(self.store, proj["id"], fn["id"], "alternates") != "off"
+
     def _alternate_match(self, fn, proj, header: str, source: str) -> str | None:
         """A near miss that is byte-identical with another compiler version of the platform: that compiler, now
         recorded as the function's own (so its regression tests and the export build use it)."""
@@ -375,7 +380,9 @@ class Network:
         bank = self._memory_bank(proj, fn)
         if self.memory is None or bank is None or agent.name in MACHINE_AGENTS or not self.memory.up:
             return []  # (while the server doesn't answer, claims stay out of the comparison)
-        arm = "memory" if random.random() < self.memory.share else "control"
+        # a running memory experiment decides (per function, from its seed); otherwise the coin flip, as before
+        arm = experiments.arm(self.store, proj["id"], fn["id"], "memory") or (
+            "memory" if random.random() < self.memory.share else "control")
         texts: list[str] = []
         if arm == "memory":
             asm = scoring.compact_asm(self._asm_text(fn, proj))
@@ -616,6 +623,8 @@ class Network:
             f"SELECT n.text, a.name, {wins} FROM notes n LEFT JOIN agents a ON a.id=n.agent_id "
             "WHERE n.project_id=? AND n.function_id IS NULL ORDER BY n.id DESC LIMIT 5", proj["id"])
         if header == "CLAIMED" and agent is not None and fn["status"] != "matched":
+            if agent.name not in MACHINE_AGENTS:
+                experiments.enroll(self.store, proj["id"], fn["id"])
             lines += self._memory_lines(proj, fn, agent)
         if pnotes and project_notes:
             lines += ["", "### Project-wide notes (latest)"] + [f"- ({who(n)}) {n['text']}" for n in pnotes]
@@ -680,7 +689,8 @@ class Network:
         d = scoring.diff(self._target_obj(fn, proj), cand)
         if verdict is not None:
             d = scoring.DiffResult(0 if verdict else max(1, d.score), d.max_score, d.rows, verdict)
-        if not d.bytes_match and not scratch and d.percent >= 90 and self._alternate_match(fn, proj, ctx["header"], source):
+        if not d.bytes_match and not scratch and d.percent >= 90 and self._alternates_on(proj, fn) and \
+                self._alternate_match(fn, proj, ctx["header"], source):
             d = scoring.DiffResult(0, d.max_score, d.rows, True)
         matched_now = d.bytes_match and not scratch
         self._record(fn, agent, d.score, source, ctx["version"], matched=matched_now)

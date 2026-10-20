@@ -1822,13 +1822,16 @@ class RomNetwork(Network):
         return (cfg.get("platform") == "psx" and not self.fork_slug(proj["slug"]) and "toolchain" in cfg.get("compiler", {})
                 and (cfg.get("survey") or {}).get("stamp") != self._survey_stamp())
 
-    def survey(self, proj, state: dict, workers: int = 3) -> dict | None:
+    def survey(self, proj, state: dict, workers: int = 3, sample: int | None = None, record: bool = True,
+               force: bool = False) -> dict | None:
         """Which compilers and assemblers built this game, from its own stuck code: every PS1 compiler this computer
         has (each with older ASPSX versions, -O1, plain GNU as) tried on a sample of best attempts that don't match.
         Those that match some become this game's alternates (most matches first), which the judge tries on near misses
         and the rejudge tries on every best attempt. Runs again when the registry's PS1 compilers change (a new
-        build pulled in), so a new compiler pays off for each game it helps, and costs nothing for the others."""
-        if not self.survey_due(proj):
+        build pulled in), so a new compiler pays off for each game it helps, and costs nothing for the others.
+        `sample`, `record`, `force`: the whole-game ablation (`decomp survey --all --dry-run`): every open function,
+        whenever asked, each function's matching setups in the summary ("by_function") and nothing recorded."""
+        if not force and not self.survey_due(proj):
             return None
         cfg = json.loads(proj["config"])
         main = cfg["compiler"]["toolchain"]
@@ -1843,7 +1846,7 @@ class RomNetwork(Network):
         variants = [v for t in installed for v in (t, f"{t}@2.21", f"{t}@2.34", f"{t}@2.56", f"{t}/O1", f"{t}:gnu-as")
                     if v != main]
         rows = self.store.all("SELECT * FROM functions WHERE project_id=? AND status='open' AND best_source IS NOT NULL "
-                              "ORDER BY attempts DESC, n_insns LIMIT ?", proj["id"], self.SURVEY_SAMPLE)
+                              "ORDER BY attempts DESC, n_insns LIMIT ?", proj["id"], sample or self.SURVEY_SAMPLE)
         state["survey_total"], state["surveyed"] = len(rows), 0
         hits: dict[str, int] = {}
         units = self._unit_contexts(proj["id"])
@@ -1890,6 +1893,9 @@ class RomNetwork(Network):
         alternates = useful + sorted(v for v in relied - set(useful) - {None, main})
         summary = {"stamp": self._survey_stamp(), "sampled": len(rows), "matches": dict(sorted(hits.items(), key=lambda x: -x[1])),
                    "at": time.time()}
+        if not record:
+            return summary | {"variants": variants, "useful": useful,
+                              "by_function": {r["name"]: got for r, got in zip(rows, found) if got}}
         with self.store.tx() as db:
             c = json.loads(db.execute("SELECT config FROM projects WHERE id=?", (proj["id"],)).fetchone()["config"])
             c["compiler"]["alternates"] = alternates
@@ -2063,7 +2069,8 @@ class RomNetwork(Network):
             d = scoring.diff(self._target_obj(fn, proj), cand)
             if verdict is not None:
                 d = scoring.DiffResult(0 if verdict else max(1, d.score), d.max_score, d.rows, verdict)
-            if not d.bytes_match and d.percent >= 90 and self._alternate_match(fn, proj, ctx["header"], source):
+            if not d.bytes_match and d.percent >= 90 and self._alternates_on(proj, fn) and \
+                    self._alternate_match(fn, proj, ctx["header"], source):
                 d = scoring.DiffResult(0, d.max_score, d.rows, True)
             self._record(fn, agent, d.score, source, ctx["version"], matched=d.bytes_match)
             return {"matched": d.bytes_match, "score": d.score}
@@ -2098,7 +2105,8 @@ class RomNetwork(Network):
             d = scoring.diff(self._target_obj(fn, proj), cand)
             if verdict is not None:
                 d = scoring.DiffResult(0 if verdict else max(1, d.score), d.max_score, d.rows, verdict)
-            if not d.bytes_match and d.percent >= 90 and self._alternate_match(fn, proj, ctx["header"], source):
+            if not d.bytes_match and d.percent >= 90 and self._alternates_on(proj, fn) and \
+                    self._alternate_match(fn, proj, ctx["header"], source):
                 d = scoring.DiffResult(0, d.max_score, d.rows, True)
             self._record(fn, agent, d.score, source, ctx["version"], matched=d.bytes_match)
             return "match" if d.bytes_match else "near" if d.percent >= 90 else "far"

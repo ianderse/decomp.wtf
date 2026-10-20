@@ -23,7 +23,7 @@ import subprocess
 import tempfile
 from pathlib import Path
 
-from . import toolchains
+from . import experiments, toolchains
 from .compiler import block_comments
 from .project import compiler_config, toolchain_id, with_toolchain
 
@@ -133,6 +133,7 @@ def export(net, slug: str, out: Path, max_miss: float = 0.05, limit: int = 400, 
         "SELECT * FROM functions WHERE project_id=? AND status='open' AND best_source IS NOT NULL AND best_score > 0 "
         "AND best_score <= n_insns * 100 * ? ORDER BY CAST(best_score AS REAL) / (n_insns * 100) LIMIT ?",
         proj["id"], max_miss, limit)
+    rows = [r for r in rows if experiments.arm(net.store, proj["id"], r["id"], "permuter") != "off"]
     names = {r["name"] for r in net.store.all("SELECT name FROM functions WHERE project_id=?", proj["id"])}
     units = net._unit_contexts(proj["id"])
     from .rom.export import own_source
