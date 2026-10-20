@@ -349,21 +349,22 @@ class RomNetwork(Network):
         if res.exact and (extra := self._extra_code(proj, obj, fn["name"])):
             # the function matches, but its object holds code the game doesn't have here: it wouldn't rebuild
             res.exact = False
-            res.problems.append(f"the object also defines {', '.join(extra)}, which isn't one of the game's functions: "
-                                "the game has no such code next to this one. Make it `static inline` (so it's "
-                                "compiled into its callers), or, if it is a function of the game, give it that "
-                                "function's name")
+            res.problems.append(f"the object also defines {', '.join(extra)}, which the game doesn't have next to this "
+                                "function: a helper that isn't one of the game's functions (make it `static inline` "
+                                "so it's compiled into its callers, or give it the game function's real name), or a "
+                                "`static` copy of a game function (declare that one instead: `void f(...);`)")
         return res.candidate, res.exact if res.candidate is not None else None, res.problems
 
     def _extra_code(self, proj, obj: bytes, name: str) -> list[str]:
-        """Functions an object defines besides `name` that aren't the game's (a static helper GCC didn't inline).
+        """Functions an object defines besides `name` that the exported tree would keep and the game doesn't have
+        there: one that isn't a function of the game (a static helper GCC didn't inline, or one named like a game
+        function that isn't one, e.g. half of a split that was merged back), or a private (static) copy of one.
         Other functions of the game are fine: the exported tree keeps only each function's own definition."""
         from io import BytesIO
 
         from elftools.elf.elffile import ELFFile
 
-        syms = self.symbols(proj["id"])
-        found = set()
+        found = {}  # name -> private (local binding)
         try:
             elf = ELFFile(BytesIO(obj))
             for sym in elf.get_section_by_name(".symtab").iter_symbols():
@@ -373,11 +374,17 @@ class RomNetwork(Network):
                 # a function: typed as one, or a global label in code. Not the untyped local labels compilers leave
                 # in code (GCC 2.6.0's line markers LM1, LM2..., gcc2_compiled.): those aren't code of their own
                 if kind == "STT_FUNC" or (bind == "STB_GLOBAL" and kind == "STT_NOTYPE"):
-                    found.add(sym.name)
+                    found[sym.name] = bind == "STB_LOCAL"
         except Exception:
             return []
-        return sorted(n for n in found if n and n != name and not _AUTO_TOKEN.fullmatch(n)
-                      and getattr(syms.by_name.get(n), "kind", None) != "func")
+        found.pop(name, None)
+        found.pop("", None)
+        extra = []
+        for other, private in found.items():
+            game = self.store.one("SELECT 1 FROM functions WHERE project_id=? AND name=?", proj["id"], other)
+            if private or game is None:
+                extra.append(other)
+        return sorted(extra)
 
     def _twin_lines(self, proj, fn) -> list[str]:
         """For a brief: the matched function with the same code, and its C with this one's names."""

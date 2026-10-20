@@ -76,13 +76,30 @@ Use only the decomp tools. Repeat for up to {count} claims (a batch is one), the
    structs you worked out, rename_symbol for functions/data whose purpose is now clear, and add_note (no
    function) for a compiler quirk or convention every agent here should know: the next sessions start with it.
 5. compile_and_diff says when to move on (no better after 4 compiles in a row; up to 10 for big functions):
-   then release_function with precise notes (what you tried, what is left) and claim the next one. A function
-   that can't come from C as it stands (data split as code, a wrong start or end): flag_for_review instead.
+   then release_function with precise notes (what you tried, what is left) and claim the next one. A wrong
+   boundary: split_function where a `jr $ra` ends one function and another starts, merge_functions where a
+   function has no return of its own (it runs into the next). Only code no C can produce (plain data, a BIOS
+   stub): flag_for_review.
 
 The assembly in the brief is the exact target, read from the game: trust it over any note. Before each
 compile, name the one difference you're fixing (from the diff) and change that; several changes at once hide
 which one helped. Write plausible original code, pure C (no inline asm). Be brief in your messages: work,
 don't narrate.
+"""
+
+# for the built-in helper on a local model (agents.Manager._prompt): what went wrong when small models ran without it
+# (SLUS-01252: 40 functions cut in two mid-code and set aside, notes describing bytes the brief didn't show)
+LOCAL_RULES = """
+Rules for the tools that change the project (they affect every agent; when unsure, don't):
+- Your work is compile_and_diff, then release_function or a match. That's almost always all you need.
+- split_function: only when the brief's assembly shows a `jr $ra` (and its delay slot) right before the
+  split address and a new function starting there. Never to make a hard function smaller. If a function
+  has no `jr $ra` of its own, it was split wrongly before: merge_functions it with the one after it.
+- flag_for_review: only for code no C can produce (no return at all, plain data, a BIOS stub
+  `li $t2,0xA0; jr $t2; li $t1,N`). A function you couldn't match is NOT one: release_function it.
+- edit_context and rename_symbol: only for what a match of yours proved. No guesses.
+- Notes: say what you tried and what the diff showed. Quote instructions only as the brief shows them;
+  never describe bytes you didn't see. add_note without a function only for a fact a match proved.
 """
 
 FORK_PROMPT = """\
@@ -330,8 +347,9 @@ def build_mcp(net: RomNetwork, agent_of: Callable[[Context], tuple[Agent, str]])
 
     @mcp.tool(meta=ALWAYS_LOAD)
     async def split_function(ctx: Context, function: str, at: str, new_name: str = "") -> str:
-        """Split a function the disassembler merged with the next one (e.g. after a function that never
-        returns). `at` is the address where the second function starts."""
+        """Split a function the disassembler merged with the next one. `at` is where the second starts: the
+        code right before it must END a function (`jr $ra` and its delay slot, or a jump away), or it's refused.
+        Never to make a hard function smaller."""
         return await run(ctx, "split_function", function=function, at=at, new_name=new_name)
 
     @mcp.tool(meta=ALWAYS_LOAD)

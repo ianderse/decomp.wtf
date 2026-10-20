@@ -964,7 +964,9 @@ class Manager:
                                             guides=", ".join(f'guide("{g}")' for g in guides))
         guide = {"psx": "psx", "ps2": "ps2", "gba": "agbcc"}.get(ov.get("platform")) or (
             "ido" if ov["compiler"]["toolchain"].startswith("ido") else "gcc-kmc")
-        return tools.WORK_PROMPT.format(title=ov["title"], count=s.options.get("per_session", PER_SESSION), compiler_guide=guide)
+        text = tools.WORK_PROMPT.format(title=ov["title"], count=s.options.get("per_session", PER_SESSION),
+                                        compiler_guide=guide)
+        return text + (tools.LOCAL_RULES if s.kind == "api" else "")
 
     def _command(self, s: Session, token: str, workdir: Path) -> tuple[list[str], dict, str]:
         """The agent's command line, environment and what goes in on stdin (the prompt)."""
@@ -1267,23 +1269,37 @@ def api_tool_schemas(fork: bool = False) -> list[dict]:
         "compile_and_diff": ("Compile C for the function, link it at its address and diff against the ROM. "
                              "Score 0 = matched. Several functions: names comma-separated, all definitions in source.",
                              s(function=st("function name, or several: a, b, c", True), source=st("C source", True))),
-        "release_function": ("Give up a function with notes for the next agent.",
+        "release_function": ("Give up a function you can't match yet, with notes for the next agent: the best score, "
+                             "what you tried and what the diff still shows. Use this for every hard function.",
                              s(function=st("function", True), notes=st("what you tried, what is left", True))),
-        "flag_for_review": ("Set a function aside for a person when it can't come from C as it stands (data split as "
-                            "code, a wrong boundary, hand-written assembly). Not for hard functions: release those.",
+        "flag_for_review": ("RARE. Set a function aside for a person, only when NO C can produce it: its assembly "
+                            "has no return at all (it runs into the next function), it's plainly data (no real "
+                            "instructions), or it's a BIOS call stub (li $t2,0xA0/B0/C0; jr $t2; li $t1,N). Never "
+                            "for a function that is just hard or that you couldn't match: release_function those.",
                             s(function=st("function", True), reason=st("what is wrong with it, exactly", True))),
         "get_context": ("The shared header included in every compile.", s()),
-        "edit_context": ("Replace `old` (exactly once) with `new` in the shared header, or append when old is empty.",
+        "edit_context": ("Change the shared header every compile includes: replace `old` (exactly once) with `new`, "
+                         "or append when old is empty. Only for a prototype, struct or extern you are sure of from "
+                         "a match (e.g. a callee declared void that returns a value). Rejected if any match breaks.",
                          s(old=st("text to replace, or empty", True), new=st("replacement", True),
                            message=st("why", True))),
-        "rename_symbol": ("Give a function or data address a real name.",
+        "rename_symbol": ("Give a function or data address a real name, only once its purpose is clear from code "
+                          "you matched (not a guess from the assembly).",
                           s(old=st("current name", True), new=st("new name", True), message=st("why"))),
-        "split_function": ("Split a merged function at an address.",
+        "split_function": ("RARE. Split a function in two at `at`, only when the assembly shows two functions: the "
+                           "first part ENDS (`jr $ra` and its delay slot, or a jump to another function) right "
+                           "before `at`, and a new function starts at `at` (often addiu $sp,-N). Refused if the "
+                           "code before `at` doesn't end like that. Never split a hard function to make it smaller.",
                            s(function=st("function", True), at=st("address like 0x80001234", True), new_name=st("name"))),
+        "merge_functions": ("Undo a wrong split: `second` (right after `first`) becomes part of `first` again. Use it "
+                            "when `first` has no return of its own (it runs straight into `second`).",
+                            s(first=st("function", True), second=st("the function right after it", True))),
         "read_data": ("Hex dump of the original's data at an address or symbol.", s(what=st("address or symbol", True),
                                                                                     length=it("bytes, up to 512"))),
         "list_functions": ("List functions by status.", s(status=st("open | matched | all"), limit=it("max rows"))),
-        "add_note": ("Leave a note for other agents.", s(text=st("note", True), function=st("function"))),
+        "add_note": ("Leave a note for other agents. With `function`: on that function. Without: for every agent on "
+                     "the project, so only for something a match proved (a compiler quirk, a convention), never "
+                     "a guess.", s(text=st("note", True), function=st("function"))),
         "search_notes": ("Search notes.", s(query=st("text", True))),
         "find_similar": ("Functions that look like this one, matched ones first, with the best one's source.",
                          s(function=st("function", True), limit=it("how many"))),
