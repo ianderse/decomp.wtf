@@ -2476,7 +2476,7 @@ function renderSource(ov) {
        <div class="src-line">${ex.matched != null ? `${ex.matched.toLocaleString()} of ${ex.functions.toLocaleString()} functions in C` : ""}${stale ? ` · <b>${ov.matched - ex.matched} new matches since</b>` : ""}</div>
        ${rl.state === "running" ? `<div class="src-line muted small">${rl.phase === "rebuilding" ? "Rebuilding the game now to check the new matches…" : "Checked again automatically after every 100 new matches and every header change."}</div>` : ""}
        ${fails.length ? `<div class="src-line warn-text">${fails.length} match${fails.length === 1 ? "" : "es"} didn't hold in the rebuilt game${ex.acted === false ? " (too many at once to be sure: listed, not given back)" : ex.reopened && ex.reopened.length ? `; ${ex.reopened.length} given back to agents` : ""}:</div>
-         <ul class="src-fails small">${fails.slice(0, 12).map((f) => `<li><code>${esc(f.name)}</code>: ${esc(f.reason)}</li>`).join("")}${fails.length > 12 ? `<li class="muted">and ${fails.length - 12} more</li>` : ""}</ul>` : ""}
+         <ul class="src-fails small">${fails.slice(0, 12).map((f) => `<li><code>${esc(f.name)}</code>: ${esc(f.reason)}${f.again ? " <b>(again after it matched again: probably the check, not the C; left matched for you to look at)</b>" : ""}</li>`).join("")}${fails.length > 12 ? `<li class="muted">and ${fails.length - 12} more</li>` : ""}</ul>` : ""}
        ${ex.path ? `<div class="src-line">${esc(ex.path)}</div>` : ""}`;
   $("srcExport").textContent = ex ? "Export again" : "Export project";
 }

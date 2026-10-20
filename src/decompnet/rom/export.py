@@ -68,8 +68,18 @@ def _symbol_lines(net, proj) -> list[str]:
         rom = f" rom:0x{r['rom_offset']:X}" if r["rom_offset"] is not None else ""
         lines.append(f"{r['name']} = 0x{r['vram']:08X}; // type:func{rom}")
     segs = [s for s in net.cfg(proj).get("segments") or [] if s.get("vram") is not None]
+    # a name inside a function (a label someone named, GetPointRecord inside func_8014A248): splat would start a
+    # function there and cut the real one short. C that uses it still links (build.json's absolute symbols)
+    spans = sorted((r["vram"], r["vram"] + r["size"]) for r in rows if r["size"])
+    starts = [a for a, _ in spans]
+    import bisect
     for s in sorted(syms.by_name.values(), key=lambda s: s.address):
         if s.address in funcs or AUTO_NAME.match(s.name):
+            continue
+        k = bisect.bisect_right(starts, s.address) - 1
+        inside = [(a, b) for a, b in spans[max(0, k - 8):k + 1] if a < s.address < b]
+        if inside and not any(g["vram"] <= s.address < g["vram"] + g["rom_end"] - g["rom_start"]
+                              for g in segs if sum(1 for h in segs if h["vram"] == g["vram"]) > 1):
             continue
         at = [g for g in segs if g["vram"] <= s.address < g["vram"] + g["rom_end"] - g["rom_start"]]
         if len(at) > 1:  # overlays share this address: only where it isn't inside one of their functions

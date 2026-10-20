@@ -1145,6 +1145,103 @@ class RomNetwork(Network):
         self._syms.pop(proj["id"], None)
         return f"✅ 0x{addr:08X} is now `{new}` (was `{old}`); {len(rewritten)} matched sources updated, all still match."
 
+    # names GCC knows as builtins (or the C library's): a function renamed to one could compile differently
+    BUILTIN_NAMES = frozenset((
+        "abs", "labs", "fabs", "memcpy", "memmove", "memset", "memcmp", "strcpy", "strncpy", "strcat", "strncat",
+        "strcmp", "strncmp", "strlen", "strchr", "strrchr", "strstr", "bcopy", "bzero", "bcmp", "index", "rindex",
+        "ffs", "sqrt", "sin", "cos", "exp", "log", "pow", "floor", "ceil", "printf", "sprintf", "puts", "putchar",
+        "malloc", "calloc", "realloc", "free", "exit", "abort", "rand", "srand", "atoi", "atol", "toupper",
+        "tolower", "setjmp", "longjmp", "main"))
+
+    def rename_many(self, agent: Agent, project: str | None, pairs: list[tuple[str, str]]) -> dict:
+        """rename_symbol for many at once (one regression test for all): {"renamed": [...], "skipped": [...]}. Pairs
+        whose new name is taken, a builtin's, or not an identifier are skipped; if the renamed set breaks a match,
+        nothing is renamed."""
+        proj = self._project(project)
+        syms = self.symbols(proj["id"])
+        todo, skipped, used = {}, [], set()
+        # names that differ only in case (Sony's libcd has cd_cw and CD_cw) are one file on a case-insensitive disk:
+        # the exported tree would lose one of the two functions
+        lower = {r["name"].lower() for r in self.store.all("SELECT name FROM functions WHERE project_id=?", proj["id"])}
+        for old, new in pairs:
+            addr = syms.resolve(old)
+            taken = syms.resolve(new)
+            if (addr is None or not IDENT.match(new) or new in self.BUILTIN_NAMES or new.lower() in used
+                    or (new.lower() in lower and new.lower() != old.lower())
+                    or (taken is not None and taken != addr)):
+                skipped.append((old, new))
+                continue
+            todo[old] = new
+            used.add(new.lower())
+            lower.add(new.lower())
+        if not todo:
+            return {"renamed": [], "skipped": skipped}
+        word = re.compile(r"\b(" + "|".join(re.escape(o) for o in sorted(todo, key=len, reverse=True)) + r")\b")
+        sub = lambda text: word.sub(lambda m: todo[m.group(1)], text)
+        trial = SymbolTable([Symbol(s_.name, s_.address, s_.size, s_.kind) for s_ in syms.by_name.values()])
+        rows_by_vram = {r["vram"]: r for r in self.store.all("SELECT name, vram, size FROM functions WHERE project_id=?",
+                                                            proj["id"])}
+        for old, new in todo.items():
+            addr = syms.resolve(old)
+            if old in trial.by_name:
+                trial.rename(old, new)
+            else:
+                fnrow = rows_by_vram.get(addr)
+                trial.add(Symbol(new, addr, fnrow["size"] if fnrow else 0, "func" if fnrow else "data"))
+        units = self._unit_contexts(proj["id"])
+        current_ctx = {u: self._context(proj["id"], u) for u in ({""} | units)}
+        changed = {u: sub(c["header"]) for u, c in current_ctx.items() if word.search(c["header"])}
+        matched = self.store.all("SELECT * FROM functions WHERE project_id=? AND status='matched'", proj["id"])
+        rewritten = {r["id"]: sub(r["matched_source"]) for r in matched if word.search(r["matched_source"] or "")}
+        renamed_rows = [dict(r) | {"name": todo.get(r["name"], r["name"])} for r in matched]
+        header_for = lambda fn: changed.get(self._effective_unit(fn, units),
+                                            current_ctx[self._effective_unit(fn, units)]["header"])
+        self._sym_override[proj["id"]] = trial
+        try:
+            broken = self.regression_test(proj, None, sources=rewritten, only=renamed_rows, header_for=header_for)
+        finally:
+            self._sym_override.pop(proj["id"], None)
+        if broken:
+            logging.getLogger("decomp.wtf").info("rename_many %s: not applied, it breaks %s", proj["slug"],
+                                                 ", ".join(n for n, _ in broken[:10]))
+            return {"renamed": [], "skipped": skipped, "broken": broken}
+        with self.store.tx() as db:
+            for old, new in todo.items():
+                addr = syms.resolve(old)
+                if db.execute("UPDATE symbols SET name=? WHERE project_id=? AND name=?", (new, proj["id"], old)).rowcount == 0:
+                    s_ = trial.by_name[new]
+                    db.execute("INSERT OR REPLACE INTO symbols(project_id,name,address,size,kind) VALUES(?,?,?,?,?)",
+                               (proj["id"], new, s_.address, s_.size, s_.kind))
+                db.execute("UPDATE functions SET name=? WHERE project_id=? AND (name=? OR vram=?)",
+                           (new, proj["id"], old, addr))
+                self._event(db, proj["id"], agent.id, "rename", f"{old} → {new}")
+            for u, header in changed.items():
+                version = self._next_version(db, proj["id"])
+                db.execute("INSERT INTO context_versions(project_id,version,header,agent_id,message,created_at,unit) "
+                           "VALUES(?,?,?,?,?,?,?)", (proj["id"], version, header, agent.id,
+                                                    f"{len(todo)} functions renamed", time.time(), u))
+            for r in db.execute("SELECT id, matched_source, best_source FROM functions WHERE project_id=?",
+                                (proj["id"],)).fetchall():
+                ms, bs = r["matched_source"], r["best_source"]
+                if (ms and word.search(ms)) or (bs and word.search(bs)):
+                    db.execute("UPDATE functions SET matched_source=?, best_source=? WHERE id=?",
+                               (sub(ms) if ms else ms, sub(bs) if bs else bs, r["id"]))
+        self._syms.pop(proj["id"], None)
+        return {"renamed": sorted(todo.items()), "skipped": skipped}
+
+    def name_library_functions(self, slug: str) -> dict:
+        """Sony's library functions identify_psyq set aside get their real names (SpuFree, not func_80174B94), so
+        their callers' C and the exported tree read like Sony's SDK."""
+        proj = self._project(slug)
+        rows = self.store.all("SELECT name, meta FROM functions WHERE project_id=? AND status='asm' "
+                              "AND meta LIKE '%\"library\"%'", proj["id"])
+        pairs = [(r["name"], json.loads(r["meta"])["library"]["name"]) for r in rows]
+        pairs = [(o, n) for o, n in pairs if _AUTO_TOKEN.fullmatch(o) and o != n]
+        if not pairs:
+            return {"renamed": [], "skipped": []}
+        agent, _ = self.local_agent("autopilot")
+        return self.rename_many(agent, slug, pairs)
+
     # ------------------------------------------------------------------ rooms (see collab.py)
 
     def link_project(self, slug: str, info: dict, client=None, start: bool = True):
@@ -1364,6 +1461,11 @@ class RomNetwork(Network):
             if aside:
                 self._event(db, proj["id"], None, "autopilot", f"{len(aside)} of Sony's library functions set aside "
                             f"(PSY-Q signatures; the SDK looks like {', '.join(summary['sdk'][:2])})")
+        if aside:  # and named as Sony named them
+            try:
+                summary["named"] = len(self.name_library_functions(slug)["renamed"])
+            except Exception as e:  # names are a nicety: the functions are set aside either way
+                logging.getLogger("decomp.wtf").info("naming %s's library functions: %s", slug, e)
         return summary
 
     def flag_for_review(self, agent: Agent, function: str, reason: str, project: str | None = None) -> str:
@@ -1614,6 +1716,9 @@ class RomNetwork(Network):
                 rows = [r for r in rows if not f.get("unit") or len(rows) == 1 or r["unit"] == f["unit"]]
                 for r in rows[:1]:
                     meta = json.loads(r["meta"] or "{}")
+                    if meta.get("relink") == f["reason"]:  # given back for this once and matched again: the check
+                        f["again"] = True  # is likely what's wrong (an export split, say), not the C: a person's
+                        continue  # call (listed on the Source panel), so it doesn't go round and round
                     meta["relink"] = f["reason"]
                     db.execute("UPDATE functions SET status='open', best_source=matched_source, best_score=1, "
                                "matched_source=NULL, matched_agent_id=NULL, matched_at=NULL, meta=? "
