@@ -28,6 +28,10 @@ CLAIM_TTL = 30 * 60
 # A function an agent just released goes to the back of the queue for this long, for every agent: the next one
 # starts on something fresh instead of passing the same function back and forth. Asked for by name, it comes at once.
 RELEASE_COOLDOWN = 15 * 60
+# what an agent released itself it doesn't get back for this long; after that it can, after everything it hasn't
+# tried (agents keep their names across sessions: without a limit, a long-running one ran out of functions to claim
+# while half the game was open)
+OWN_RELEASE_WINDOW = 6 * 3600
 # the other compiler versions of a platform, tried on a near miss: a game is sometimes built with two of them
 # (":gnu-as": without maspsx, for code that wasn't built with Sony's assembler, like some library code)
 # ("@2.34": an older version of Sony's assembler; on SLUS-01252 62 stuck best attempts matched that way)
@@ -546,10 +550,13 @@ class Network:
                 fn = db.execute(
                     f"""SELECT f.* FROM functions f WHERE f.project_id=? AND f.status='open'
                         AND f.id NOT IN (SELECT function_id FROM claims)
-                        AND f.name NOT IN (SELECT detail FROM events WHERE project_id=? AND agent_id=? AND kind='release')
-                        ORDER BY f.name IN (SELECT detail FROM events WHERE project_id=? AND kind='release'
+                        AND f.name NOT IN (SELECT detail FROM events WHERE project_id=? AND agent_id=? AND kind='release'
+                                           AND created_at > ?)
+                        ORDER BY f.name IN (SELECT detail FROM events WHERE project_id=? AND agent_id=? AND kind='release'),
+                                 f.name IN (SELECT detail FROM events WHERE project_id=? AND kind='release'
                                             AND created_at > ?), {STRATEGIES[strategy]} LIMIT 1""",
-                    (proj["id"], proj["id"], agent.id, proj["id"], now - RELEASE_COOLDOWN),
+                    (proj["id"], proj["id"], agent.id, now - OWN_RELEASE_WINDOW, proj["id"], agent.id, proj["id"],
+                     now - RELEASE_COOLDOWN),
                 ).fetchone()
                 if fn is None:
                     return None

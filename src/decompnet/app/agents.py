@@ -238,10 +238,13 @@ def next_function(net, slug: str, agent_id: int = 0):
     return net.store.one(
         f"""SELECT f.* FROM functions f WHERE f.project_id=? AND f.status='open'
             AND f.id NOT IN (SELECT function_id FROM claims)
-            AND f.name NOT IN (SELECT detail FROM events WHERE project_id=? AND agent_id=? AND kind='release')
-            ORDER BY f.name IN (SELECT detail FROM events WHERE project_id=? AND kind='release'
+            AND f.name NOT IN (SELECT detail FROM events WHERE project_id=? AND agent_id=? AND kind='release'
+                               AND created_at > ?)
+            ORDER BY f.name IN (SELECT detail FROM events WHERE project_id=? AND agent_id=? AND kind='release'),
+                     f.name IN (SELECT detail FROM events WHERE project_id=? AND kind='release'
                                 AND created_at > ?), {netmod.STRATEGIES[strategy]} LIMIT 1""",
-        proj["id"], proj["id"], agent_id, proj["id"], time.time() - netmod.RELEASE_COOLDOWN)
+        proj["id"], proj["id"], agent_id, time.time() - netmod.OWN_RELEASE_WINDOW, proj["id"], agent_id, proj["id"],
+        time.time() - netmod.RELEASE_COOLDOWN)
 
 
 # Claude Code's aliases always point at Anthropic's latest model of each kind.
