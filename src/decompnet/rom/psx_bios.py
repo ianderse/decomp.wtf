@@ -31,7 +31,6 @@ _C = {0: "EnqueueTimerAndVblankIrqs", 1: "EnqueueSyscallHandler", 2: "SysEnqIntR
       6: "ExceptionHandler", 7: "InstallExceptionHandlers", 8: "SysInitMemory", 9: "SysInitKernelVariables",
       0xA: "ChangeClearRCnt", 0xC: "InitDefInt", 0xD: "SetIrqAutoAck", 0x1C: "AdjustA0Table"}
 TABLES = {0xA0: _A, 0xB0: _B, 0xC0: _C}
-_JR_T2 = 0x01400008
 
 
 def _literal(word: int, register: int) -> int | None:
@@ -41,20 +40,38 @@ def _literal(word: int, register: int) -> int | None:
     return None
 
 
+def _jr(word: int) -> int | None:
+    """The register of `jr reg`, else None."""
+    return (word >> 21) & 31 if word & 0xFC1FFFFF == 0x00000008 and (word >> 21) & 31 else None
+
+
+def _loaded(word: int) -> int | None:
+    """The register `addiu reg, $zero, imm` / `ori reg, $zero, imm` loads, else None."""
+    reg = (word >> 16) & 31
+    return reg if reg and _literal(word, reg) is not None else None
+
+
 def recognize(code: bytes) -> dict | None:
-    """{"gate", "slot", "api", "name"} for an exact BIOS call stub (little-endian code), else None."""
+    """{"gate", "slot", "api", "name"} for an exact BIOS call stub (little-endian code), else None. Sony's use $t2
+    for the table and $t1 for the slot; some games' own stubs use others ($s0 and $s1 in SLUS-01252's)."""
     if len(code) % 4 or not 12 <= len(code) <= 32:
         return None
     words = list(struct.unpack(f"<{len(code) // 4}I", code))
     while words and words[-1] == 0:  # alignment padding
         words.pop()
+    if len(words) != 3:
+        return None
     gate = slot = None
-    if len(words) == 3 and words[1] == _JR_T2:  # the slot in jr's delay slot
-        gate, slot = _literal(words[0], 10), _literal(words[2], 9)
-    elif len(words) == 3 and words[2] == _JR_T2 and len(code) >= 16:  # both first, then jr with a nop after it
-        gate, slot = _literal(words[1], 10), _literal(words[0], 9)
-        if gate is None or slot is None:
-            gate, slot = _literal(words[0], 10), _literal(words[1], 9)
+    if (reg := _jr(words[1])) is not None:  # table, jr, the slot in jr's delay slot
+        other = _loaded(words[2])
+        if other is not None and other != reg:
+            gate, slot = _literal(words[0], reg), _literal(words[2], other)
+    elif (reg := _jr(words[2])) is not None and len(code) >= 16:  # both first, then jr with a nop after it
+        for a, b in ((0, 1), (1, 0)):
+            other = _loaded(words[b])
+            if other is not None and other != reg and _literal(words[a], reg) is not None:
+                gate, slot = _literal(words[a], reg), _literal(words[b], other)
+                break
     if gate not in TABLES or slot is None or slot > 0xFF:
         return None
     api = TABLES[gate].get(slot)

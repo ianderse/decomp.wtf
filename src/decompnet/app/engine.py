@@ -991,6 +991,13 @@ class RomNetwork(Network):
         if self.cfg(proj).get("platform") == "gba":
             return self._split_gba(agent, proj, fn, addr, new_name, syms)
         rf = self._parse_asm(fn["name"], fn["asm"], fn["unit"])
+        before = [ln for ln in rf.lines if ln.vram < addr][-3:]
+        if before and not any(ln.mnemonic in ("jr", "j", "b") for ln in before):
+            raise NetworkError(
+                f"the code before 0x{addr:08X} doesn't end like a function (no jr/j in its last instructions: "
+                f"{'; '.join(f'{ln.mnemonic} {ln.operands}' for ln in before)}), so it's one function, not two: "
+                "don't split it. (A function that starts with a BIOS call stub ends at the stub's jr and its "
+                "delay slot; this one doesn't.)")
         try:
             head, tail = split.split_function(rf, addr, new_name)
         except ValueError as e:
@@ -1015,6 +1022,51 @@ class RomNetwork(Network):
         self._xrefs.pop(proj["id"], None)
         return (f"✅ split: {fn['name']} is now {len(head.lines)} instructions; {new_name} at 0x{addr:08X} has "
                 f"{len(tail.lines)}. Continue with {fn['name']} (get_function shows its new assembly).")
+
+    def merge_functions(self, agent: Agent, project: str | None, first: str, second: str) -> str:
+        """Undo a wrong split: `second` (right after `first`) becomes part of `first` again. Neither may be matched;
+        what was noted on `first` stays, `second`'s claims and attempts go (they were for half a function)."""
+        self._rom_only(project, "merge_functions")
+        a, b = self._function(first, project), self._function(second, project)
+        proj = self.store.one("SELECT * FROM projects WHERE id=?", a["project_id"])
+        if not self.is_rom(proj) or self.cfg(proj).get("platform") == "gba":
+            raise NetworkError("merge_functions is for MIPS ROM projects")
+        if "matched" in (a["status"], b["status"]):
+            raise NetworkError("a matched function can't be merged")
+        gap = b["vram"] - (a["vram"] + a["size"])
+        pad = self.reader(proj)(a["vram"] + a["size"], gap) if 0 < gap <= 8 else b""
+        if a["unit"] != b["unit"] or gap < 0 or (gap and (pad is None or len(pad) != gap or pad.strip(b"\0"))):
+            raise NetworkError(f"{b['name']} doesn't start right where {a['name']} ends "
+                               f"(0x{a['vram'] + a['size']:08X}): only neighbours can be merged")
+        ra, rb = self._parse_asm(a["name"], a["asm"], a["unit"]), self._parse_asm(b["name"], b["asm"], b["unit"])
+        # the zero padding a split trimmed off the first part, back in as nops
+        nops = [split.AsmLine(ra.lines[-1].rom + 4 * (k + 1), ra.lines[-1].vram + 4 * (k + 1), 0, "nop", "")
+                for k in range(gap // 4)]
+        merged = split.RomFunction(a["name"], ra.vram, ra.rom, ra.segment, ra.lines + nops + rb.lines, Path(),
+                                   ra.labels | rb.labels | {rb.vram})
+        syms = self.symbols(proj["id"])
+        trial = SymbolTable([Symbol(s.name, s.address, s.size, s.kind) for s in syms.by_name.values()
+                             if s.name != b["name"]])
+        if a["name"] in trial.by_name:
+            trial.by_name[a["name"]].size = merged.size
+        target = self._make_target(proj, merged, trial)
+        meta = json.loads(a["meta"] or "{}")
+        for k in ("review", "asm_code"):
+            meta.pop(k, None)
+        with self.store.tx() as db:
+            db.execute("UPDATE functions SET size=?, n_insns=?, target=?, relocs=?, asm=?, seed=NULL, best_score=NULL, "
+                       "best_source=NULL, status='open', meta=? WHERE id=?",
+                       (merged.size, len(merged.lines), target.code, json.dumps(target.to_json()),
+                        self._asm_source(merged), json.dumps(meta) if meta else None, a["id"]))
+            for table in ("claims", "attempts", "notes"):
+                db.execute(f"DELETE FROM {table} WHERE function_id=?", (b["id"],))
+            db.execute("DELETE FROM functions WHERE id=?", (b["id"],))
+            db.execute("DELETE FROM symbols WHERE project_id=? AND name=?", (proj["id"], b["name"]))
+            db.execute("UPDATE symbols SET size=? WHERE project_id=? AND name=?", (merged.size, proj["id"], a["name"]))
+            self._event(db, proj["id"], agent.id, "merge", f"{a['name']} + {b['name']}")
+        self._xrefs.pop(proj["id"], None)
+        return (f"✅ merged: {a['name']} is {len(merged.lines)} instructions again (0x{a['vram']:08X}), with "
+                f"{b['name']}'s code; it's open for agents.")
 
     def _split_gba(self, agent: Agent, proj, fn, addr: int, new_name: str, syms: SymbolTable) -> str:
         """Cut a GBA function's bytes and assembly in two at `addr` (Thumb: a halfword boundary)."""

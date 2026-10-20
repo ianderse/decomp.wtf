@@ -192,6 +192,7 @@ HANDLERS: dict[str, Callable[..., str]] = {
     "rename_symbol": lambda net, agent, slug, old, new, message="": net.rename_symbol(agent, slug, old, new, message),
     "split_function": lambda net, agent, slug, function, at, new_name="":
         net.split_function(agent, slug, function, at, new_name),
+    "merge_functions": lambda net, agent, slug, first, second: net.merge_functions(agent, slug, first, second),
     "read_data": lambda net, agent, slug, what, length=64: (net.forks.read_data(agent, slug, what, length)
                                                             if net.fork_slug(slug) else net.read_data(slug, what, length)),
     "list_functions": lambda net, agent, slug, status="open", limit=40: net.list_functions(slug, status, limit),
@@ -209,7 +210,7 @@ HANDLERS: dict[str, Callable[..., str]] = {
         net.forks.split_file(agent, _fork(net, slug, "split_file"), path, at, new_name, data),
 }
 
-ROM_ONLY = {"get_context", "edit_context", "rename_symbol", "split_function", "flag_for_review"}
+ROM_ONLY = {"get_context", "edit_context", "rename_symbol", "split_function", "merge_functions", "flag_for_review"}
 FORK_ONLY = {"read_file", "search_code", "edit_file", "file_status", "split_file"}
 
 
@@ -332,6 +333,12 @@ def build_mcp(net: RomNetwork, agent_of: Callable[[Context], tuple[Agent, str]])
         """Split a function the disassembler merged with the next one (e.g. after a function that never
         returns). `at` is the address where the second function starts."""
         return await run(ctx, "split_function", function=function, at=at, new_name=new_name)
+
+    @mcp.tool(meta=ALWAYS_LOAD)
+    async def merge_functions(ctx: Context, first: str, second: str) -> str:
+        """Undo a wrong split: `second` (the function right after `first`) becomes part of `first` again. Use it
+        when a function was cut in the middle (its first part has no return)."""
+        return await run(ctx, "merge_functions", first=first, second=second)
 
     @mcp.tool(meta=ALWAYS_LOAD)
     async def read_data(ctx: Context, what: str, length: int = 64) -> str:
