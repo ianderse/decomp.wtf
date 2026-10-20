@@ -1,7 +1,12 @@
 # Where the efficiency comes from: experiments on SLUS-01252
 
-Status (2026-10-19): the framework is built (experiments.py; the project page's Experiments panel). Nothing below has
-been started: this is the proposal.
+Status (2026-10-19): the framework is built (experiments.py; the project page's Experiments panel).
+
+Results so far:
+- **Whole-game compiler survey (step 1), on the M5:** 1,152 open functions' best attempts, each with every PS1
+  compiler setup: **none matched**. What's left on SLUS-01252 is source-level (registers, statement order, types),
+  not the compiler or assembler; no alternates experiment needed.
+- **Tier experiment (step 2):** started 2026-10-19 18:15, to 300 functions per arm.
 
 ## What's built
 
