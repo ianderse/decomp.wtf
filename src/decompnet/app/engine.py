@@ -14,9 +14,11 @@ Everything stays on this computer.
 from __future__ import annotations
 
 import collections
+import contextlib
 import hashlib
 import json
 import logging
+import os
 import re
 import secrets
 import struct
@@ -142,6 +144,31 @@ def _preview(data: bytes | None, kind: str) -> str:
     if len(text) >= 3 and all(32 <= c < 127 or c in (9, 10) for c in text):
         return json.dumps(text.decode("ascii"))
     return data[:16].hex(" ")
+
+
+@contextlib.contextmanager
+def _file_lock(path: Path):
+    """An exclusive lock held by one process at a time (waits for it)."""
+    with open(path, "a+") as f:
+        if os.name == "nt":
+            import msvcrt
+            while True:
+                try:
+                    msvcrt.locking(f.fileno(), msvcrt.LK_LOCK, 1)
+                    break
+                except OSError:  # LK_LOCK gives up after 10 s: keep waiting
+                    continue
+        else:
+            import fcntl
+            fcntl.flock(f, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            if os.name == "nt":
+                f.seek(0)
+                msvcrt.locking(f.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                fcntl.flock(f, fcntl.LOCK_UN)
 
 
 class RomNetwork(Network):
@@ -1736,7 +1763,10 @@ class RomNetwork(Network):
 
         proj = self._project(slug)
         export = export_gba if self.cfg(proj).get("platform") == "gba" else export_rom
-        res = export(self, slug, Path(proj["root"]) / "source", log=log)
+        # one export into a project's source folder at a time, across processes: the relink worker of an app that
+        # was quitting and the new one's (or an Export click) wrote into the same folder and both failed
+        with _file_lock(Path(proj["root"]) / ".export.lock"):
+            res = export(self, slug, Path(proj["root"]) / "source", log=log)
         with self.store.tx() as db:  # shown on the project page: what's in the tree and whether it rebuilds
             cfg = json.loads(db.execute("SELECT config FROM projects WHERE id=?", (proj["id"],)).fetchone()["config"])
             cfg["export"] = {"t": time.time(), "path": str(res["path"]), "identical": res.get("identical"),
