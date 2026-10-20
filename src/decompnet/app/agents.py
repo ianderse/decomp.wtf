@@ -1217,21 +1217,36 @@ def _too_long(r) -> bool:
 
 
 def fit(messages: list[dict], budget: int) -> int:
-    """Shrink the conversation to `budget` tokens: older tool output goes first (a function's assembly and diffs
-    from several steps ago), then older reasoning. The instructions, the task and the latest exchange stay whole.
-    Returns the estimate after."""
+    """Shrink the conversation to `budget` tokens: older tool output goes first (diffs and searches from several
+    steps ago), then older reasoning. The instructions, the task, the latest exchange and the latest function brief
+    (its target assembly: a local model working on a 118-instruction function lost it to this and had to piece the
+    code together from hex dumps) stay whole; if even that's too much, the brief keeps its assembly and loses the
+    rest (notes, drafts) last. Returns the estimate after."""
     total = sum(_tokens(m) for m in messages)
     keep_from = max(2, len(messages) - 2)
+    brief = next((i for i in range(len(messages) - 1, 1, -1) if messages[i].get("role") == "tool"
+                  and isinstance(messages[i].get("content"), str) and BRIEF.match(messages[i]["content"])), None)
     for kinds in (("tool",), ("assistant",)):
-        for m in messages[2:keep_from]:
+        for i, m in enumerate(messages[2:keep_from], start=2):
             if total <= budget:
                 return total
             text = m.get("content")
-            if m.get("role") in kinds and isinstance(text, str) and len(text) > 300:
+            if i != brief and m.get("role") in kinds and isinstance(text, str) and len(text) > 300:
                 before = _tokens(m)
                 m["content"] = text[:240] + "\n[... trimmed to save context: call the tool again if you need this]"
                 total -= before - _tokens(m)
+    if total > budget and brief is not None and brief < keep_from:  # last: the brief, down to its assembly
+        m = messages[brief]
+        asm = re.search(r"### Target assembly\n```asm\n.*?```", m["content"], re.S)
+        if asm:
+            before = _tokens(m)
+            m["content"] = (m["content"].split("\n", 1)[0] + "\n\n" + asm.group(0) +
+                            "\n[... the rest of the brief trimmed to save context: get_function shows it again]")
+            total -= before - _tokens(m)
     return total
+
+
+BRIEF = re.compile(r"## (CLAIMED|VIEW): ")  # network.Network._brief's first line
 
 
 def context_window(client, base: str, options: dict) -> int:
