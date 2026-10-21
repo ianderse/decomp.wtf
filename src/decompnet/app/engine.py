@@ -1824,7 +1824,9 @@ class RomNetwork(Network):
                     self._event(db, proj["id"], None, "relink", r["name"])
                     reopened.append(r["name"])
             cfg = json.loads(db.execute("SELECT config FROM projects WHERE id=?", (proj["id"],)).fetchone()["config"])
+            raw = self._raw_addresses(Path(res["path"]), cfg) if res.get("path") else []
             cfg.setdefault("export", {}).update({
+                "raw_addresses": raw[:300],
                 "context_version": version, "checked_matched": matched, "failures": failures[:200],
                 "reopened": reopened, "acted": act, "differs": len(report.get("differs") or []),
                 "identical": res.get("identical")})
@@ -1835,6 +1837,27 @@ class RomNetwork(Network):
                 "" if act else f" (more than {RELINK_LIMIT:.0%}: listed, not reopened)",
                 ", ".join(f["name"] for f in failures[:20]))
         return {**res, "failures": failures, "reopened": reopened, "acted": act}
+
+    _RAW_ADDRESS = re.compile(r"\b0x(80[0-9A-Fa-f]{6})[uUlL]*\b")
+
+    def _raw_addresses(self, tree: Path, cfg: dict) -> list[dict]:
+        """Matches whose C writes an address inside the game's own code or data as a number (`*(u8 *)0x801A10F8`)
+        instead of naming it: byte-identical, but unreadable and wrong in a build that moves data. Listed for
+        clean-up: [{"name", "addresses"}]. Addresses outside the program's images (buffers, the BIOS, hardware) have
+        no name to use: not listed."""
+        spans = [(g["vram"], g["vram"] + g["rom_end"] - g["rom_start"]) for g in cfg.get("segments") or []
+                 if g.get("vram") is not None]
+        if spans:  # and the main program's .bss after it, up to the top of RAM's user space
+            spans.append((max(b for _, b in spans[:1]), 0x80200000))
+        inside = lambda a: any(lo <= a < hi for lo, hi in spans)
+        out = []
+        for path in sorted((tree / "src").glob("**/*.c")):
+            text = path.read_text(encoding="utf-8", errors="replace")
+            found = sorted({f"0x{m.group(1).upper()}" for m in self._RAW_ADDRESS.finditer(text)
+                            if inside(int(m.group(1), 16))})
+            if found:
+                out.append({"name": path.stem, "addresses": found[:6]})
+        return out
 
     def relink_due(self, slug: str) -> bool:
         """After RELINK_EVERY new matches since the last check, or a change to the shared header."""

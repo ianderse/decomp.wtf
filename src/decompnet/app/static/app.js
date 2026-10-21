@@ -2477,6 +2477,8 @@ function renderSource(ov) {
        ${rl.state === "running" ? `<div class="src-line muted small">${rl.phase === "rebuilding" ? "Rebuilding the game now to check the new matches…" : "Checked again automatically after every 100 new matches and every header change."}</div>` : ""}
        ${fails.length ? `<div class="src-line warn-text">${fails.length} match${fails.length === 1 ? "" : "es"} didn't hold in the rebuilt game${ex.acted === false ? " (too many at once to be sure: listed, not given back)" : ex.reopened && ex.reopened.length ? `; ${ex.reopened.length} given back to agents` : ""}:</div>
          <ul class="src-fails small">${fails.slice(0, 12).map((f) => `<li><code>${esc(f.name)}</code>: ${esc(f.reason)}${f.again ? " <b>(again after it matched again: probably the check, not the C; left matched for you to look at)</b>" : ""}</li>`).join("")}${fails.length > 12 ? `<li class="muted">and ${fails.length - 12} more</li>` : ""}</ul>` : ""}
+       ${(ex.raw_addresses || []).length ? `<details class="src-line"><summary>${ex.raw_addresses.length} match${ex.raw_addresses.length === 1 ? "" : "es"} write a game address as a number instead of its name (byte-identical, but to clean up)</summary>
+         <ul class="src-fails small">${ex.raw_addresses.slice(0, 40).map((r) => `<li><code>${esc(r.name)}</code>: ${r.addresses.map(esc).join(", ")}</li>`).join("")}${ex.raw_addresses.length > 40 ? `<li class="muted">and ${ex.raw_addresses.length - 40} more</li>` : ""}</ul></details>` : ""}
        ${ex.path ? `<div class="src-line">${esc(ex.path)}</div>` : ""}`;
   $("srcExport").textContent = ex ? "Export again" : "Export project";
 }
