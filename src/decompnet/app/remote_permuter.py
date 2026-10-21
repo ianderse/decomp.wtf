@@ -31,6 +31,7 @@ TICK = 20 * 60
 ROTATE = 3 * 3600  # a batch's matches come in its first 2-3 hours (SLUS-01252); then a fresh one
 MAX_MISS = 0.08  # near misses this close go in a batch
 SPARE_CORES = 6  # left to the permuter machine's other work (a local model, Hindsight)
+STARTUP_CHECK = 20  # seconds after starting a batch: is it still running?
 SSH = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=15"]
 
 
@@ -147,6 +148,14 @@ class RemotePermuter:
         res = self._ssh(start)
         if "started" not in res.stdout:
             st["error"] = f"starting the permuter failed: {(res.stderr or res.stdout).strip()[-300:]}"
+            return st
+        time.sleep(STARTUP_CHECK)  # it started: still running a little later? (a bad directory ends it at once)
+        if not self.running(slug):
+            tail = self._ssh(f"tail -5 $HOME/{remote}/permuter.log").stdout.strip()
+            st["error"] = f"the permuter stopped right after starting: {tail[-300:]}"
+            with self.net.store.tx() as db:
+                self.net._event(db, proj["id"], None, "autopilot", f"permuter on {self.host}: stopped right after "
+                                f"starting ({tail.splitlines()[0][:120] if tail else 'no log'})")
             return st
         with self.net.store.tx() as db:
             c = json.loads(db.execute("SELECT config FROM projects WHERE id=?", (proj["id"],)).fetchone()["config"])

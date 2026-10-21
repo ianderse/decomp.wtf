@@ -159,6 +159,7 @@ def export(net, slug: str, out: Path, max_miss: float = 0.05, limit: int = 400, 
                                 capture_output=True, text=True, errors="replace")
             if pp.returncode != 0:
                 log(f"{fn['name']}: preprocessing failed, skipped")
+                shutil.rmtree(d, ignore_errors=True)  # a half-written directory stops decomp-permuter's whole run
                 continue
             (d / "base.c").write_text(pp.stdout, encoding="utf-8")
             (d / "target.s").write_text(PRELUDE + net._asm_text(fn, proj) + "\n", encoding="utf-8")
@@ -166,6 +167,7 @@ def export(net, slug: str, out: Path, max_miss: float = 0.05, limit: int = 400, 
                                   "-o", str(d / "target.o"), str(d / "target.s")], capture_output=True, text=True)
             if res.returncode != 0:
                 log(f"{fn['name']}: assembling the target failed, skipped: {res.stderr.strip()[:200]}")
+                shutil.rmtree(d, ignore_errors=True)  # (no compile.sh: decomp-permuter refuses the whole batch)
                 continue
         (d / "compile.sh").write_text(_compile_sh(net, proj, fn), encoding="utf-8")
         (d / "compile.sh").chmod(0o755)
@@ -185,7 +187,9 @@ def export(net, slug: str, out: Path, max_miss: float = 0.05, limit: int = 400, 
         '#!/bin/sh\n# Run once on the permuter machine: points every directory at its MIPS objdump.\n'
         'OBJ="$HOME/Library/Application Support/decompnet/toolchains/binutils-mips/mips-ps2-decompals-objdump"\n'
         '[ -x "$OBJ" ] || { echo "install decomp.wtf and its binutils-mips first (uv run decomp, Compilers & tools)"; exit 1; }\n'
-        'cd "$(dirname "$0")" && for s in */settings.toml; do sed -i "" "s|^objdump_command = .*|objdump_command = \\"\'$OBJ\' -drz\\"|" "$s"; done\n'
+        '# a directory without compile.sh (an export that stopped half way) makes decomp-permuter refuse them all\n'
+        'cd "$(dirname "$0")" && for d in */; do [ -f "$d/compile.sh" ] || rm -rf "$d"; done\n'
+        'for s in */settings.toml; do sed -i "" "s|^objdump_command = .*|objdump_command = \\"\'$OBJ\' -drz\\"|" "$s"; done\n'
         'echo "ready: $(ls -d */ | wc -l | tr -d " ") functions"\n', encoding="utf-8")
     (out / "setup.sh").chmod(0o755)
     log(f"{written} near misses written to {out}")
