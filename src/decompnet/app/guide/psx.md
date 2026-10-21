@@ -15,6 +15,10 @@ CPU: MIPS R3000A (MIPS I). Things that look odd at first:
   function's target builds the full address (`lui` + `%lo`). Use an *alias*: the automatic name plus a
   suffix names the same address. In your function's own source, `extern s32 D_801A10F8_nogp[];` and
   `D_801A10F8_nogp[0] = x;` (an array of unknown size is never gp-relative). Don't change the header.
+- Overlays share addresses (several load at 0x80026000): one address can be a function in one overlay and data
+  in another, so the shared header can't declare it for all of them. Keep an overlay's own declarations in
+  its functions' sources, not the header; where its name clashes with another overlay's, use an alias
+  (`void func_8002735C_yend(void);` and call that): it names the same address.
 
 Compilers: PSY-Q SDK GCC 2.6/2.7.2/2.8.x and ASPSX versions differ in register allocation and
 instruction scheduling. Your code goes through GCC, then maspsx (Sony's assembler's delay-slot and nop rules),
