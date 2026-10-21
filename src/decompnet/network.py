@@ -832,6 +832,14 @@ class Network:
                 new_header = header.rstrip("\n") + "\n\n" + new.strip("\n") + "\n"
             members = self._matched_using(proj, unit)
             broken = self.regression_test(proj, new_header, only=members)
+            rewrites: dict[int, str] = {}
+            if broken:
+                # matched sources often carry their own copy of a declaration (`void f(void);`, `extern s32 D_x;`)
+                # that now conflicts with the header's: without those copies, do they all still match?
+                rewrites = self._drop_own_declarations(proj, new_header, members, broken, new)
+                if rewrites:
+                    still = self.regression_test(proj, new_header, sources=rewrites, only=members)
+                    broken, rewrites = (still, {}) if still else ([], rewrites)
             if broken:
                 listing = "\n".join(f"- {name}: {why}" for name, why in broken[:10])
                 return (f"❌ REJECTED: the edit breaks {len(broken)} already-matched function(s), so the header "
@@ -839,13 +847,39 @@ class Network:
             with self.store.tx() as db:
                 if self._latest_version(db, proj["id"], unit) != ctx["version"]:
                     continue  # someone else committed meanwhile: re-apply on top and re-test
+                for fid, src in rewrites.items():
+                    db.execute("UPDATE functions SET matched_source=?, best_source=? WHERE id=? AND status='matched'",
+                               (src, src, fid))
                 version = self._next_version(db, proj["id"])
                 db.execute("INSERT INTO context_versions(project_id,version,header,agent_id,message,created_at,unit) "
                            "VALUES(?,?,?,?,?,?,?)", (proj["id"], version, new_header, agent.id, message.strip(), time.time(), unit))
                 self._event(db, proj["id"], agent.id, "context", f"v{version}{f' ({unit})' if unit else ''}: {message.strip()}")
             self._remember_header(proj, agent, header, new_header, message, version)
-            return f"✅ header is now v{version} (all {len(members)} matched functions that use it still match)."
+            extra = (f"; {len(rewrites)} matched sources lost their own conflicting copy of the declaration"
+                     if rewrites else "")
+            return f"✅ header is now v{version} (all {len(members)} matched functions that use it still match{extra})."
         raise NetworkError("the header is being edited heavily right now; re-read it and retry")
+
+    _DECLARED = re.compile(r"\b([A-Za-z_]\w*)\s*(?:\(|\[|;|=)")
+
+    def _drop_own_declarations(self, proj, header: str, members: list, broken: list, edit: str) -> dict[int, str]:
+        """For the broken matched functions: their source without its own one-line declarations (prototypes,
+        externs) of the names the edit declares. {} when that doesn't change any of them."""
+        names = {m.group(1) for line in edit.splitlines() if line.strip().endswith(";") and "{" not in line
+                 for m in [self._DECLARED.search(line.split("(")[0] + "(" if "(" in line else line)] if m}
+        names -= {"return", "if", "while", "for", "sizeof"}
+        if not names:
+            return {}
+        decl = re.compile(r"^[ \t]*(?:extern[ \t]+)?[A-Za-z_][\w \t\*]*?\b(" + "|".join(map(re.escape, names)) +
+                          r")\b[^;{}\n]*;[ \t]*$\n?", re.M)
+        bad = {name for name, _ in broken}
+        out = {}
+        for fn in members:
+            if fn["name"] in bad and fn["matched_source"]:
+                src = decl.sub("", fn["matched_source"])
+                if src != fn["matched_source"]:
+                    out[fn["id"]] = src
+        return out
 
     def rename_symbol(self, agent: Agent, project: str | None, old: str, new: str, message: str = "") -> str:
         """Project-wide refactor: rename an identifier (field, type, global, function param...) in every
