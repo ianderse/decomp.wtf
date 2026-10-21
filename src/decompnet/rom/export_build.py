@@ -319,7 +319,8 @@ def linker_script(provides: dict[str, str], gaps: list[tuple[int, str]], segment
     lines += [f'".L{label}" = 0x{label};' for label in sorted(_cross_labels())]
     # an auto-named symbol a function uses that its link doesn't define (inside a bigger data block, or another
     # overlay's): where its name says
-    lines += [f"PROVIDE({name} = 0x{name.rsplit('_', 1)[1]});" for name in sorted(_spelled_names(provides) - set(elsewhere or {}) - set(fixed or {}))]
+    lines += [f"PROVIDE({name} = 0x{re.match(r'\w+?_([0-9A-F]{8})', name).group(1)});"  # (aliases: D_80012340_x too)
+              for name in sorted(_spelled_names(provides) - set(elsewhere or {}) - set(fixed or {}))]
     lines += [f"PROVIDE({name} = 0x{addr:08X});" for name, addr in sorted((elsewhere or {}).items())]
     lines += [f"{name} = 0x{addr:08X};" for name, addr in sorted((fixed or {}).items()) if name not in B["symbols"]]
     # the segment symbols splat projects use (start-up code clears .bss with them)
@@ -366,7 +367,8 @@ def _spelled_names(provides: dict[str, str]) -> set[str]:
         sources = [ROOT / Path(obj).relative_to("build").with_suffix(".c") for obj in set(provides.values())
                    if obj.startswith("build/src/")] + list((ROOT / "asm" / "nonmatchings").glob("**/*.s"))
         for src in sources:
-            found.update(re.findall(r"\b(?:D|func|jtbl)_[0-9A-F]{8}\b", src.read_text(errors="replace", encoding="utf-8")))
+            found.update(re.findall(r"\b(?:D|func|jtbl)_[0-9A-F]{8}(?:_\w+)?\b", src.read_text(errors="replace",
+                                                                                          encoding="utf-8")))
         _CACHE[key] = found - set(B["symbols"])
     return _CACHE[key]
 

@@ -14,6 +14,10 @@ from dataclasses import dataclass
 
 # Automatic names spell their address: splat/spimdisasm (func_, D_...), luvdis and pret (sub_, gUnknown_), IDA style.
 AUTO_NAME = re.compile(r"^(?:func|D|B|jtbl|L|RO|STR|FLT|DBL|bss|data|sub|gUnknown|unk|off|dword|word|byte|loc)_([0-9A-Fa-f]{8})$")
+# an alias: an automatic name with a suffix (D_801A10F8_nogp) names the same address. Declared differently in one
+# function's own source (`extern s32 D_801A10F8_nogp[];`), it lets that function reach a variable the way its
+# original file did (here: with lui/%lo, where the shared header's declaration makes every other function use $gp)
+ALIAS_NAME = re.compile(r"^(?:func|D|B|jtbl|RO|STR|FLT|DBL)_([0-9A-Fa-f]{8})_\w+$")
 IDENT = re.compile(r"^[A-Za-z_]\w*$")
 
 
@@ -57,7 +61,7 @@ class SymbolTable:
         sym = self.by_name.get(name)
         if sym is not None:
             return sym.address
-        m = AUTO_NAME.match(name)
+        m = AUTO_NAME.match(name) or ALIAS_NAME.match(name)
         return int(m.group(1), 16) if m else None
 
     def name_at(self, address: int) -> tuple[str, int]:

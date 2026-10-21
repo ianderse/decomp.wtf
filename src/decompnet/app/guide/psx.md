@@ -11,6 +11,10 @@ CPU: MIPS R3000A (MIPS I). Things that look odd at first:
   *without* `extern` (`s32 D_8001B278;`): the compiler then treats them as small data. With `extern`
   it builds the full address and the function won't match. Arrays and structs larger than the limit
   are never gp-relative.
+- One variable, reached both ways: the header makes it gp-relative (other matches need that) but your
+  function's target builds the full address (`lui` + `%lo`). Use an *alias*: the automatic name plus a
+  suffix names the same address. In your function's own source, `extern s32 D_801A10F8_nogp[];` and
+  `D_801A10F8_nogp[0] = x;` (an array of unknown size is never gp-relative). Don't change the header.
 
 Compilers: PSY-Q SDK GCC 2.6/2.7.2/2.8.x and ASPSX versions differ in register allocation and
 instruction scheduling. Your code goes through GCC, then maspsx (Sony's assembler's delay-slot and nop rules),
