@@ -2433,6 +2433,7 @@ const LAYOUT = { gc: "dtk-template", wii: "dtk-template", nds: "ds-decomp" };
 const cwName = (c) => (c.startsWith("DS/") ? `CodeWarrior for DS ${c.slice(3)}` : `CodeWarrior ${c}`);
 
 /* ------------------------------------------------------------------ source: the base for ports and mods */
+const SRC_UI = { html: "", rawOpen: false };
 function renderSource(ov) {
   const ex = ov.export, fork = ov.kind === "fork";
   $("srcExport").hidden = fork || !ov.exportable;
@@ -2444,6 +2445,7 @@ function renderSource(ov) {
         + (rb ? `<p class="small ${rb.identical ? "ok" : "warn-text"}">${rb.identical ? "✓ The rebuilt game is your copy, byte for byte" + (/padding/.test(rb.detail) ? " (up to the padding at its end: your copy is trimmed)." : ".")
           : `The rebuilt game isn't your copy byte for byte yet: ${esc(rb.detail)}. Decompiling works anyway: every function is compared with your copy's own code.`}</p>` : "")
       : `This project <b>is</b> the source tree${ov.repo_url ? ` (a fork of <a class="link" href="${esc(ov.repo_url)}" target="_blank" rel="noopener">${esc(ov.repo_url.replace(/^https?:\/\//, ""))}</a>)` : ""}. Every match is committed to the <code>decomp-wtf</code> branch, ready to send upstream.`;
+    SRC_UI.html = "";
     $("srcState").innerHTML = `<div class="row"><button class="ghost small-btn" id="forkMeasure" type="button">Re-measure with objdiff</button>${rb ? `<button class="ghost small-btn" id="romCheck" type="button">Rebuild the game and compare</button>` : ""}</div>`;
     if (rb) $("romCheck").onclick = async () => {
       $("romCheck").disabled = true;
@@ -2465,21 +2467,28 @@ function renderSource(ov) {
   }
   if (!ov.exportable) {
     $("srcText").textContent = `Exporting a rebuildable project isn't available for ${ov.platform_name || "this platform"} yet. Your matched C is kept in the project.`;
+    SRC_UI.html = "";
     $("srcState").innerHTML = "";
     return;
   }
   $("srcText").innerHTML = "decomp.wtf writes a complete decompilation project: the matched functions as C, everything else as assembly, a linker script and <code>build.py</code>. Then it builds it to prove it rebuilds your game <b>byte for byte</b>. It's the base for ports and mods; game code and data stay out of git, so the tree is safe to put in a repository.";
   const stale = ex && ex.matched != null && ex.matched < ov.matched;
   const rl = ov.relink || {}, fails = (ex && ex.failures) || [];
-  $("srcState").innerHTML = !ex ? `<span class="muted small">Not exported yet.</span>`
+  const srcHtml = !ex ? `<span class="muted small">Not exported yet.</span>`
     : `<div class="src-line ${ex.identical === false ? "bad" : "ok"}">${ex.identical === false ? "✕ the last rebuild differed" : "✓ rebuilds byte for byte"}</div>
        <div class="src-line">${ex.matched != null ? `${ex.matched.toLocaleString()} of ${ex.functions.toLocaleString()} functions in C` : ""}${stale ? ` · <b>${ov.matched - ex.matched} new matches since</b>` : ""}</div>
        ${rl.state === "running" ? `<div class="src-line muted small">${rl.phase === "rebuilding" ? "Rebuilding the game now to check the new matches…" : "Checked again automatically after every 100 new matches and every header change."}</div>` : ""}
        ${fails.length ? `<div class="src-line warn-text">${fails.length} match${fails.length === 1 ? "" : "es"} didn't hold in the rebuilt game${ex.acted === false ? " (too many at once to be sure: listed, not given back)" : ex.reopened && ex.reopened.length ? `; ${ex.reopened.length} given back to agents` : ""}:</div>
          <ul class="src-fails small">${fails.slice(0, 12).map((f) => `<li><code>${esc(f.name)}</code>: ${esc(f.reason)}${f.again ? " <b>(again after it matched again: probably the check, not the C; left matched for you to look at)</b>" : ""}</li>`).join("")}${fails.length > 12 ? `<li class="muted">and ${fails.length - 12} more</li>` : ""}</ul>` : ""}
-       ${(ex.raw_addresses || []).length ? `<details class="src-line"><summary>${ex.raw_addresses.length} match${ex.raw_addresses.length === 1 ? "" : "es"} write a game address as a number instead of its name (byte-identical, but to clean up)</summary>
+       ${(ex.raw_addresses || []).length ? `<details class="src-line" id="srcRaw"${SRC_UI.rawOpen ? " open" : ""}><summary>${ex.raw_addresses.length} match${ex.raw_addresses.length === 1 ? "" : "es"} write a game address as a number instead of its name (byte-identical, but to clean up)</summary>
          <ul class="src-fails small">${ex.raw_addresses.slice(0, 40).map((r) => `<li><code>${esc(r.name)}</code>: ${r.addresses.map(esc).join(", ")}</li>`).join("")}${ex.raw_addresses.length > 40 ? `<li class="muted">and ${ex.raw_addresses.length - 40} more</li>` : ""}</ul></details>` : ""}
        ${ex.path ? `<div class="src-line">${esc(ex.path)}</div>` : ""}`;
+  // the page re-renders every few seconds: leave the panel alone unless it changed (an open list stays open)
+  if (srcHtml !== SRC_UI.html) {
+    SRC_UI.html = srcHtml;
+    $("srcState").innerHTML = srcHtml;
+    if ($("srcRaw")) $("srcRaw").ontoggle = () => { SRC_UI.rawOpen = $("srcRaw").open; };
+  }
   $("srcExport").textContent = ex ? "Export again" : "Export project";
 }
 $("srcOpen").onclick = () => openFolder();
