@@ -33,6 +33,9 @@ FACTORS = {
     "permuter": ("on", "off"),
     # a near miss is tried with the project's other compiler setups (network._alternate_match), or isn't
     "alternates": ("on", "off"),
+    # how many compiles without improvement before compile_and_diff says to move on: as usual, or twice that (does
+    # the long tail of hard functions reward staying longer? network._move_on)
+    "patience": ("normal", "long"),
 }
 DIFFERENCE = 0.05  # the smallest difference in match rate worth detecting (sample_size)
 BOOTSTRAP = 2000

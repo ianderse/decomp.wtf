@@ -764,7 +764,10 @@ class Network:
             row = self.store.one("SELECT n_insns FROM functions WHERE id=?", function_id)
             n = (row["n_insns"] if row else 0) or 0
             after = 4 if n < 64 else 6 if n < 128 else 8 if n < 256 else 10
-        rows = self.store.all("SELECT score FROM attempts WHERE function_id=? AND agent_id=? ORDER BY id DESC LIMIT 16",
+            proj = self.store.one("SELECT project_id FROM functions WHERE id=?", function_id)
+            if proj and experiments.arm(self.store, proj["project_id"], function_id, "patience") == "long":
+                after *= 2
+        rows = self.store.all("SELECT score FROM attempts WHERE function_id=? AND agent_id=? ORDER BY id DESC LIMIT 24",
                               function_id, agent_id)
         best, since = None, 0
         for r in reversed(rows):

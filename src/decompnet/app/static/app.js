@@ -2328,6 +2328,7 @@ const EXP_HELP = {
   tier: "tiered helpers use the model the tier table picks, always the strongest, or always the cheapest",
   permuter: "the permuters work on the function's near misses, or leave it alone",
   alternates: "near misses are tried with the game's other compiler setups, or aren't",
+  patience: "agents are told to move on after the usual number of compiles without improvement, or twice that",
 };
 async function renderExperiments(ov, force = false) {
   const box = $("experiments");
