@@ -203,7 +203,10 @@ def export_rom(net, slug: str, out: Path, log=print) -> dict:
     by_vram = {r["vram"]: r for r in all_rows}
     names = {r["name"] for r in all_rows}
     units = net._unit_contexts(proj["id"])
-    header = net._context(proj["id"])["header"]
+    # every header read once: an agent editing one while this runs would otherwise give the files written below
+    # one version and the compile check another (a match then "doesn't compile any more")
+    headers = {u: net._context(proj["id"], u)["header"] for u in {"", *units}}
+    header = headers[""]
     (out / "include").mkdir(exist_ok=True)
     gte = ""
     if platform == "psx":  # the trusted GTE macros every PS1 compile includes (psx_gte.py)
@@ -220,7 +223,7 @@ def export_rom(net, slug: str, out: Path, log=print) -> dict:
     fix = block_comments if oldc else (lambda text: text)
     (out / "include" / "common.h").write_text(gte + fix(header), encoding="utf-8")
     for u in units:
-        (out / "include" / f"common_{u}.h").write_text(gte + fix(net._context(proj["id"], u)["header"]), encoding="utf-8")
+        (out / "include" / f"common_{u}.h").write_text(gte + fix(headers[u]), encoding="utf-8")
     functions = []
     for path in sorted((out / "asm" / "nonmatchings").glob("**/*.s")):
         rom_off, vram = _first_address(path)
@@ -239,7 +242,7 @@ def export_rom(net, slug: str, out: Path, log=print) -> dict:
             f["kind"] = "asm"
             continue
         unit = net._effective_unit(row, units)
-        hdr = net._context(proj["id"], unit)["header"]
+        hdr = headers[unit or ""]
         own = own_source(row["matched_source"], row["name"], names)
         compiled = net._compile(proj, hdr, own, row)
         if not compiled.ok:
