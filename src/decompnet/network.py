@@ -190,6 +190,7 @@ class Network:
         self.agent_strategy: dict[int, str] = {}  # agent id -> its default claim order (helpers, see agents.Manager)
         self.tiered_agents: set[int] = set()  # agents in tiered helper sessions (the tier experiment counts only theirs)
         self.agent_lane: dict[int, str] = {}  # agent id -> this session's claim order, before agent_strategy (agents.py)
+        self.agent_region: dict[int, tuple[int, int]] = {}  # agent id -> [from, to): its session claims there
         self.memory = None  # long-term memory across games (memory.Memory: a Hindsight server), when set up
         self.claim_ttl = claim_ttl
         self._pool = ThreadPoolExecutor(max_workers=8)
@@ -546,7 +547,15 @@ class Network:
         if fn is None:
             proj = self._project(project)
             return f"Nothing left to claim in {proj['slug']} — every open function is matched or claimed. 🎉"
-        return self._brief(fn, agent, header="CLAIMED")
+        return self.region_note(agent, fn, function) + self._brief(fn, agent, header="CLAIMED")
+
+    def region_note(self, agent: Agent, fn, function: str | None = None) -> str:
+        """What a session kept to an address range is told when its claim comes from outside it."""
+        region = self.agent_region.get(agent.id)
+        if function or not region or fn["vram"] is None or region[0] <= fn["vram"] < region[1]:
+            return ""
+        return (f"(Nothing open and unclaimed is left in your address range {region[0]:08X}-{region[1]:08X}: this "
+                "function is from the rest of the game.)\n\n")
 
     def claim_row(self, agent: Agent, project: str | None = None, function: str | None = None,
                   strategy: str = "easiest"):
@@ -577,17 +586,24 @@ class Network:
                 db.execute("INSERT INTO claims VALUES(?,?,?,?)", (fn["id"], agent.id, now, now + self.claim_ttl))
                 self._event(db, fn["project_id"], agent.id, "claim", fn["name"])
             else:
-                fn = db.execute(
-                    f"""SELECT f.* FROM functions f WHERE f.project_id=? AND f.status='open'
-                        AND f.id NOT IN (SELECT function_id FROM claims)
-                        AND f.name NOT IN (SELECT detail FROM events WHERE project_id=? AND agent_id=? AND kind='release'
-                                           AND created_at > ?)
-                        ORDER BY f.name IN (SELECT detail FROM events WHERE project_id=? AND agent_id=? AND kind='release'),
-                                 f.name IN (SELECT detail FROM events WHERE project_id=? AND kind='release'
-                                            AND created_at > ?), {STRATEGIES[strategy]} LIMIT 1""",
-                    (proj["id"], proj["id"], agent.id, now - OWN_RELEASE_WINDOW, proj["id"], agent.id, proj["id"],
-                     now - RELEASE_COOLDOWN),
-                ).fetchone()
+                # a session kept to an address range claims in it; with nothing left there, the rest of the game
+                region = self.agent_region.get(agent.id)
+                for bounds in ([region] if region else []) + [None]:
+                    fn = db.execute(
+                        f"""SELECT f.* FROM functions f WHERE f.project_id=? AND f.status='open'
+                            {"AND f.vram >= ? AND f.vram < ?" if bounds else ""}
+                            AND f.id NOT IN (SELECT function_id FROM claims)
+                            AND f.name NOT IN (SELECT detail FROM events WHERE project_id=? AND agent_id=?
+                                               AND kind='release' AND created_at > ?)
+                            ORDER BY f.name IN (SELECT detail FROM events WHERE project_id=? AND agent_id=?
+                                                AND kind='release'),
+                                     f.name IN (SELECT detail FROM events WHERE project_id=? AND kind='release'
+                                                AND created_at > ?), {STRATEGIES[strategy]} LIMIT 1""",
+                        (proj["id"], *(bounds or ()), proj["id"], agent.id, now - OWN_RELEASE_WINDOW, proj["id"],
+                         agent.id, proj["id"], now - RELEASE_COOLDOWN),
+                    ).fetchone()
+                    if fn is not None:
+                        break
                 if fn is None:
                     return None
                 db.execute("INSERT INTO claims VALUES(?,?,?,?)", (fn["id"], agent.id, now, now + self.claim_ttl))

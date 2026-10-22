@@ -1454,13 +1454,16 @@ class RomNetwork(Network):
     def _batch_more(self, agent: Agent, proj, first, n: int) -> list:
         """Up to n more small open functions next to `first` (same file, nearest address), claimed for the agent."""
         now = time.time()
+        region = self.agent_region.get(agent.id)
+        if region and not (first["vram"] is not None and region[0] <= first["vram"] < region[1]):
+            region = None  # the first is from outside the range (nothing left in it): its neighbours, then
         with self.store.tx() as db:
             self._expire_claims(db)
             rows = db.execute(
                 "SELECT f.* FROM functions f WHERE f.project_id=? AND f.status='open' AND f.boost >= 0 AND f.n_insns <= ? "
-                "AND f.abandons = 0 AND f.unit=? AND f.id NOT IN (SELECT function_id FROM claims) "
-                "ORDER BY ABS(COALESCE(f.vram, 0) - ?), f.id LIMIT ?",
-                (proj["id"], BATCH_INSNS, first["unit"], first["vram"] or 0, n)).fetchall()
+                f"AND f.abandons = 0 AND f.unit=? {'AND f.vram >= ? AND f.vram < ? ' if region else ''}"
+                "AND f.id NOT IN (SELECT function_id FROM claims) ORDER BY ABS(COALESCE(f.vram, 0) - ?), f.id LIMIT ?",
+                (proj["id"], BATCH_INSNS, first["unit"], *(region or ()), first["vram"] or 0, n)).fetchall()
             for r in rows:
                 db.execute("INSERT INTO claims VALUES(?,?,?,?)", (r["id"], agent.id, now, now + self.claim_ttl))
                 self._event(db, proj["id"], agent.id, "claim", r["name"])
@@ -2203,8 +2206,16 @@ class RomNetwork(Network):
     def claim_row(self, agent: Agent, project: str | None = None, function: str | None = None, strategy: str = "easiest"):
         if function is None and project and not self.fork_slug(project):
             proj = self._project(project)
+            region = self.agent_region.get(agent.id)
+            if region and not self.store.one(  # the range is done: every pin, like the usual order after it
+                    "SELECT 1 FROM functions WHERE project_id=? AND status='open' AND vram >= ? AND vram < ? "
+                    "AND id NOT IN (SELECT function_id FROM claims)", proj["id"], *region):
+                region = None
             for name in self.cfg(proj).get("priority", []):
-                row = self.store.one("SELECT f.id, f.status FROM functions f WHERE f.project_id=? AND f.name=?", proj["id"], name)
+                row = self.store.one("SELECT f.id, f.status, f.vram FROM functions f WHERE f.project_id=? AND f.name=?",
+                                     proj["id"], name)
+                if row and region and not (row["vram"] is not None and region[0] <= row["vram"] < region[1]):
+                    continue  # a session kept to an address range takes the pins in it
                 held = self.store.one("SELECT 1 FROM claims WHERE agent_id=?", agent.id)
                 if row and row["status"] == "open" and not held and not self.store.one(
                         "SELECT 1 FROM claims WHERE function_id=?", row["id"]):

@@ -242,24 +242,30 @@ def next_function(net, slug: str, agent_id: int = 0):
             return held
     proj = net.project_row(slug)
     fork = bool(net.fork_slug(slug))
-    if not fork:
-        for name in net.cfg(proj).get("priority", []):
-            row = net.store.one("SELECT f.* FROM functions f WHERE f.project_id=? AND f.name=? AND f.status='open' "
-                                "AND f.id NOT IN (SELECT function_id FROM claims)", proj["id"], name)
-            if row is not None:
-                return row
+    region = None if fork else getattr(net, "agent_region", {}).get(agent_id)  # a session kept to an address range
     strategy = (getattr(net, "agent_lane", {}).get(agent_id) or getattr(net, "agent_strategy", {}).get(agent_id)
                 or ("finish" if fork else "easiest"))
-    return net.store.one(
-        f"""SELECT f.* FROM functions f WHERE f.project_id=? AND f.status='open'
-            AND f.id NOT IN (SELECT function_id FROM claims)
-            AND f.name NOT IN (SELECT detail FROM events WHERE project_id=? AND agent_id=? AND kind='release'
-                               AND created_at > ?)
-            ORDER BY f.name IN (SELECT detail FROM events WHERE project_id=? AND agent_id=? AND kind='release'),
-                     f.name IN (SELECT detail FROM events WHERE project_id=? AND kind='release'
-                                AND created_at > ?), {netmod.STRATEGIES[strategy]} LIMIT 1""",
-        proj["id"], proj["id"], agent_id, time.time() - netmod.OWN_RELEASE_WINDOW, proj["id"], agent_id, proj["id"],
-        time.time() - netmod.RELEASE_COOLDOWN)
+    for bounds in ([region] if region else []) + [None]:  # the range's pins and order; with it done, the usual ones
+        inside = "AND f.vram >= ? AND f.vram < ?" if bounds else ""
+        for name in [] if fork else net.cfg(proj).get("priority", []):
+            row = net.store.one("SELECT f.* FROM functions f WHERE f.project_id=? AND f.name=? AND f.status='open' "
+                                f"{inside} AND f.id NOT IN (SELECT function_id FROM claims)", proj["id"], name,
+                                *(bounds or ()))
+            if row is not None:
+                return row
+        row = net.store.one(
+            f"""SELECT f.* FROM functions f WHERE f.project_id=? AND f.status='open' {inside}
+                AND f.id NOT IN (SELECT function_id FROM claims)
+                AND f.name NOT IN (SELECT detail FROM events WHERE project_id=? AND agent_id=? AND kind='release'
+                                   AND created_at > ?)
+                ORDER BY f.name IN (SELECT detail FROM events WHERE project_id=? AND agent_id=? AND kind='release'),
+                         f.name IN (SELECT detail FROM events WHERE project_id=? AND kind='release'
+                                    AND created_at > ?), {netmod.STRATEGIES[strategy]} LIMIT 1""",
+            proj["id"], *(bounds or ()), proj["id"], agent_id, time.time() - netmod.OWN_RELEASE_WINDOW, proj["id"],
+            agent_id, proj["id"], time.time() - netmod.RELEASE_COOLDOWN)
+        if row is not None:
+            return row
+    return None
 
 
 # Claude Code's aliases always point at Anthropic's latest model of each kind.
@@ -634,6 +640,7 @@ class Session:
                 "model": (self.routed_model if self.tiered else self.options.get("model")) or "",
                 "tiered": self.tiered, "tier": self.tier, "tier_function": self.tier_function,
                 "effort": self.routed_effort if self.tiered else "", "usd": round(self.usd, 4), "tokens": self.tokens,
+                "region": "{:08X}-{:08X}".format(*self.options["region"]) if self.options.get("region") else "",
                 "feed": [f for f in self.feed if f["seq"] > since]}
 
 
@@ -858,6 +865,10 @@ class Manager:
             t0 = time.time()
             before = self._progress(agent.id)
             s.agent_id = agent.id
+            if (region := s.options.get("region")) and hasattr(self.net, "agent_region"):
+                self.net.agent_region[agent.id] = (int(region[0]), int(region[1]))  # its claims stay in the range
+            elif hasattr(self.net, "agent_region"):
+                self.net.agent_region.pop(agent.id, None)
             if s.tiered and hasattr(self.net, "tiered_agents"):
                 self.net.tiered_agents.add(agent.id)  # its claims count in a tier experiment (the others' can't)
                 # every other session takes the biggest open function, on the strongest tier (tier_for: "big"):
@@ -925,6 +936,8 @@ class Manager:
                 pass
         with self.net.store.tx() as db:  # release any claim the agent still holds so others can take it
             db.execute("DELETE FROM claims WHERE agent_id=?", (agent.id,))
+        if hasattr(self.net, "agent_region"):
+            self.net.agent_region.pop(agent.id, None)
 
     def tier(self, s: Session) -> tuple[str, str, str, str]:
         """(model, effort, tier, function) for a tiered session's next run (tier_for on what it'll claim next)."""

@@ -110,3 +110,28 @@ def test_hints_skip_the_check_for_a_best_attempt_far_off(tmp_path, monkeypatch):
     compiled.clear()
     net.refresh_toolchain_hints("game")  # nothing new: nothing compiled again
     assert compiled == []
+
+
+def test_a_session_kept_to_an_address_range_claims_in_it(tmp_path):
+    """Claims (and the helper's guess of its next one) come from the range, pins outside it wait; with nothing left
+    in it, the rest of the game, and the claim says so."""
+    from decompnet.app import agents
+
+    net = _project(tmp_path, [("small_out", 0x80010000, None, None, None), ("in_a", 0x8016A000, None, None, None),
+                              ("in_b", 0x8016B000, None, None, None), ("pinned_out", 0x80020000, None, None, None)])
+    with net.store.tx() as db:
+        db.execute("UPDATE functions SET n_insns=5 WHERE name IN ('small_out', 'pinned_out')")  # easiest first
+        db.execute("UPDATE projects SET config=json_set(config, '$.priority', json('[\"pinned_out\"]'))")
+    a = net.authenticate(net.register_agent("a", "you"))
+    b = net.authenticate(net.register_agent("b", "you"))
+    net.agent_region[a.id] = (0x8016A000, 0x80172000)
+    assert agents.next_function(net, "game", a.id)["name"] == "in_a"
+    assert agents.next_function(net, "game", b.id)["name"] == "pinned_out"
+    assert net.claim_row(a, "game")["name"] == "in_a"
+    with net.store.tx() as db:
+        db.execute("DELETE FROM claims")
+        db.execute("UPDATE functions SET status='matched' WHERE name LIKE 'in_%'")
+    assert agents.next_function(net, "game", a.id)["name"] == "pinned_out"  # the range is done: the usual order
+    text = net.claim(a, "game")
+    assert "Nothing open and unclaimed is left in your address range 8016A000-80172000" in text
+    assert "pinned_out" in text

@@ -1473,7 +1473,7 @@ function renderSessions(sessions) {
     const b = board.get(s.agent);
     const hour = b && b.compiles_hour ? `last hour: ${b.matched_hour || 0} matched from ${plural(b.compiles_hour, "compile")}` : "";
     const facts = [s.model ? esc(s.model) : "default model", s.runs ? `session ${s.runs}` : "", b && b.matched ? `<b class="ok">${b.matched} matched</b>` : "", b ? plural(b.compiles, "compile") : "", hour,
-      s.usd ? money(s.usd) : s.tokens ? `${(s.tokens / 1000).toFixed(0)}k tokens` : "", s.started_at ? `since ${clock(s.started_at).slice(0, 5)}` : ""].filter(Boolean);
+      s.usd ? money(s.usd) : s.tokens ? `${(s.tokens / 1000).toFixed(0)}k tokens` : "", s.region ? `in ${esc(s.region)}` : "", s.started_at ? `since ${clock(s.started_at).slice(0, 5)}` : ""].filter(Boolean);
     return `<div class="session"><div class="session-top"><span class="dot ${dot}"></span><b>${esc(s.label)}</b>
         <span class="state ${s.state === "error" ? "err" : ""}">${esc(STATE_TEXT[s.state] || s.state)}</span>
         <button class="ghost" data-stop="${esc(s.id)}" data-remove="${live ? "" : "1"}" type="button">${live ? "Stop" : "Remove"}</button></div>
@@ -1514,7 +1514,7 @@ $("stopAll").onclick = async () => {
 };
 
 /* ------------------------------------------------------------------ the launcher: agent, model, how many */
-const LZ = { kind: null, model: "", count: 1, per: null };
+const LZ = { kind: null, model: "", count: 1, per: null, region: "" };
 function launcherInit() {
   if (LZ.kind || !S.st) return;
   const l = S.st.settings.launcher || {};
@@ -1523,6 +1523,7 @@ function launcherInit() {
   LZ.kind = known ? known.id : (ready[0] ? ready[0].id : "api");
   LZ.model = known ? (l.model || "") : "";
   LZ.count = l.count || 1;
+  LZ.region = l.region || "";
   const eps = S.st.settings.endpoints || [];
   LZ.eps = (l.endpoints || []).filter((id) => eps.some((e) => e.id === id));
   if (!LZ.eps.length && eps.length) LZ.eps = [eps[0].id];
@@ -1554,8 +1555,9 @@ async function startAgents(a, model, count, btn, extra = {}) {
     const options = { ...extra };
     if (model && a.id !== "api") options.model = model;
     if (LZ.per) options.per_session = LZ.per;
+    if (LZ.region) options.region = LZ.region;
     await api("/api/agents/start", { method: "POST", body: { kind: a.id, slug: S.slug, count, options } });
-    S.st.settings.launcher = { kind: a.id, model: model || "", count };
+    S.st.settings.launcher = { kind: a.id, model: model || "", count, region: LZ.region };
     if (model && a.id !== "api") {
       const rec = (S.st.settings.recent_models ||= {});
       rec[a.id] = [model, ...(rec[a.id] || []).filter((m) => m !== model)].slice(0, 8);
@@ -1605,7 +1607,8 @@ function renderLauncher(box, compact = false) {
     <div class="lz-body">${body}
       ${ready ? `<div class="lz-row">
         <div class="field"><span>How many</span><span class="stepper"><button type="button" data-step="-1">−</button><output>${LZ.count}</output><button type="button" data-step="1">+</button></span></div>
-        ${compact ? "" : `<label class="field"><span>Functions per session</span><input data-f="per" type="number" min="1" max="20" value="${LZ.per || S.st.settings.per_session || 2}"></label>`}
+        ${compact ? "" : `<label class="field"><span>Functions per session</span><input data-f="per" type="number" min="1" max="20" value="${LZ.per || S.st.settings.per_session || 2}"></label>
+        <label class="field"><span>Only functions in address range</span><input data-f="region" class="mono" placeholder="8016A000-80172000" spellcheck="false" value="${esc(LZ.region)}"></label>`}
         <span class="grow"></span>
         <button class="primary" data-act="start" type="button">${esc(launchLabel(a, LZ.model, LZ.count))}</button></div>
         <p class="muted small">${a.id === "api" ? "A built-in agent loop drives the model through the decomp tools." : esc(a.signin)} Each agent takes a different function; a fresh session every few functions keeps its context small.</p>` : ""}
@@ -1625,6 +1628,8 @@ function renderLauncher(box, compact = false) {
   box.querySelectorAll("[data-step]").forEach((b) => { b.onclick = () => { LZ.count = Math.max(1, Math.min(8, LZ.count + Number(b.dataset.step))); box.querySelector(".stepper output").textContent = LZ.count; label(); }; });
   const per = box.querySelector('[data-f="per"]');
   if (per) per.onchange = () => { LZ.per = Math.max(1, Math.min(20, Number(per.value) || 4)); };
+  const region = box.querySelector('[data-f="region"]');
+  if (region) region.oninput = () => { LZ.region = region.value.trim(); };
   wireEndpointFields(box);
   box.querySelectorAll("[data-ep]").forEach((c) => { c.onchange = () => { LZ.eps = [...box.querySelectorAll("[data-ep]:checked")].map((x) => x.dataset.ep); label(); }; });
   const addEp = box.querySelector('[data-act="add-ep"]'), pickEp = box.querySelector('[data-act="pick-ep"]');

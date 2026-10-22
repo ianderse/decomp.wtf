@@ -918,8 +918,15 @@ def build(net: RomNetwork, home: Path, port: int, secret: str):
         options.setdefault("per_session", settings.data.get("per_session", agents.PER_SESSION))
         count = max(1, min(int(data.get("count", 1)), 8))
         picked: list[str] = []
+        region = str(given.get("region") or "").strip()
         try:
             net.project_row(slug)
+            if region:  # "8016A000-80172000": the sessions claim only in that range [from, to) while it has work
+                lo, _, hi = region.partition("-")
+                lo, hi = net.parse_address(lo), net.parse_address(hi)
+                if net.fork_slug(slug) or not 0 <= lo < hi <= 0xFFFFFFFF:
+                    raise ValueError("an address range is from-to in hex, the end after the start (a ROM project's)")
+                options["region"] = [lo, hi]
             if kind == "api":
                 picked = [str(e) for e in (given.get("endpoints") or ([given["endpoint"]] if given.get("endpoint") else []))]
                 plan = _spread(settings, manager, picked, count, given)
@@ -931,6 +938,8 @@ def build(net: RomNetwork, home: Path, port: int, secret: str):
         # remembered, so the next start is one click; models typed in come back as suggestions
         model = str(options.get("model") or "")
         settings.data["launcher"] = {"kind": kind, "model": model, "count": count} | ({"endpoints": picked} if picked else {})
+        if region:
+            settings.data["launcher"]["region"] = region
         if model and kind != "api" and model != agents.TIERED:  # offered already, not a typed name
             recent = settings.data.setdefault("recent_models", {}).setdefault(kind, [])
             settings.data["recent_models"][kind] = [model] + [m for m in recent if m != model][:7]
