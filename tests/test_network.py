@@ -253,3 +253,36 @@ def test_big_functions_get_more_compiles_before_the_nudge_to_move_on(net, agents
     with net.store.tx() as db:
         db.execute("UPDATE functions SET n_insns=300 WHERE id=?", (fn["id"],))
     assert net.stall_note(fn["id"], alice.id) == ""  # a big one: not before 10
+
+
+def test_the_nudge_to_move_on_counts_the_current_claim_only(tmp_path):
+    """An agent back on a function it tried before isn't told to move on after its first compile of the new
+    claim: the count starts at the claim."""
+    net = Network(tmp_path / "test.db")  # no build needed: a project and a function row
+    with net.store.tx() as db:
+        pid = db.execute("INSERT INTO projects(slug,name,description,arch,big_endian,root,config) VALUES(?,?,?,?,?,?,?)",
+                         ("game", "Game", "", "mips", 0, str(tmp_path), "{}")).lastrowid
+        db.execute("INSERT INTO functions(project_id,name,size,n_insns) VALUES(?,?,?,?)", (pid, "clamp_s32", 40, 10))
+    alice = net.authenticate(net.register_agent("alice-claude", "alice"))
+    fn = net.store.one("SELECT id, name FROM functions WHERE name='clamp_s32'")
+    with net.store.tx() as db:
+        for score in [50] + [60] * 9:  # an earlier claim: 9 compiles that didn't beat 50
+            db.execute("INSERT INTO attempts(function_id,agent_id,score,compiled,source,created_at) VALUES(?,?,?,?,?,?)",
+                       (fn["id"], alice.id, score, 1, "x", 100))
+    assert "No better in your last 9" in net.stall_note(fn["id"], alice.id)  # no claim at all: every attempt
+    with net.store.tx() as db:
+        db.execute("INSERT INTO claims VALUES(?,?,?,?)", (fn["id"], alice.id, 200, 10**10))
+        for score in (60, 60):  # the new claim: a baseline rerun, then one more
+            db.execute("INSERT INTO attempts(function_id,agent_id,score,compiled,source,created_at) VALUES(?,?,?,?,?,?)",
+                       (fn["id"], alice.id, score, 1, "x", 201))
+    assert net.stall_note(fn["id"], alice.id) == ""
+    with net.store.tx() as db:  # the claim row gone (expired, released): the latest claim event marks the claim
+        db.execute("DELETE FROM claims")
+        db.execute("INSERT INTO events(project_id,agent_id,kind,detail,created_at) "
+                   "SELECT project_id, ?, 'claim', name, 200 FROM functions WHERE id=?", (alice.id, fn["id"]))
+    assert net.stall_note(fn["id"], alice.id) == ""
+    with net.store.tx() as db:
+        for _ in range(4):
+            db.execute("INSERT INTO attempts(function_id,agent_id,score,compiled,source,created_at) VALUES(?,?,?,?,?,?)",
+                       (fn["id"], alice.id, 70, 1, "x", 202))
+    assert "No better in your last 5" in net.stall_note(fn["id"], alice.id)  # 6 in this claim, best the first

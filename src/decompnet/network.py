@@ -756,10 +756,12 @@ class Network:
         return {"text": f"{head}\n{d.render()}{warn}{self.stall_note(fn['id'], agent.id)}", "score": d.score, "matched": False}
 
     def stall_note(self, function_id: int, agent_id: int, after: int | None = None) -> str:
-        """A nudge once an agent's last `after` compiles of a function didn't beat its best: functions that match
-        mostly do in the first few tries, and the agent's time is better spent on the next one. Big functions get
-        longer (a quarter of Mario Party 6's agent matches over 64 instructions took more than 4 compiles, and
-        those functions hold most of the code left)."""
+        """A nudge once an agent's last `after` compiles of a function, in its current claim, didn't beat its best
+        in that claim: functions that match mostly do in the first few tries, and the agent's time is better spent
+        on the next one. Big functions get longer (a quarter of Mario Party 6's agent matches over 64 instructions
+        took more than 4 compiles, and those functions hold most of the code left). Counted per claim: counted
+        over every claim, an agent re-claiming a function it had tried was told to move on after one compile
+        (SLUS-01252: 596 of codex-1's 783 claims in a day lasted under a minute)."""
         if after is None:
             row = self.store.one("SELECT n_insns FROM functions WHERE id=?", function_id)
             n = (row["n_insns"] if row else 0) or 0
@@ -767,8 +769,10 @@ class Network:
             proj = self.store.one("SELECT project_id FROM functions WHERE id=?", function_id)
             if proj and experiments.arm(self.store, proj["project_id"], function_id, "patience") == "long":
                 after *= 2
-        rows = self.store.all("SELECT score FROM attempts WHERE function_id=? AND agent_id=? ORDER BY id DESC LIMIT 24",
-                              function_id, agent_id)
+        start = self._claim_start(function_id, agent_id)
+        rows = self.store.all("SELECT score FROM attempts WHERE function_id=? AND agent_id=?"
+                              + (" AND created_at>=?" if start is not None else "") + " ORDER BY id DESC LIMIT 24",
+                              function_id, agent_id, *(() if start is None else (start,)))
         best, since = None, 0
         for r in reversed(rows):
             if r["score"] is not None and (best is None or r["score"] < best):
@@ -780,6 +784,16 @@ class Network:
         return (f"\n\n⏭ No better in your last {since} compiles. release_function with notes (what you tried, what's "
                 "left) and claim the next one: functions that match mostly do in the first few tries, and this one "
                 "keeps your best attempt for whoever comes next.")
+
+    def _claim_start(self, function_id: int, agent_id: int) -> float | None:
+        """When the agent's current claim of a function began: its claim row, else its latest claim event, else
+        None."""
+        row = self.store.one("SELECT claimed_at FROM claims WHERE function_id=? AND agent_id=?", function_id, agent_id)
+        if row is not None:
+            return row["claimed_at"]
+        row = self.store.one("SELECT MAX(e.created_at) AS t FROM events e JOIN functions f ON f.project_id=e.project_id "
+                             "AND f.name=e.detail WHERE f.id=? AND e.agent_id=? AND e.kind='claim'", function_id, agent_id)
+        return row["t"] if row else None
 
     def _record(self, fn, agent: Agent, score: int | None, source: str, ctx_version: int, matched: bool = False,
                 compiled: bool | None = None, via: str = "agent"):
