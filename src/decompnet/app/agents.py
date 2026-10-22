@@ -1251,6 +1251,9 @@ def fit(messages: list[dict], budget: int) -> int:
 BRIEF = re.compile(r"## (CLAIMED|VIEW)\b")  # a brief's first line (a batch's: "## CLAIMED 3 small functions: a, b, c")
 
 
+LOCAL_CONTEXT = 32768  # at most this much of a local server's model context, unless the user set a number
+
+
 def context_window(client, base: str, options: dict) -> int:
     """The model's context in tokens: what the user set, else what a llama.cpp server reports (/props), else a
     guess (local servers often run small contexts)."""
@@ -1274,7 +1277,9 @@ def context_window(client, base: str, options: dict) -> int:
                 if m.get("id") == options.get("model") or len(r.json()["data"]) == 1:
                     n = m.get("max_model_len") or m.get("context_length") or m.get("max_context_length")
                     if isinstance(n, int) and n >= 2048:
-                        return n
+                        # not all of it: a local model reprocesses the whole conversation every turn (on oMLX,
+                        # 2,000 tokens took 2 s, 20,000 12 s: at 180,000 a turn took minutes and claims ran out)
+                        return min(n, LOCAL_CONTEXT)
         except (httpx.HTTPError, ValueError, AttributeError, KeyError):
             pass
         return 16384
