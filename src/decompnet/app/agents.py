@@ -184,9 +184,10 @@ HAIKU, SONNET, OPUS = "haiku", "sonnet", "opus"  # Claude Code's aliases: Anthro
 # tier -> (model, effort), per agent; thresholds are fractions of the worst score (n_insns * 100: all wrong)
 TIERS = {
     "big": (OPUS, "high"),             # BIG_INSNS instructions or more: the most code per match, the hardest
-    "escalated": (OPUS, "high"),       # still far off after STALL_ATTEMPTS attempts: the structure isn't found yet
-    "near_miss": (HAIKU, "medium"),       # within NEAR_MISS: operands and registers left, compile and adjust
-    "mechanical": (HAIKU, "medium"),      # within MECHANICAL: the structure is there, keep adjusting
+    "escalated": (OPUS, "high"),       # worked over (ESCALATE_ABANDONS / ESCALATE_ATTEMPTS), or still far off after
+                                       # STALL_ATTEMPTS attempts: what the cheaper tiers didn't finish
+    "near_miss": (HAIKU, "medium"),       # within NEAR_MISS, not worked over: operands and registers left
+    "mechanical": (HAIKU, "medium"),      # within MECHANICAL, not worked over: the structure is there, keep adjusting
     "fresh": (SONNET, "medium"),       # nothing compiled yet: the first structural attempt
     "structural": (SONNET, "medium"),  # far off: the structure is still to find
 }
@@ -205,11 +206,16 @@ BIG_INSNS = 150  # this many instructions or more: the strongest tier from the f
 # experiment: 75% of functions matched on the strongest tier, 59% on the table's choice, 2026-10-20)
 MECHANICAL = 0.40
 STALL_ATTEMPTS = 10  # attempts (every agent's) after which a far-off function goes to Opus
+ESCALATE_ABANDONS = 3  # abandons after which a function goes to Opus whatever its score (SLUS-01252's 194 near
+# misses averaged 90 attempts and 8 abandons: they had outlasted every agent and the permuter, 2026-10-22)
+ESCALATE_ATTEMPTS = 30  # attempts (every agent's) after which a function goes to Opus whatever its score
 EFFORTS = ("low", "medium", "high", "xhigh", "max")  # what Claude Code's --effort takes
 
 
 def tier_for(state: dict, kind: str = "claude") -> tuple[str, str, str]:
-    """(model, effort, tier) for a function: best_score (None = nothing compiled yet), n_insns, attempts."""
+    """(model, effort, tier) for a function: best_score (None = nothing compiled yet), n_insns, attempts,
+    abandons. A function worked over (ESCALATE_ABANDONS, ESCALATE_ATTEMPTS) goes to the strongest tier whatever its
+    score: a near miss that outlasted every agent isn't an easy one."""
     table = TIER_TABLES.get(kind, TIERS)
     best = state.get("best_score")
     if int(state.get("n_insns") or 0) >= BIG_INSNS:
@@ -218,7 +224,9 @@ def tier_for(state: dict, kind: str = "claude") -> tuple[str, str, str]:
         tier = "fresh"
     else:
         frac = float(best) / (max(int(state.get("n_insns") or 0), 1) * 100)
-        tier = ("escalated" if int(state.get("attempts") or 0) >= STALL_ATTEMPTS and frac > MECHANICAL else
+        attempts, abandons = int(state.get("attempts") or 0), int(state.get("abandons") or 0)
+        worked_over = abandons >= ESCALATE_ABANDONS or attempts >= ESCALATE_ATTEMPTS
+        tier = ("escalated" if worked_over or (attempts >= STALL_ATTEMPTS and frac > MECHANICAL) else
                 "near_miss" if frac <= NEAR_MISS else "mechanical" if frac <= MECHANICAL else "structural")
     return *table[tier], tier
 
@@ -926,7 +934,8 @@ class Manager:
         except Exception:  # best effort: a helper still starts
             fn = None
         if fn is not None:
-            state, name = {"best_score": fn["best_score"], "n_insns": fn["n_insns"], "attempts": fn["attempts"]}, fn["name"]
+            state, name = {"best_score": fn["best_score"], "n_insns": fn["n_insns"], "attempts": fn["attempts"],
+                           "abandons": fn["abandons"]}, fn["name"]
         model, effort, tier = tier_for(state, s.kind)
         if fn is not None:  # a tier experiment: the strongest tier's model, or the cheapest's, instead
             forced = {"strong": "escalated", "cheap": "near_miss"}.get(

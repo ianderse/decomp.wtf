@@ -164,3 +164,15 @@ def test_antigravity_helpers_say_when_it_isnt_connected(tmp_path, monkeypatch):
     s.runs = 1
     with pytest.raises(agents.Fatal, match="decomp connect antigravity"):
         m._run_cli(s, "tok", tmp_path)
+
+
+def test_worked_over_functions_go_to_the_strongest_tier_whatever_their_score():
+    """A near miss that outlasted every agent isn't an easy one: abandons and attempts escalate it; size still
+    comes first."""
+    near = {"best_score": 50, "n_insns": 20}  # 2.5% of the worst score
+    assert agents.tier_for({**near, "attempts": 5, "abandons": 0})[2] == "near_miss"
+    assert agents.tier_for({**near, "attempts": 5, "abandons": 8}) == (agents.OPUS, "high", "escalated")
+    assert agents.tier_for({**near, "attempts": 30, "abandons": 0})[2] == "escalated"
+    assert agents.tier_for({**near, "attempts": 5, "abandons": 8}, "codex")[0] == "gpt-6.1-sol"
+    assert agents.tier_for({"best_score": 50, "n_insns": 150, "attempts": 90, "abandons": 8})[2] == "big"
+    assert agents.tier_for({"best_score": None, "n_insns": 20, "attempts": 0, "abandons": 0})[2] == "fresh"

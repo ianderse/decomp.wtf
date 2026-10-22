@@ -13,7 +13,9 @@ Results so far:
   act on.) Cost per match wasn't measured: Claude Code reports its cost when a session ends, after its claim, and
   the charge went nowhere (fixed: it goes to the function the agent claimed last).
   **Acted on:** functions of 150+ instructions go to the strongest tier from the first try, and every other tiered
-  session takes the biggest open function (agents.py BIG_INSNS, the "biggest" claim order).
+  session takes the biggest open function (agents.py BIG_INSNS, the "biggest" claim order). Then (2026-10-22) the
+  worked-over residue too: 3+ abandons or 30+ attempts go to the strongest tier whatever the score (agents.py
+  ESCALATE_ABANDONS, ESCALATE_ATTEMPTS; SLUS-01252's 194 "near misses" averaged 90 attempts and 8 abandons).
   **Next:** with cost recorded, a tier experiment on the smaller functions (auto vs strong) to see whether the
   strong tier pays for itself there too.
 

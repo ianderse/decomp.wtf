@@ -62,8 +62,8 @@ produces, and respect the rules of projects that don't want AI-made contribution
   panel can show whether it helps.
 - **Tiered Claude Code and Codex helpers (optional).** With "Pick the model per function" switched on in the
   launcher, each session picks a model for the function it's about to claim, by how close that function is to
-  matching: Haiku, Sonnet or Opus for Claude Code (ported from SynapticDreams); GPT-6-Luna or GPT-6.1-Sol
-  (high effort for the hardest) for Codex.
+  matching and how long it has resisted (big or worked-over functions get the strongest): Haiku, Sonnet or Opus
+  for Claude Code (ported from SynapticDreams); GPT-6-Luna or GPT-6.1-Sol (high effort for the hardest) for Codex.
 - **Sturdier sessions:** a session that prints nothing for 15 minutes is restarted; a plan's usage limit makes a
   helper wait instead of stopping; helpers from a killed run release their claims at startup; agents can set a
   function aside for a person with `flag_for_review`, and you can give it back from its drawer.
