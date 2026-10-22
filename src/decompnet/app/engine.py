@@ -93,6 +93,10 @@ FINGERPRINTS = {
     "ori for li": re.compile(r"\bori\s+\$\w+,\s*\$zero,", re.IGNORECASE),
 }
 HINT_NEIGHBOURS, HINT_AGREE = 8, 3
+# a best attempt further off than this share of the worst score says nothing about which compiler is right: the hint
+# applies without checking it scores better (SLUS-01252: 31 libsnd functions refused gcc-2.8.1-psx@2.34 because
+# attempts tuned ~90 times for 2.7.2 scored worse with it, and agents kept tuning for the wrong compiler)
+HINT_FAR_OFF = 0.10
 # a set-aside function that is Sony's code: a PSY-Q library function (identify_psyq) or a BIOS call stub
 SONY = "(status='asm' AND (meta LIKE '%\"library\"%' OR meta LIKE '%BIOS call stub%'))"  # refresh_toolchain_hints: matched functions to look at, and to agree
 PLATFORM_COMPILERS = {"n64": ["gcc-2.7.2-kmc", "ido-7.1", "ido-5.3"], "psx": ["gcc-2.7.2-psx", "gcc-2.8.1-psx"],
@@ -868,7 +872,7 @@ class RomNetwork(Network):
                 got[t] = 0 if exact else scoring.diff(self._target_obj(fn, proj), cand).score if cand else 1 << 30
             return got[tc] <= got[main]
         changed = 0
-        updates = []
+        updates, rescore = [], []
         for label, rx in FINGERPRINTS.items():
             marked = [r for r in rows if rx.search(r["asm"])]
             done = [(r["unit"], r["vram"], self.fn_toolchain(r) or main) for r in marked if r["status"] == "matched"]
@@ -882,7 +886,8 @@ class RomNetwork(Network):
                 votes = collections.Counter(tc for _, tc in near)
                 best, n = votes.most_common(1)[0] if votes else (None, 0)
                 want = best if best and best != main and n >= HINT_AGREE and 2 * n >= len(near) else None
-                if want:  # and its best attempt agrees (one tuned close to a match with the project's setup: no)
+                far = r["best_score"] is None or r["best_score"] / (max(r["n_insns"] or 0, 1) * 100) > HINT_FAR_OFF
+                if want and not far:  # and its best attempt agrees (one tuned close to a match with the project's: no)
                     seen = meta.get("hint_checked")
                     if seen and seen[0] == want and seen[1] == r["best_score"]:
                         ok = seen[2]
@@ -904,10 +909,24 @@ class RomNetwork(Network):
                     else:
                         meta.pop("toolchain", None)
                 updates.append((json.dumps(meta) if meta else None, r["id"]))
+                rescore.append(r["id"])
         if updates:
             with self.store.tx() as db:
                 db.executemany("UPDATE functions SET meta=? WHERE id=? AND status='open'", updates)
             changed = len(updates)
+        for fid in rescore:  # its compiler changed: its best score is judged again with the new one
+            fn = self.store.one("SELECT * FROM functions WHERE id=? AND status='open'", fid)
+            if fn is None or not fn["best_source"]:
+                continue
+            try:
+                score = self._rescore_best(proj, fn, self.fn_toolchain(fn))
+            except Exception:  # the old score stays
+                continue
+            meta = json.loads(fn["meta"] or "{}")
+            if (seen := meta.get("hint_checked")) and seen[0] == self.fn_toolchain(fn):
+                meta["hint_checked"] = [seen[0], score, seen[2]]  # still what it found, at the new score
+                with self.store.tx() as db:
+                    db.execute("UPDATE functions SET meta=? WHERE id=? AND status='open'", (json.dumps(meta), fid))
         return changed
 
     def start_alikes(self, slug: str) -> None:

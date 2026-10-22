@@ -23,8 +23,9 @@ def _project(tmp_path, rows):
                    "VALUES(?,?,?,?,?,?,?)", (pid, 1, "", None, "", time.time(), ""))
         for name, vram, meta, best, src in rows:
             db.execute("INSERT INTO functions(project_id,name,size,n_insns,vram,meta,best_score,best_source,relocs,"
-                       "rom_offset) VALUES(?,?,?,?,?,?,?,?,?,?)", (pid, name, 40, 10, vram, json.dumps(meta) if meta
-                                                                   else None, best, src, "[]", vram - 0x80000000))
+                       "rom_offset,asm) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                       (pid, name, 40, 10, vram, json.dumps(meta) if meta else None, best, src, "[]",
+                        vram - 0x80000000, "ori $v0, $zero, 1\njr $ra"))
     return net
 
 
@@ -84,3 +85,28 @@ def test_ranges_set_over_each_other_keep_what_the_latest_leaves(tmp_path, monkey
         net.check_region("game", "80010000", "80000000", OTHER)
     with pytest.raises(ValueError):
         net.check_region("game", "80000000", "80010000", "ido-7.1")  # an N64 compiler
+
+
+def test_hints_skip_the_check_for_a_best_attempt_far_off(tmp_path, monkeypatch):
+    """A best attempt nowhere near matching gets the neighbours' compiler without being compiled both ways (then
+    judged again with it); a close one still has to score at least as well with it."""
+    near = [(f"m{i}", 0x80010000 + 0x100 * i, {"toolchain": OTHER}, None, None) for i in range(4)]
+    net = _project(tmp_path, near + [("far", 0x80010500, None, 500, "int f;"),  # 50% of the worst score
+                                     ("close", 0x80010600, None, 50, "int c;")])  # 5%
+    with net.store.tx() as db:
+        db.execute("UPDATE functions SET status='matched' WHERE name LIKE 'm%'")
+    compiled = []
+
+    def compile_(proj, header, source, fn=None, toolchain=None):
+        compiled.append((fn["name"], toolchain))
+        return SimpleNamespace(ok=toolchain == MAIN, obj=b"")  # the close one matches with the project's compiler
+    monkeypatch.setattr(net, "_compile", compile_)
+    monkeypatch.setattr(net, "_evaluate", lambda fn, proj, obj: (object(), True, []))
+    assert net.refresh_toolchain_hints("game") >= 2
+    assert _meta(net, "far")["toolchain"] == OTHER and "toolchain_hint" in _meta(net, "far")
+    assert "toolchain" not in _meta(net, "close") and _meta(net, "close")["hint_checked"] == [OTHER, 50, False]
+    assert sorted(compiled) == [("close", MAIN), ("close", OTHER), ("far", OTHER)]  # far: only its rescore
+    assert _best(net, "far") == 1000 and _best(net, "close") == 50
+    compiled.clear()
+    net.refresh_toolchain_hints("game")  # nothing new: nothing compiled again
+    assert compiled == []
