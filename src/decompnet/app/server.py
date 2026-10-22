@@ -648,6 +648,12 @@ def build(net: RomNetwork, home: Path, port: int, secret: str):
     def p_priority(slug, request, data):
         return {"priority": net.set_priority(slug, str(data.get("name", "")), bool(data.get("on", True)))}
 
+    def p_region(slug, request, data):
+        """You say which compiler built an address range (toolchain null: clear it). Its functions' best attempts are
+        judged again with it, a compile each: a job, whose result is the ranges with their counts."""
+        lo, hi, tc = net.check_region(slug, data.get("from"), data.get("to"), data.get("toolchain") or None)
+        return {"job": jobs.start("region", lambda log: net.set_region(slug, lo, hi, tc, log=log))}
+
     def p_note(slug, request, data):
         """A note from you on a function (or the whole project): agents read notes when they claim it."""
         agent, _ = net.local_agent("you")
@@ -693,7 +699,7 @@ def build(net: RomNetwork, home: Path, port: int, secret: str):
         "/api/autopilot": (p_autopilot, ["POST"]), "/api/instructions": (p_instructions, ["POST"]),
         "/api/reopen": (p_reopen, ["POST"]),
         "/api/experiments": (p_experiments, ["GET", "POST"]),
-        "/api/priority": (p_priority, ["POST"]), "/api/note": (p_note, ["POST"]),
+        "/api/priority": (p_priority, ["POST"]), "/api/note": (p_note, ["POST"]), "/api/region": (p_region, ["POST"]),
         "/api/stats": (lambda s, r, d: net.stats(s) | {"permuter_remote": remote_permuter.status.get(s)}, ["GET"]),
     }
     for path, (fn, methods) in routes.items():

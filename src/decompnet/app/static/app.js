@@ -2276,7 +2276,48 @@ function renderSteering(ov) {
   $("spendLine").textContent = sp && sp.usd ? `· ${money(sp.usd)} spent${n ? ` · ${money(sp.usd / n)}/match` : ""}`
     : sp && sp.tokens ? `· ${(sp.tokens / 1000).toFixed(0)}k tokens` : "";
   $("instrState").textContent = ov.instructions ? "agents get these" : "none yet";
+  renderRegions(ov);
 }
+/* Compiler for an address range: the setups to pick from are the platform's compilers plus the ones functions
+   matched with (gcc-2.8.1-psx@2.34: another assembler version), filled once per set of options. */
+function renderRegions(ov) {
+  $("regionPanel").hidden = ov.kind === "fork";
+  if (ov.kind === "fork") return;
+  const sel = $("regionTc");
+  const extra = [...new Set([...(ov.compilers_used || []).map((r) => r.spec), ...Object.keys(ov.survey?.matches || {})])];
+  const key = JSON.stringify([ov.slug, ov.platform, extra, (S.st?.toolchains || []).length]);
+  if (sel.dataset.key !== key && S.st) {
+    const keep = sel.value;
+    fillCompilers(sel, ov.compiler.toolchain, { n64: "N64", psx: "PS1", ps2: "PS2", gba: "GBA" }[ov.platform]);
+    const have = new Set([...sel.options].map((o) => o.value));
+    sel.insertAdjacentHTML("beforeend", extra.filter((v) => !have.has(v)).map((v) => `<option value="${esc(v)}">${esc(v)}</option>`).join(""));
+    if (keep && [...sel.options].some((o) => o.value === keep)) sel.value = keep;
+    sel.dataset.key = key;
+  }
+  const list = ov.regions || [];
+  const hex = (n) => n.toString(16).toUpperCase().padStart(8, "0");
+  $("regionState").textContent = list.length ? `${list.length} set` : "none";
+  $("regionList").innerHTML = list.map((r) => `<li><span class="mono">${hex(r.from)}-${hex(r.to)}</span>&nbsp;${esc(r.toolchain)}<span class="grow"></span><span class="muted small">${r.open} open · ${r.matched} matched</span>&nbsp;<button class="link-btn" data-region="${r.from},${r.to}" type="button">clear</button></li>`).join("");
+  $("regionList").querySelectorAll("[data-region]").forEach((b) => {
+    b.onclick = () => { const [f, t] = b.dataset.region.split(","); setRegion(hex(+f), hex(+t), null); };
+  });
+}
+async function setRegion(from, to, toolchain) {
+  $("regionSet").disabled = $("regionClear").disabled = true;
+  $("regionLog").hidden = false;
+  try {
+    const { job } = await api("/api/region", { method: "POST", body: { slug: S.slug, from, to, toolchain } });
+    const r = await followJob(job, $("regionLog"));
+    S.ov.regions = r.regions;
+    renderRegions(S.ov);
+    toast(esc(r.message));
+  } catch (e) { toast(esc(e.message), "err"); } finally {
+    $("regionSet").disabled = $("regionClear").disabled = false;
+    $("regionLog").hidden = true;
+  }
+}
+$("regionSet").onclick = () => setRegion($("regionFrom").value.trim(), $("regionTo").value.trim(), $("regionTc").value);
+$("regionClear").onclick = () => setRegion($("regionFrom").value.trim(), $("regionTo").value.trim(), null);
 $("instrSave").onclick = async () => {
   try {
     S.ov = await api("/api/instructions", { method: "POST", body: { slug: S.slug, text: $("instrEdit").value } });

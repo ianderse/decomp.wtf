@@ -700,11 +700,16 @@ class RomNetwork(Network):
         x = self.xrefs(proj)
         lines = ["", "### Where it lives",
                  f"address 0x{fn['vram']:08X}, ROM offset 0x{fn['rom_offset']:X}, segment {fn['unit']}"]
-        if fn["status"] != "matched" and (hint := json.loads(fn["meta"] or "{}").get("toolchain_hint")):
-            lines += ["", (f"### Compiler: {self.fn_toolchain(fn)}, not the project's "
-                           f"{self.cfg(proj).get('compiler', {}).get('toolchain')}"),
+        meta = json.loads(fn["meta"] or "{}")
+        main = self.cfg(proj).get("compiler", {}).get("toolchain")
+        if fn["status"] != "matched" and (hint := meta.get("toolchain_hint")):
+            lines += ["", f"### Compiler: {self.fn_toolchain(fn)}, not the project's {main}",
                       (f"Your compiles of this function use it: {hint}. (If the code looks like the game's own after "
                        "all, the judge still tries the project's setup on near misses.)")]
+        elif fn["status"] != "matched" and meta.get("region") and (tc := self.fn_toolchain(fn)) and tc != main:
+            lines += ["", f"### Compiler: {tc}, not the project's {main}",
+                      (f"Your compiles of this function use it: set for {meta['region']} by the project's owner (code "
+                       "in that range was built with it). (The judge still tries the project's setup on near misses.)")]
         calls = sorted(x["calls"].get(fn["vram"], ()))
         callers = sorted(x["called_by"].get(fn["vram"], ()))
         if calls:
@@ -893,8 +898,11 @@ class RomNetwork(Network):
                     meta["toolchain_hint"] = (f"its code has the {label} fingerprint, like {n} of the {len(near)} "
                                               f"nearest matched functions with it, which matched with {want}")
                 else:
-                    meta.pop("toolchain", None)
                     meta.pop("toolchain_hint", None)
+                    if (reg := self.region_toolchain(cfg, r["vram"])):  # the compiler set for its address range, then
+                        meta["toolchain"], meta["region"] = reg
+                    else:
+                        meta.pop("toolchain", None)
                 updates.append((json.dumps(meta) if meta else None, r["id"]))
         if updates:
             with self.store.tx() as db:
@@ -1908,7 +1916,8 @@ class RomNetwork(Network):
                                              "compilers_used": self._compilers_used(proj),
                                              "survey": cfg.get("survey"),
                                              "spend": cfg.get("spend"), "instructions": cfg.get("instructions") or "",
-                                             "priority": cfg.get("priority", [])}
+                                             "priority": cfg.get("priority", []),
+                                             "regions": [] if self.fork_slug(slug) else self.regions(slug)}
 
     def _compilers_used(self, proj) -> list[dict]:
         """Matched functions per compiler setup (the project's, or a function's own): which compilers built the game."""
@@ -2028,6 +2037,149 @@ class RomNetwork(Network):
             items = [n for n in cfg.get("priority", []) if n != fn["name"]]
             cfg["priority"] = ([fn["name"]] + items) if on else items
         return self._update_cfg(slug, change)["priority"]
+
+    # ------------------------------------------------------------------ a compiler for an address range
+
+    @staticmethod
+    def parse_address(value) -> int:
+        """An address as given: an int, or hex text ("8016A000", "0x8016A000")."""
+        if isinstance(value, bool):
+            raise ValueError("an address is a number")
+        if isinstance(value, int):
+            return value
+        text = str(value or "").strip()
+        try:
+            return int(text, 16)
+        except ValueError:
+            raise ValueError(f"not a hex address: {text!r}") from None
+
+    def check_region(self, slug: str, lo, hi, toolchain: str | None) -> tuple[int, int, str | None]:
+        """(from, to, toolchain) checked: a range that holds something, a compiler setup of the project's platform."""
+        if self.fork_slug(slug):
+            raise NetworkError("a fork builds with the project's own compilers")
+        lo, hi = self.parse_address(lo), self.parse_address(hi)
+        if not 0 <= lo < hi <= 0xFFFFFFFF:
+            raise ValueError("the range's end comes after its start (from inclusive, to exclusive)")
+        if toolchain:
+            toolchain = str(toolchain).strip()
+            platform = self.cfg(self._project(slug)).get("platform", "n64")
+            toolchains.get(toolchain_id(toolchain))  # a known toolchain (ToolchainError otherwise), like /api/compiler
+            if toolchain_id(toolchain) not in PLATFORM_COMPILERS.get(platform, []):
+                raise ValueError(f"{toolchain} is not a compiler for this platform")
+        return lo, hi, toolchain or None
+
+    def regions(self, slug: str) -> list[dict]:
+        """The address ranges the project's owner gave a compiler, each with its open and matched functions."""
+        proj = self._project(slug)
+        out = []
+        for r in self.cfg(proj).get("regions", []):
+            n = self.store.one("SELECT COALESCE(SUM(status='open'), 0) AS open, COALESCE(SUM(status='matched'), 0) "
+                               "AS matched FROM functions WHERE project_id=? AND vram >= ? AND vram < ?",
+                               proj["id"], r["from"], r["to"])
+            out.append(dict(r) | {"open": n["open"], "matched": n["matched"]})
+        return out
+
+    def _rescore_best(self, proj, fn, toolchain: str | None) -> int | None:
+        """The function's saved best attempt judged again with `toolchain` (None: the project's) and kept as its best
+        score, after its compiler changed: a score from another compiler says little about this one. A source that
+        doesn't compile with it scores the worst (the source is kept). None: no best attempt to judge."""
+        if not fn["best_source"]:
+            return None
+        main = self.cfg(proj).get("compiler", {}).get("toolchain")
+        header = self._context(proj["id"], self._effective_unit(fn, self._unit_contexts(proj["id"])))["header"]
+        res = self._compile(proj, header, fn["best_source"], fn, toolchain=toolchain or main)
+        cand, exact, _ = self._evaluate(fn, proj, res.obj) if res.ok else (None, None, [])
+        worst = (fn["n_insns"] or 0) * 100
+        score = 0 if exact else scoring.diff(self._target_obj(fn, proj), cand).score if cand is not None else worst
+        with self.store.tx() as db:
+            db.execute("UPDATE functions SET best_score=? WHERE id=? AND status='open'", (score, fn["id"]))
+        return score
+
+    @staticmethod
+    def _moved(before, after) -> str:
+        """better / worse / same, for one best score rescored."""
+        if before is None or after is None or after == before:
+            return "same"
+        return "better" if after < before else "worse"
+
+    def set_region(self, slug: str, lo, hi, toolchain: str | None, log=lambda *_: None) -> dict:
+        """The project's owner says which compiler built an address range (a library linked in, built with other
+        tools): every open function in it compiles with that one (functions.meta toolchain + region), unless the
+        hint refresh gave it one from its own code's fingerprint (more specific than a range: kept). toolchain None
+        clears the range: its functions go back to the project's compiler (hinted ones keep theirs). Each function
+        whose compiler changed has its best attempt judged again. The latest range set wins where two overlap."""
+        lo, hi, toolchain = self.check_region(slug, lo, hi, toolchain)
+        proj = self._project(slug)
+        main = self.cfg(proj).get("compiler", {}).get("toolchain")
+        span = f"{lo:08X}-{hi:08X}"
+        changed, kept, other = [], 0, 0
+        with self.store.tx() as db:
+            rows = db.execute("SELECT * FROM functions WHERE project_id=? AND status='open' AND vram >= ? AND vram < ? "
+                              "ORDER BY vram", (proj["id"], lo, hi)).fetchall()
+            for r in rows:
+                meta = json.loads(r["meta"] or "{}")
+                if meta.get("toolchain_hint"):
+                    kept += 1
+                    continue
+                if meta.get("toolchain") and not meta.get("region"):
+                    other += 1  # a compiler of its own some other way (by hand, a tool): not ours to change
+                    continue
+                before = meta.get("toolchain") or main
+                if toolchain:
+                    meta["toolchain"], meta["region"] = toolchain, span
+                else:
+                    meta.pop("toolchain", None)
+                    meta.pop("region", None)
+                meta.pop("hint_checked", None)
+                db.execute("UPDATE functions SET meta=? WHERE id=?", (json.dumps(meta) if meta else None, r["id"]))
+                if (toolchain or main) != before:
+                    changed.append(r["id"])
+
+        def change(cfg):
+            left = []
+            for g in cfg.get("regions", []):  # what an overlapping range still covers outside this one
+                if g["to"] <= lo or g["from"] >= hi:
+                    left.append(g)
+                    continue
+                left += [g | {"to": lo}] if g["from"] < lo else []
+                left += [g | {"from": hi}] if g["to"] > hi else []
+            if toolchain:
+                left.append({"from": lo, "to": hi, "toolchain": toolchain})
+            cfg["regions"] = sorted(left, key=lambda g: g["from"])
+        self._update_cfg(slug, change)
+
+        moved = collections.Counter()
+        for i, fid in enumerate(changed):
+            fn = self.store.one("SELECT * FROM functions WHERE id=?", fid)
+            if not fn["best_source"]:
+                continue
+            log(f"{i + 1}/{len(changed)} {fn['name']}")
+            try:
+                after = self._rescore_best(proj, fn, toolchain)
+            except Exception as e:  # its old score stays
+                log(f"{fn['name']}: {e}")
+                after = fn["best_score"]
+            moved[self._moved(fn["best_score"], after)] += 1
+        n = len(rows) - kept - other
+        what = (f"{toolchain} set for {n} functions at {span}" if toolchain
+                else f"compiler for {span} back to the project's {main} for {n} functions")
+        scores = f"; best scores: {moved['better']} better, {moved['worse']} worse, {moved['same']} same" if moved else ""
+        rest = "".join([f"; {kept} kept their hinted compiler" if kept else "",
+                        f"; {other} kept a compiler of their own" if other else ""])
+        detail = what + scores + rest
+        with self.store.tx() as db:
+            self._event(db, proj["id"], None, "autopilot", detail)
+        log(detail)
+        return {"regions": self.regions(slug), "message": detail}
+
+    def region_toolchain(self, cfg: dict, vram) -> tuple[str, str] | None:
+        """(toolchain, "from-to") of the latest range set over `vram`, if one is."""
+        if vram is None:
+            return None
+        for g in cfg.get("regions", []):
+            if g["from"] <= vram < g["to"]:
+                return g["toolchain"], f"{g['from']:08X}-{g['to']:08X}"
+        return None
 
     def claim_row(self, agent: Agent, project: str | None = None, function: str | None = None, strategy: str = "easiest"):
         if function is None and project and not self.fork_slug(project):

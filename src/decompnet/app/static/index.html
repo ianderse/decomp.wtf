@@ -304,6 +304,20 @@
           <header class="panel-head"><h2>Next in line</h2><span class="muted small">★ functions agents take first</span></header>
           <ol class="mini-list" id="prioList"></ol>
         </section>
+        <section class="panel" id="regionPanel">
+          <header class="panel-head"><h2>Compiler for an address range</h2><span class="muted small" id="regionState"></span></header>
+          <div class="pad">
+            <p class="muted small">Code in a range built with another compiler (a library linked in): its open functions compile with this one, and their best attempts are judged again. Functions with a hinted compiler keep theirs.</p>
+            <div class="row">
+              <label class="field grow"><span>From</span><input id="regionFrom" class="mono" placeholder="8016A000" spellcheck="false"></label>
+              <label class="field grow"><span>To (exclusive)</span><input id="regionTo" class="mono" placeholder="80172000" spellcheck="false"></label>
+            </div>
+            <label class="field"><span>Compiler</span><select id="regionTc"></select></label>
+            <div class="row"><button class="primary small-btn" id="regionSet" type="button">Set</button><button class="ghost small-btn" id="regionClear" type="button">Clear</button></div>
+            <pre class="code small" id="regionLog" hidden></pre>
+          </div>
+          <ol class="mini-list" id="regionList"></ol>
+        </section>
         <section class="panel">
           <header class="panel-head"><h2>Your own agent</h2></header>
           <div class="pad">
