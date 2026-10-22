@@ -1237,16 +1237,18 @@ def fit(messages: list[dict], budget: int) -> int:
                 total -= before - _tokens(m)
     if total > budget and brief is not None and brief < keep_from:  # last: the brief, down to its assembly
         m = messages[brief]
-        asm = re.search(r"### Target assembly\n```asm\n.*?```", m["content"], re.S)
+        # every function's assembly (a batch brief has one per function) under the brief's first line (which names
+        # them all)
+        asm = re.findall(r"### Target assembly\n```asm\n.*?```", m["content"], re.S)
         if asm:
             before = _tokens(m)
-            m["content"] = (m["content"].split("\n", 1)[0] + "\n\n" + asm.group(0) +
+            m["content"] = (m["content"].split("\n", 1)[0] + "\n\n" + "\n\n".join(asm) +
                             "\n[... the rest of the brief trimmed to save context: get_function shows it again]")
             total -= before - _tokens(m)
     return total
 
 
-BRIEF = re.compile(r"## (CLAIMED|VIEW): ")  # network.Network._brief's first line
+BRIEF = re.compile(r"## (CLAIMED|VIEW)\b")  # a brief's first line (a batch's: "## CLAIMED 3 small functions: a, b, c")
 
 
 def context_window(client, base: str, options: dict) -> int:
@@ -1264,6 +1266,16 @@ def context_window(client, base: str, options: dict) -> int:
             if isinstance(n, int) and n >= 2048:
                 return n
         except (httpx.HTTPError, ValueError, AttributeError):
+            pass
+        try:  # what the model list says (oMLX and vLLM: max_model_len; others: context_length)
+            key = options.get("api_key")
+            r = client.get(f"{base}/models", timeout=5, headers={"Authorization": f"Bearer {key}"} if key else {})
+            for m in (r.json().get("data") or []) if r.status_code == 200 else []:
+                if m.get("id") == options.get("model") or len(r.json()["data"]) == 1:
+                    n = m.get("max_model_len") or m.get("context_length") or m.get("max_context_length")
+                    if isinstance(n, int) and n >= 2048:
+                        return n
+        except (httpx.HTTPError, ValueError, AttributeError, KeyError):
             pass
         return 16384
     return 128000
