@@ -422,6 +422,55 @@ def shortcut(args) -> int:
     return 0
 
 
+def fix_passthrough(args) -> int:
+    """decomp fix-passthrough: rom/passthrough.fix over the database (read only), then with --apply each verified
+    rewrite through the running app's /api/replace."""
+    from ..rom import passthrough
+    from .engine import RomNetwork
+
+    net = RomNetwork(home_dir() / ".decomp" / "decomp.db", home_dir())
+    proj = net.project_row(args.project)
+    if net.cfg(proj).get("platform") != "psx":
+        print("fix-passthrough reads MIPS code: PS1 projects only")
+        return 1
+    post = None
+    if args.apply:
+        try:
+            info = json.loads((home_dir() / ".decomp" / "server.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            raise SystemExit("decomp.wtf isn't running: --apply submits through it") from None
+        if not _alive(info.get("port", 0)):
+            raise SystemExit("decomp.wtf isn't running: --apply submits through it")
+
+        def post(path: str, body: dict) -> dict:
+            req = urllib.request.Request(f"http://127.0.0.1:{info['port']}{path}", method="POST",
+                                         data=json.dumps(body).encode(),
+                                         headers={"Cookie": f"decomp_live={info['secret']}", "X-Decomp": "1",
+                                                  "Host": f"127.0.0.1:{info['port']}",
+                                                  "Content-Type": "application/json"})
+            try:  # a header edit judges every matched function again: minutes
+                with urllib.request.urlopen(req, timeout=1800) as r:
+                    return json.loads(r.read())
+            except urllib.error.HTTPError as e:
+                try:
+                    return {"replaced": False, "error": json.loads(e.read() or b"{}").get("error") or str(e)}
+                except ValueError:
+                    return {"replaced": False, "error": str(e)}
+    out = Path(proj["root"]) / "passthrough"
+    res = passthrough.fix(net, args.project, out_dir=out, limit=args.limit, apply=args.apply, post=post)
+    print(f"{res['dropped_calls']} calls drop arguments ({', '.join(f'{v} {k}' for k, v in res['dropped_by_status'].items())}); "
+          f"{res['forwarded_calls']} forwarded by {res['rewritten']} rewrites ({res['gain_parameters']} functions gain "
+          f"parameters; by level {res['levels']})")
+    print(f"verified {res['verified']}, failed {res['failed']}, skipped {res['skipped']} "
+          f"(variants: {res['variants']}); header edits {len(res['header_edits'])}")
+    print(f"before/after and report.json: {out}")
+    if args.apply:
+        print(f"replaced {len(res.get('applied') or [])}" + (f"; stopped at {res['stopped']['name']}"
+                                                              if res.get("stopped") else ""))
+        return 1 if res.get("stopped") else 0
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="decomp", description="decomp.wtf: your AI agents decompile your games, matching byte for byte")
     ap.add_argument("--port", type=int, default=DEFAULT_PORT)
@@ -474,6 +523,14 @@ def main(argv: list[str] | None = None) -> int:
     su.add_argument("--dry-run", action="store_true", help="report only: don't change the project's alternates")
     su.add_argument("--workers", type=int, default=max(2, (os.cpu_count() or 4) - 2), help="compiles at once")
     su.add_argument("--json", help="write the summary (with each function's matching setups) to this file")
+    fp = sub.add_parser("fix-passthrough", help="PS1: make the arguments matched C passes through by leaving the "
+                                                "registers alone explicit (port hazard (a)), each rewrite checked "
+                                                "byte for byte first")
+    fp.add_argument("project", help="the project's name (its slug, e.g. slus-01252)")
+    fp.add_argument("--dry-run", action="store_true", help="report and write <project>/passthrough/ only (the default)")
+    fp.add_argument("--apply", action="store_true", help="submit each verified rewrite to the running app "
+                                                         "(POST /api/replace), callee first; stops at the first refusal")
+    fp.add_argument("--limit", type=int, help="only the first N rewrites (callee-first order)")
     po = sub.add_parser("port", help="PS1: a CMake project that builds the matched C for this computer and runs it "
                                      "(from the export; sound through a software SPU, no rendering yet)")
     po.add_argument("project", help="the project's name (its slug, e.g. slus-01252)")
@@ -517,6 +574,8 @@ def main(argv: list[str] | None = None) -> int:
         if args.json:
             Path(args.json).expanduser().write_text(json.dumps(res, indent=1), encoding="utf-8")
         return 0
+    if args.cmd == "fix-passthrough":
+        return fix_passthrough(args)
     if args.cmd == "port":
         from .engine import RomNetwork
         from ..rom.export_port import PortError, export_port

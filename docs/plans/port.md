@@ -348,6 +348,48 @@ minus the match check. So the port runs as it is, and the list is where to act. 
 (another session's, uncommitted at the time) does a per-function lexical audit of the same class from the database;
 this one is export-wide and checks against the callee's definition.
 
+**The fix for (a): `decomp fix-passthrough <slug>`** (rom/passthrough.py, tests/test_passthrough.py). Reads the
+database (each matched function's own source, export.own_source; its target code for the register scan), finds
+every call that passes fewer arguments than the callee's definition takes, and for each dropped register the
+caller's MIPS leaves alone from entry to the call (passes_through, one register at a time) gives the caller the
+parameter (its own when it has one at that position, else `s32 aN` typed like the callee's) and passes it on. A
+caller that gains parameters makes its own callers drop them: worked to a fixed point, rewritten callee before caller.
+The caller's prototype of the callee becomes the callee's real signature (`ret f();` where some call of it still
+passes fewer); a prototype of the function in context.h that no longer fits is edited too, first to `ret f();`
+(every other match that declares or calls it the old way still compiles) and to the full prototype as the last
+step of `--apply`. Each rewrite is compiled and linked as the judge does (`_compile` with the function's own
+compiler against the would-be header, `_evaluate`), byte for byte, trying in turn the callee's own types, the
+caller's own return type for the callee, plain `s32`/`void *`, and each of those passing the argument at the first
+call only. `--dry-run` (the default) writes `<project>/passthrough/` (before/after/failed per function and
+report.json); `--apply` submits each verified one through `POST /api/replace` (Network.replace_match: credit stays
+with the matcher, a note "pass-through argument made explicit: $a0 reaches func_X unchanged (port hazard (a))",
+matched_at moved so the relink checks it), stopping at the first refusal.
+
+The dry run on SLUS-01252 (2026-10-23, 4,010 matched functions, about 20 s):
+
+- 237 calls drop arguments: 206 pass every dropped register through, 28 leftover (written or after another call
+  first), 3 need a stack argument (a fifth or later parameter). 208 calls are forwarded (2 of them in part) by
+  219 rewrites: 208 at level 1, 9 at level 2 and 2 at level 3 (the chains: a caller that gained parameters, one level
+  up); 66 functions gain parameters, the other 153 already had them and only pass them on.
+- **211 verify byte for byte, 8 don't.** By variant: 196 with the callee's own signature, 12 keeping the caller's
+  return type for it (the callee returns void or a narrower type than the caller assumed: a return-value hazard of
+  its own, left as it is), 2 with plain types, 1 passing the argument at its first call only. 3 header edits
+  (SpuSetTransferStartAddr, func_800F563C, func_800F5684, all `(void)` in context.h).
+- The 8: naming the incoming value at the call changes GCC 2.7.2's register choices, so these are a person's (or the
+  permuter's) to finish: func_80028064 and func_800E254C ($s0/$s1 swapped), func_8013A14C ($ra/$s2 saved in the
+  other order), func_801338FC, get_word16_table_0x801D2090 (calls func_80113D6C twice: $a0 kept in $s0 for the
+  second call; passing it at the first only is further off), func_80163D18, func_80139260 ($a1 forwarded, $a2 a
+  leftover: $a0/$a3 swapped) and func_800ED7B4 (func_8015E468 returns `void *`, which it dereferences as `u16 *`;
+  with its own return type, $s4/$s5 swapped).
+- 31 calls still drop arguments after it (the 28 leftover, the 3 stack arguments): `residual` in report.json.
+
+Against the regex detector, over the same export copy (all matched files, not only the 3,935 the port compiles, and
+without the runtime's prototypes: 208 dropped, 186 pass-through, where the port's list says 207/187): all 186 are
+among the tool's (counted by caller and callee): 180 in rewrites that verify, 6 in the failures. The tool finds 22 more: 11 calls to func_800F5498, a K&R
+definition (`s32 func_800F5498(a) u32 a; {`) the detector doesn't see, all verified, and 11 one level up the
+chains (9 verified; func_80139260 and func_80163D18 are the other 2 failures). None of the 22 comes from a declaration inside a body; 57 calls through a cast of a game
+function (`((T (*)()) func_X)(...)`) are seen by neither and not rewritten.
+
 ## Sound (2026-10-23)
 
 ### libsnd: replaced wholesale, not run as C (option (a) of the brief)
