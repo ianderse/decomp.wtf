@@ -4,6 +4,7 @@ built-in API agent. Every tool works on the project the agent was started on."""
 from __future__ import annotations
 
 import re
+import time
 from importlib import resources
 from typing import Callable
 
@@ -85,6 +86,10 @@ For repeatedly stalled ROM functions use test_hypothesis, then record_diagnosis 
 a new hypothesis. With no new hypothesis, mark exhausted=true before release; do not rotate endlessly.
 Use review_candidate for source plausibility problems; a low diff score does not establish correct behavior.
 Historical attempts never consume the current claim's budget. Diagnosis lanes select work by mismatch type.
+For PS1 stalls, find_reference_examples(function, query) retrieves matching examples and SDK references with
+provenance. External code is a hypothesis until it matches this target. audit_call_boundaries(function)
+checks declarations and call arguments before changing shared types; warnings require assembly review.
+progress_report() measures recent output; unknown active time is never reported as agent-hours.
 
 The assembly in the brief is the exact target, read from the game: trust it over any note. Before each
 compile, name the one difference you're fixing (from the diff) and change that; several changes at once hide
@@ -200,10 +205,23 @@ def _compile(net: RomNetwork, agent: Agent, slug: str, function: str, source: st
     return net.attempt_many(agent, [net.resolve_function(agent, slug, n) for n in names], source, slug)
 
 
-from .. import diagnosis
+from .. import diagnosis, ps1_references, ps1_diagnostics, progress_metrics
+
+
+def _progress_report(net, slug, hours=1):
+    if not isinstance(hours, (int, float)) or not 0 < hours <= 168:
+        raise NetworkError("hours must be greater than 0 and at most 168")
+    now = time.time()
+    return progress_metrics.format_report(progress_metrics.report(
+        net.store.path, net._project(slug)["id"], since=now - hours * 3600, until=now))
 
 
 HANDLERS: dict[str, Callable[..., str]] = {
+    "find_reference_examples": lambda net, agent, slug, function="", query="", limit=3:
+        ps1_references.search(net, query=query, project=slug, function=function or None, limit=limit),
+    "audit_call_boundaries": lambda net, agent, slug, function:
+        ps1_diagnostics.audit_function(net, function, project=slug),
+    "progress_report": lambda net, agent, slug, hours=1: _progress_report(net, slug, hours),
     "test_alternatives": lambda net, agent, slug, function, attempt_id, old, replacements, hypothesis:
         diagnosis.alternatives(net, agent, function, attempt_id, old, replacements, hypothesis, slug),
     "inspect_candidate": lambda net, agent, slug, function, attempt_id=0:
@@ -245,7 +263,7 @@ HANDLERS: dict[str, Callable[..., str]] = {
         net.forks.split_file(agent, _fork(net, slug, "split_file"), path, at, new_name, data),
 }
 
-ROM_ONLY = {"test_alternatives", "inspect_candidate", "record_diagnosis", "review_candidate", "test_hypothesis", "get_context", "edit_context", "rename_symbol", "split_function", "merge_functions", "flag_for_review"}
+ROM_ONLY = {"find_reference_examples", "audit_call_boundaries", "progress_report", "test_alternatives", "inspect_candidate", "record_diagnosis", "review_candidate", "test_hypothesis", "get_context", "edit_context", "rename_symbol", "split_function", "merge_functions", "flag_for_review"}
 FORK_ONLY = {"read_file", "search_code", "edit_file", "file_status", "split_file"}
 
 
@@ -435,6 +453,24 @@ def build_mcp(net: RomNetwork, agent_of: Callable[[Context], tuple[Agent, str]])
     async def search_notes(ctx: Context, query: str) -> str:
         """Search notes left by agents."""
         return await run(ctx, "search_notes", query=query)
+
+    @mcp.tool(meta=ALWAYS_LOAD)
+    async def find_reference_examples(ctx: Context, function: str = "", query: str = "", limit: int = 3) -> str:
+        """Find matched C/assembly examples and pinned SDK candidates with compiler provenance.
+        External examples are hypotheses, never established matches for this target. Read-only."""
+        return await run(ctx, "find_reference_examples", function=function, query=query, limit=limit)
+
+    @mcp.tool(meta=ALWAYS_LOAD)
+    async def audit_call_boundaries(ctx: Context, function: str) -> str:
+        """Read-only audit of source call arguments and declarations against matched callees.
+        Findings are review hints, not proof of ABI correctness or permission to change a prototype."""
+        return await run(ctx, "audit_call_boundaries", function=function)
+
+    @mcp.tool(meta=ALWAYS_LOAD)
+    async def progress_report(ctx: Context, hours: float = 1) -> str:
+        """Recent matches, partial improvements, duplicate hypotheses and suspect reviews.
+        Hours is an elapsed window (0 < hours <= 168); agent time is reported only when measured."""
+        return await run(ctx, "progress_report", hours=hours)
 
     @mcp.tool(meta=ALWAYS_LOAD)
     async def find_similar(ctx: Context, function: str, limit: int = 5) -> str:

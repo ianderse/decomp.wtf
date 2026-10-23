@@ -725,6 +725,10 @@ class RomNetwork(Network):
         if callers:
             lines.append("called by: " + ", ".join(syms.label(a) for a in callers[:30]))
         if self.cfg(proj).get("platform") == "psx" and fn["status"] != "matched":
+            if fn["attempts"] >= 10:
+                lines += ["", "PS1 reference tools: find_reference_examples(function) retrieves matched examples "
+                          "with compiler provenance and pinned SDK candidates. audit_call_boundaries(function) "
+                          "checks source declarations and calls; warnings need target-assembly review."]
             from ..psx_gte import count, enabled
             if (n := count(fn["target"] or b"")) and enabled(self.cfg(proj)):
                 lines += ["", f"GTE: {n} geometry-coprocessor instructions. Write them with the trusted gte_* macros "

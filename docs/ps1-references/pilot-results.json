@@ -1,0 +1,145 @@
+{
+  "evidence_directory": "/Users/ianderse/Decomp/reviews/slus-01252-20261023/sdk-reference-pilot-20261023",
+  "source_files_fetched": 267,
+  "installed_index": "/Users/ianderse/Decomp/.decomp/ps1-reference-index.json",
+  "indexed_examples": 303,
+  "indexed_repositories": {
+    "https://github.com/sozud/psy-q-decomp": 71,
+    "https://github.com/Xeeynamo/psyz": 95,
+    "https://github.com/Xeeynamo/sotn-decomp": 137
+  },
+  "source_manifest_sha256": "59c53d1be41e9e2726a7a719f50f159083e48e8d014263f92e60d1f5865e410a",
+  "snapshot_sha256": "f603b0b7127e8642bc9408769e4c0b52dd33ecead30df475575657b6b46070a6",
+  "report_sha256": "3fa4107d689aa34b5f488949447c1e57ba07674fd33ffa68d6dcc4b03e8e954a",
+  "functions": [
+    {
+      "function": "_SsGetSeqData",
+      "symbol_hypothesis": "_SsGetSeqData",
+      "function_toolchain": "gcc-2.7.2-psx@2.34",
+      "historical_best_score": 4380,
+      "incumbent": {
+        "candidate_instructions": 171,
+        "compiled": true,
+        "exact_byte_match": false,
+        "link_problems": [],
+        "score": 4380,
+        "seconds": 0.3603667910210788,
+        "source_sha256": "86c7766cd3151731eb91d1fc9d9bc97e268b7d11c5e6b1a2be7ad701c78f5288"
+      },
+      "candidate": {
+        "candidate_instructions": 169,
+        "compiled": true,
+        "exact_byte_match": false,
+        "link_problems": [],
+        "score": 3980,
+        "seconds": 0.30807183403521776,
+        "source_sha256": "593c214f10edda9d68fe4d9924ab26be69ea289a5e03dafafe3f7e063011b8f8"
+      },
+      "improved": true
+    },
+    {
+      "function": "func_8016BF80",
+      "symbol_hypothesis": "_SsSetProgramChange",
+      "function_toolchain": "gcc-2.7.2-psx@2.34",
+      "historical_best_score": 340,
+      "incumbent": {
+        "candidate_instructions": 28,
+        "compiled": true,
+        "exact_byte_match": false,
+        "link_problems": [],
+        "score": 340,
+        "seconds": 0.17689008312299848,
+        "source_sha256": "bc100aec585a69498fdf092ea3f8f2f810103694cb201ca342aaa45a833e3716"
+      },
+      "candidate": {
+        "candidate_instructions": 28,
+        "compiled": true,
+        "exact_byte_match": false,
+        "link_problems": [],
+        "score": 830,
+        "seconds": 0.16500054206699133,
+        "source_sha256": "c8e63a42148c7fe27997efe567fd861e26bcc3a351c6cc134330e5682703ed82"
+      },
+      "improved": false
+    },
+    {
+      "function": "func_8016C988",
+      "symbol_hypothesis": "_SsContRpn1",
+      "function_toolchain": "gcc-2.7.2-psx@2.34",
+      "historical_best_score": 340,
+      "incumbent": {
+        "candidate_instructions": 28,
+        "compiled": true,
+        "exact_byte_match": false,
+        "link_problems": [],
+        "score": 340,
+        "seconds": 0.11779158283025026,
+        "source_sha256": "0acd7c8e6e084c90422b7fdeb8a4660db8f6413b454f59c73ec8df4cf196b29d"
+      },
+      "candidate": {
+        "candidate_instructions": 28,
+        "compiled": true,
+        "exact_byte_match": false,
+        "link_problems": [],
+        "score": 830,
+        "seconds": 0.12394258286803961,
+        "source_sha256": "af48179bd918c3c2bf1fc88ba17c6eb362955d05ef66ef8822b2bf20f0e63540"
+      },
+      "improved": false
+    },
+    {
+      "function": "func_8016C9F4",
+      "symbol_hypothesis": "_SsContRpn2",
+      "function_toolchain": "gcc-2.7.2-psx@2.34",
+      "historical_best_score": 340,
+      "incumbent": {
+        "candidate_instructions": 28,
+        "compiled": true,
+        "exact_byte_match": false,
+        "link_problems": [],
+        "score": 340,
+        "seconds": 0.1351617081090808,
+        "source_sha256": "b87173cb4ba33360de310aa93709472e3208cfb8b848348fbfd586d5478b2378"
+      },
+      "candidate": {
+        "candidate_instructions": 28,
+        "compiled": true,
+        "exact_byte_match": false,
+        "link_problems": [],
+        "score": 830,
+        "seconds": 0.09502954222261906,
+        "source_sha256": "32a6bcd363c20f57ab065ab1b67a73d376a07ba5350b948f28253f88e09c3e02"
+      },
+      "improved": false
+    },
+    {
+      "function": "func_8016D370",
+      "symbol_hypothesis": "_SsSetPitchBend",
+      "function_toolchain": "gcc-2.7.2-psx@2.34",
+      "historical_best_score": 1000,
+      "incumbent": {
+        "candidate_instructions": 41,
+        "compiled": true,
+        "exact_byte_match": false,
+        "link_problems": [],
+        "score": 1000,
+        "seconds": 0.08540304191410542,
+        "source_sha256": "67242f8f695d5211888a407db826e8ec279c1491052e38a23d0660e5fa32c566"
+      },
+      "candidate": {
+        "candidate_instructions": 41,
+        "compiled": true,
+        "exact_byte_match": false,
+        "link_problems": [],
+        "score": 1705,
+        "seconds": 0.1268298332579434,
+        "source_sha256": "8dbbf689dea811dc4330f3e79195623e51fcf843a8eeda90ec87ca0bccaba109"
+      },
+      "improved": false
+    }
+  ],
+  "candidate_compiled": 5,
+  "candidate_exact_matches": 0,
+  "improved": 1,
+  "adopted_candidates": 0
+}

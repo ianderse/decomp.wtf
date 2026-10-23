@@ -28,6 +28,23 @@ it. Code is mostly C.
 Libraries: PSY-Q's libgte, libgpu, libgs, libspu, libcd, libetc, libapi and libc are usually linked
 as library objects, not decompiled; their names and prototypes are in the project's headers.
 
+For a stalled function, use `find_reference_examples(function, query)` to retrieve matched local C/assembly
+and locally indexed SDK references. Match the compiler build, flags, ASPSX version, and SDK variant before
+transferring a pattern. External source remains a candidate until compiled and compared with this game's
+target; keep its revision, path and license with any derived work. A similar name is not version evidence.
+Useful sources include Sozud's PSY-Q decomp, PsyZ and Symphony of the Night's PSXSdk. The operator's bounded
+SDK pilot and toolchain microprobes retain their inputs and results separately from the live database.
+
+Use `audit_call_boundaries(function)` when a call or declaration is uncertain. Check the original argument
+setup, including delay slots, and the matched callee's declaration. Missing arguments can remain invisible
+in an isolated function's instruction match and fail when the whole program is recompiled. Audit warnings
+are evidence for investigation, not permission to guess a prototype or change context.h automatically.
+
+For a tiny persistent scheduling/stack mismatch, reduce it to a small reproducible C case and compare
+precise compiler builds and assembler settings. Preserve raw compiler assembly and final disassembly:
+this separates compiler allocation from assembler expansion. An unavailable original ASPSX lane is an
+unperformed check, not evidence that maspsx is equivalent. Use `test_hypothesis` for each distinct change.
+
 GTE (the geometry coprocessor): every compile includes trusted `gte_*` macros (you can't redefine them, and raw
 inline assembly is rejected). Types `SVECTOR`, `VECTOR`, `DVECTOR`, `CVECTOR`, `RECT`, `MATRIX` are in new projects'
 context.h; add them with edit_context if yours lacks them.

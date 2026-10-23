@@ -892,7 +892,11 @@ class Manager:
                 s.push("info", f"session {s.runs}: {s.tier.replace('_', ' ')} -> {s.routed_model} ({s.routed_effort} effort)"
                                + (f" for {s.tier_function}" if s.tier_function else ""))
             try:
-                ok = self._run_api(s, agent) if s.kind == "api" else self._run_cli(s, token, workdir)
+                from ..progress_metrics import measured_run
+                with measured_run(self.net, s.slug, agent.id, s.id,
+                                  s.routed_model if s.tiered else s.options.get("model", ""),
+                                  s.routed_effort if s.tiered else s.options.get("effort", "")):
+                    ok = self._run_api(s, agent) if s.kind == "api" else self._run_cli(s, token, workdir)
             except Fatal as e:  # needs the user first: retrying can't help
                 s.state, s.error = "error", str(e)
                 break
@@ -1327,6 +1331,13 @@ def api_tool_schemas(fork: bool = False) -> list[dict]:
     st = lambda desc, req=False: {"type": "string", "description": desc, "req": req}
     it = lambda desc: {"type": "integer", "description": desc}
     defs = {
+        "find_reference_examples": ("Read-only matched C/assembly examples and pinned SDK candidates with compiler provenance; external code is unverified for this target.",
+                                    s(function=st("optional target function"), query=st("pattern or SDK symbol"), limit=it("up to 5 examples"))),
+        "audit_call_boundaries": ("Read-only declaration and call argument audit. Warnings need assembly review; no proof of ABI correctness.",
+                                  s(function=st("function", True))),
+        "progress_report": ("Recent output and repeated hypotheses; agent-hour rates only with measured activity intervals.",
+                            s(hours={"type": "number", "exclusiveMinimum": 0, "maximum": 168,
+                                     "description": "elapsed window, greater than 0 and at most 168"})),
         "inspect_candidate": ("List attempt IDs or read one attempt's full source.",
                               s(function=st("function", True), attempt_id=it("attempt ID; omit to list"))),
         "record_diagnosis": ("Save measured diagnosis; exhausted pauses automatic rotation until inputs change.",

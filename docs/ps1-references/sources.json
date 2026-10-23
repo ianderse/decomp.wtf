@@ -1,0 +1,59 @@
+{
+  "schema": 1,
+  "purpose": "Pinned primary-source metadata only; no upstream source is bundled.",
+  "repositories": [
+    {
+      "repository": "sozud/psy-q-decomp",
+      "commit": "6edf9b24721ba02a53eb423b8a7497b82ba0768c",
+      "license": "MIT",
+      "source_prefix": "src/snd/",
+      "evidence_paths": ["LICENSE", "README.md", "Makefile"],
+      "compiler_evidence": "Makefile prep selects cc_2.60 plus PSY-Q 3.5 ASPSX; compares against 3.5 LIBSND.LIB. Not the target's recorded GCC 2.7.2 recipe."
+    },
+    {
+      "repository": "Xeeynamo/psyz",
+      "commit": "1dae25e6d84f0e4b3947ee1bb8f12c918ec4cd13",
+      "license": "MIT for decomp/ (decomp/LICENSE); repository has mixed licenses",
+      "source_prefix": "decomp/src/libsnd/",
+      "evidence_paths": ["LICENSE", "decomp/LICENSE", "decomp/README.md", "decomp/Makefile"],
+      "compiler_evidence": "decomp/Makefile: cc1-psx-272, -G0 -O2 and additional flags, ASPSX 2.56. Several required MIDI functions are INCLUDE_ASM placeholders, not recovered C."
+    },
+    {
+      "repository": "Xeeynamo/sotn-decomp",
+      "commit": "7bc54d8157b6bed77e6bd15e5db9461a734fe1e5",
+      "license": "MIT SPDX on selected libsnd C/header files; repository root/src otherwise AGPL-3.0-or-later",
+      "source_prefix": "src/main/psxsdk/libsnd/",
+      "evidence_paths": ["LICENSE", "src/LICENSE", "README.md", "tools/builds/gen.py"],
+      "compiler_evidence": "tools/builds/gen.py PS1 build uses GCC cc1 plus maspsx; ASPSX defaults 2.34. Selected source contains a different SeqStruct layout from the target. Recipe similarity does not prove target correspondence."
+    }
+  ],
+  "pilot": {
+    "source_repository": "Xeeynamo/sotn-decomp",
+    "source_path": "src/main/psxsdk/libsnd/seqread.c",
+    "source_license": "MIT (file SPDX)",
+    "budget": "Exactly five source-assisted candidates, one per function; five incumbent control compiles; no alternates or tuning.",
+    "mapping_confidence": "Hypotheses from MIDI switch cases, target calls, record offsets and matching statement sequences; no target rename or persistent adoption.",
+    "functions": [
+      {"target": "_SsGetSeqData", "symbol": "_SsGetSeqData", "evidence": "Target status-byte dispatch matches 0x90/B0/C0/E0/F0 and running-status dispatch; target pointer cursor +4, channel +12, status +11, delta +88."},
+      {"target": "func_8016BF80", "symbol": "_SsSetProgramChange", "evidence": "Target C0 dispatch destination; programs[channel] byte store at +2C/+12 followed by common delta reader and word store +88."},
+      {"target": "func_8016C988", "symbol": "_SsContRpn1", "evidence": "Byte store +13, byte increment +29, common delta reader and word store +88."},
+      {"target": "func_8016C9F4", "symbol": "_SsContRpn2", "evidence": "Byte store +14, byte increment +29, common delta reader and word store +88."},
+      {"target": "func_8016D370", "symbol": "_SsSetPitchBend", "evidence": "Target E0 dispatch destination; cursor byte read, packed sep/seq argument, bank halfword +4A and per-channel program read, followed by common delta reader."}
+    ],
+    "identifier_map": {
+      "_ss_score": "D_801FAD50",
+      "delta_value": "unk88",
+      "_SsReadDeltaValue": "func_8016D768",
+      "_SsNoteOn": "func_8016BE84",
+      "_SsSetControlChange": "func_8016BFEC",
+      "_SsSetProgramChange": "func_8016BF80",
+      "_SsSetPitchBend": "func_8016D370",
+      "_SsGetMetaEvent": "func_8016D410",
+      "_SsContRpn1": "func_8016C988",
+      "_SsContRpn2": "func_8016C9F4",
+      "SpuVmPitchBend": "func_8016F2BC",
+      "unk4c": "vab_id"
+    },
+    "adaptation_boundary": "Extract only selected upstream function. Rename identifiers according to explicit map, use existing target SeqStruct and exact existing context; add local prototypes. Preserve function body control flow and statement order. Upstream delta_value maps to target +88; upstream bank +4C maps to target vab_id +4A, supported by target load. Do not copy upstream struct or add ad-hoc pointer casts."
+  }
+}

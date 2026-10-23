@@ -17,6 +17,11 @@ Beyond this project: games built on the same SDK or engine share code (libultra 
 Revolution SDKs, NitroSDK on DS, PSY-Q on PS1, sead/nn on Switch, RenderWare, Havok...). Those library
 functions are usually matched already in other public decomps.
 
+For PS1, `find_reference_examples(function, query)` adds compiler provenance and pinned local SDK
+references. Prefer the same compiler/assembler recipe and inspect the reported mnemonic similarity.
+The local examples are recorded matches; external candidates are unverified for your target. Use a
+specific SDK symbol or instruction pattern as the query, then test one source change at a time.
+
 Scheduling that works (from people who ran agents on decomps before): easiest functions first, then
 functions similar to ones already matched. Cap the effort per function (around 25-30 compiles) and
 release with notes rather than grinding.
