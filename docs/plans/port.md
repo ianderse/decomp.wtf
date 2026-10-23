@@ -363,7 +363,7 @@ caller's own return type for the callee, plain `s32`/`void *`, and each of those
 call only. `--dry-run` (the default) writes `<project>/passthrough/` (before/after/failed per function and
 report.json); `--apply` submits each verified one through `POST /api/replace` (Network.replace_match: credit stays
 with the matcher, a note "pass-through argument made explicit: $a0 reaches func_X unchanged (port hazard (a))",
-matched_at moved so the relink checks it), stopping at the first refusal.
+a "replace" event the relink notices; matched_at kept), stopping at the first refusal.
 
 The dry run on SLUS-01252 (2026-10-23, 4,010 matched functions, about 20 s):
 

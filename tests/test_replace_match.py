@@ -62,7 +62,7 @@ def test_a_matching_replacement_is_recorded_and_the_credit_stays(tmp_path, monke
     after = _row(net, "caller")
     assert after["matched_source"] == new and after["best_source"] == new and after["status"] == "matched"
     assert after["matched_agent_id"] == before["matched_agent_id"]  # codex-1 keeps it
-    assert after["matched_at"] > before["matched_at"]  # the rebuilt-game check looks at it again
+    assert after["matched_at"] == before["matched_at"]  # still when it was matched (progress counts by it)
     att = net.store.all("SELECT * FROM attempts WHERE function_id=?", after["id"])
     assert [(a["via"], a["score"], a["agent_id"], a["source"]) for a in att] == [("replace", 0, you.id, new)]
     notes = net.store.all("SELECT text FROM notes WHERE function_id=?", after["id"])
@@ -137,7 +137,9 @@ def test_a_replacement_makes_the_relink_due(tmp_path, monkeypatch):
         cfg["export"] = {"checked_matched": 2, "context_version": net._header_stamp(pid), "replaced": None}
         db.execute("UPDATE projects SET config=? WHERE id=?", (json.dumps(cfg), pid))
     assert net.relink_due("game") is False
+    at = _row(net, "caller")["matched_at"]
     net.replace_match(you, "caller", "void caller(void) { callee(0); } /* MATCH */", "game")
+    assert _row(net, "caller")["matched_at"] == at  # the count and the header are as they were: the stamp alone
     assert net.relink_due("game") is True
 
 

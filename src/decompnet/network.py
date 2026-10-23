@@ -801,7 +801,8 @@ class Network:
         function's own compiler and the current header and judged exactly as attempt() judges a match (linked at
         the function's address where the project's targets come from a ROM); only an exact match is taken. The
         credit stays with whoever matched it; the attempt is recorded (via "replace", score 0), a note says what
-        was replaced and why, and matched_at moves to now so the rebuilt-game check looks at it again.
+        was replaced and why, and a "replace" event makes the rebuilt-game check look at it again (matched_at stays:
+        it is when the function was matched, which progress counts by).
 
         header_new (with header_old: an exact-string edit, else appended) changes the shared header in the same
         call, for a function whose prototype there no longer fits: the source is compiled against the would-be
@@ -867,8 +868,8 @@ class Network:
                 raise NetworkError(f"{fn['name']} stopped being a match meanwhile; nothing replaced")
             db.execute("INSERT INTO attempts(function_id,agent_id,score,compiled,context_version,source,created_at,via) "
                        "VALUES(?,?,?,?,?,?,?,?)", (fn["id"], agent.id, 0, True, version, source, now, "replace"))
-            db.execute("UPDATE functions SET attempts=attempts+1, matched_source=?, best_source=?, best_score=0, "
-                       "matched_at=? WHERE id=?", (source, source, now, fn["id"]))
+            db.execute("UPDATE functions SET attempts=attempts+1, matched_source=?, best_source=?, best_score=0 "
+                       "WHERE id=?", (source, source, fn["id"]))
             db.execute("INSERT INTO notes(project_id,function_id,agent_id,text,created_at) VALUES(?,?,?,?,?)",
                        (proj["id"], fn["id"], agent.id,
                         f"Matched source replaced by {agent.name} (still byte-identical; credit stays with "
