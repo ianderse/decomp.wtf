@@ -13,7 +13,7 @@ void PadInitDirect(uint8_t *pad1, uint8_t *pad2) {
     pad2 = PSX_PTR(pad2);
     buf1 = pad1;
     buf2 = pad2;
-    psx_log("pad: PadInitDirect(%p, %p)\n", (void *)pad1, (void *)pad2);
+    psx_log("pad: PadInitDirect(0x%08X, 0x%08X)\n", psx_ps1(pad1), psx_ps1(pad2));
     psx_pad_update();
 }
 #endif

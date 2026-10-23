@@ -107,7 +107,8 @@ def test_symbols_at_their_ps1_addresses():
     assert "D_80123456" not in s                # comments don't count
     assert "func_800C27B8" not in s and "VSync" not in s
     asm = ep.symbols_asm(s, p["renames"])
-    assert ".globl SYM(D_801AC5B8)\nSYM(D_801AC5B8) = 0x801AC5B8" in asm
+    assert ".globl SYM(D_801AC5B8)\nSYM(D_801AC5B8) = PSX(0x801AC5B8)" in asm
+    assert "#define PSX_HOST_BASE 0x100000000" in asm  # PS1 address A at host 0x1_0000_0000 + A
     assert "#define SYM(x) _##x" in asm
 
 
@@ -160,12 +161,38 @@ def test_syscall_wrappers_become_sony_stubs():
                            {"name": "func_8017DE20", "seg": "main", "vram": 0x8017DE20, "rom": 0x20}]}
     s = ep.syscall_stubs(build, bytes(image), {})
     assert list(s) == ["func_8017DE00"] and "EnterCriticalSection" in s["func_8017DE00"]["label"]
+    assert s["func_8017DE00"]["bios"] == "SYS_01"
+    sdk = ep.sdk_stubs_c([{"name": "func_8017DE00", "lib": "libapi", "bios": "SYS_01", "label": "syscall 1",
+                           "kind": "bios", "called": True},
+                          {"name": "func_8017DD60", "lib": "libapi", "bios": "B0_08", "label": "bios_B0_08_OpenEvent",
+                           "kind": "bios", "called": True}])
+    assert "int func_8017DE00(void) { return psx_EnterCriticalSection(); }" in sdk
+    assert "return psx_bios_OpenEvent(a, b, c, d); }" in sdk
+
+
+def test_handwritten_gte_setup_is_replayed():
+    # SLUS-01252's func_80178F28, libgte's InitGeom body: COP2 on, then ctc2 ZSF3/ZSF4/H/DQA/DQB/OFX/OFY
+    words = [0, 0x40026000, 0x3C034000, 0x00431025, 0x40826000, 0, 0x24080155, 0x48C8E800, 0, 0x24080100,
+             0x48C8F000, 0, 0x240803E8, 0x48C8D000, 0, 0x2408EF9E, 0x48C8D800, 0, 0x3C080140, 0x48C8E000, 0,
+             0x48C0C000, 0x48C0C800, 0, 0x03E00008, 0]
+    image = bytearray(0x200)
+    struct.pack_into(f"<{len(words)}I", image, 0x100, *words)
+    struct.pack_into("<3I", image, 0x180, 0x8C820000, 0x03E00008, 0)  # lw: not a GTE setup
+    build = {"functions": [{"name": "func_80178F28", "seg": "main", "vram": 0x80178F28, "rom": 0x100},
+                           {"name": "func_80178F90", "seg": "main", "vram": 0x80178F90, "rom": 0x180}]}
+    h = ep.handwritten_gte(build, bytes(image))
+    assert list(h) == ["func_80178F28"] and h["func_80178F28"]["init_geom"]
+    assert h["func_80178F28"]["regs"] == [(29, 0x155), (30, 0x100), (26, 1000), (27, 0xFFFFEF9E), (28, 0x1400000),
+                                          (24, 0), (25, 0)]
+    c = ep.unmatched_c([], None, h)
+    assert "int func_80178F28(void) { psx_gte_ctc2(29, 0x155); psx_gte_ctc2(30, 0x100);" in c
+    assert "psx_gte_ctc2(27, (int)0xFFFFEF9Eu);" in c and "InitGeom" in c
 
 
 def test_cmakelists():
     c = ep.cmakelists("slus-01252")
     assert "project(slus_01252_port C ASM)" in c
-    assert "-Wl,-pagezero_size,0x1000" in c and "set(CMAKE_OSX_ARCHITECTURES x86_64" in c
+    assert "pagezero_size" not in c and "CMAKE_OSX_ARCHITECTURES x86_64" not in c
     for flag in ("-std=gnu89", "-fwrapv", "-fno-strict-aliasing", "-fno-builtin", "-DDECOMP_PORT=1",
                  "-Wno-int-conversion", "-fcommon"):
         assert flag in c
@@ -194,24 +221,117 @@ def test_ptr32_rewrite():
     assert r("/* T *p */ T *p;", types) == f"/* T *p */ T {P}p;"
 
 
-def test_ir_patch_for_calls_and_copies_through_32_bit_pointers():
+def test_cmakelists_no_longer_requires_x86_64():
+    c = ep.cmakelists("slus-01252")
+    assert "x86_64" not in c.split("project(")[1].split("\n", 1)[1].replace("-DCMAKE_OSX_ARCHITECTURES=x86_64", "")
+    assert "FATAL_ERROR" not in c and "set(CMAKE_OSX_ARCHITECTURES" not in c  # the host's architecture: arm64 on a Mac
+    assert "cc_ptr32.py;--functions;${CMAKE_CURRENT_SOURCE_DIR}/gen/psx_function_addrs.txt" in c
+    assert ep.host_arch_flags() == []
+    assert ep.function_addrs([{"name": "func_80026000", "vram": 0x80026000}, {"name": "func_80026000", "vram": 0x80026000},
+                              {"name": "memset", "vram": 0x800FFF54}], {"memset": "psx_game_memset"}).splitlines()[1:] \
+        == ["func_80026000 0x80026000", "psx_game_memset 0x800FFF54"]
+
+
+# ---- the IR transform (tools/cc_ptr32.py): the six cases, on hand-written IR like clang's -O0 output
+
+BASE = 4294967296  # PSX_HOST_BASE
+FNS = {"func_8017C5F4": 0x8017C5F4}
+
+
+def _fn(*body):
+    return "define void @f(ptr addrspace(271) noundef %0, ptr noundef %1) {\n" + "\n".join(f"  {b}" for b in body) + \
+        "\n  ret void\n}\n"
+
+
+def _patch(*body):
     cc = _tool("cc_ptr32")
-    ir = """define void @f(ptr addrspace(271) noundef %0) #0 {
-  %3 = load ptr addrspace(271), ptr %2, align 4
-  call addrspace(271) void %3(ptr addrspace(271) noundef %0) #2
-  %4 = call addrspace(271) i32 addrspacecast (ptr @g to ptr addrspace(271))(i32 noundef 1)
-  call void @llvm.memcpy.p271.p271.i64(ptr addrspace(271) align 4 %0, ptr addrspace(271) align 4 inttoptr (i32 -2147051008 to ptr addrspace(271)), i64 8, i1 false)
-  ret void
-}
-declare void @llvm.memcpy.p271.p271.i64(ptr addrspace(271) noalias writeonly, ptr addrspace(271) noalias readonly, i64, i1 immarg)
-"""
-    out = cc.patch(ir)
-    assert "%__p32c1 = addrspacecast ptr addrspace(271) %3 to ptr" in out
-    assert "call void %__p32c1(ptr addrspace(271) noundef %0)" in out
-    assert "%4 = call i32 @g(i32 noundef 1)" in out
-    assert "addrspacecast ptr addrspace(271) inttoptr (i32 -2147051008 to ptr addrspace(271)) to ptr" in out
-    assert "call void @llvm.memcpy.p0.p0.i64(ptr align 4 %__p32c2, ptr align 4 %__p32c3, i64 8, i1 false)" in out
-    assert "declare void @llvm.memcpy.p0.p0.i64(" in out and "p271.p271" not in out
+    out = cc.patch(_fn(*body), FNS)
+    assert cc.leftovers(out) == []
+    return out
+
+
+def test_ir_loads_and_stores_through_a_32_bit_pointer_go_to_the_window():
+    out = _patch("%3 = load i16, ptr addrspace(271) %0, align 2",
+                 "store volatile ptr addrspace(271) %0, ptr addrspace(271) %0, align 4",
+                 "%4 = load i32, ptr addrspace(271) inttoptr (i32 -2146708500 to ptr addrspace(271)), align 4",
+                 "%5 = cmpxchg ptr addrspace(271) %0, i32 0, i32 1 seq_cst seq_cst",
+                 "%6 = atomicrmw add ptr addrspace(271) %0, i32 1 seq_cst")
+    assert "%__p32_1 = ptrtoint ptr addrspace(271) %0 to i64" in out
+    assert f"%__p32_2 = or i64 %__p32_1, {BASE}" in out and "%__p32_3 = inttoptr i64 %__p32_2 to ptr" in out
+    assert "%3 = load i16, ptr %__p32_3, align 2" in out
+    assert "store volatile ptr addrspace(271) %0, ptr %__p32_6, align 4" in out  # the value stays 4 bytes
+    assert f"load i32, ptr inttoptr (i64 {BASE + (-2146708500 & 0xFFFFFFFF)} to ptr), align 4" in out  # a raw address, folded
+    assert "%5 = cmpxchg ptr %__p32_9, i32 0, i32 1" in out and "%6 = atomicrmw add ptr %__p32_12, i32 1" in out
+
+
+def test_ir_memory_intrinsics_on_32_bit_pointers_become_the_p0_forms():
+    cc = _tool("cc_ptr32")
+    ir = _fn("call void @llvm.memcpy.p271.p271.i64(ptr addrspace(271) align 4 %0, ptr addrspace(271) align 4 "
+             "addrspacecast (ptr @D_801A0FE0 to ptr addrspace(271)), i64 8, i1 false)",
+             "call void @llvm.memset.p271.i32(ptr addrspace(271) align 1 %0, i8 0, i32 16, i1 false)") + \
+        "declare void @llvm.memcpy.p271.p271.i64(ptr addrspace(271), ptr addrspace(271), i64, i1 immarg)\n"
+    out = cc.patch(ir, FNS)
+    assert "call void @llvm.memcpy.p0.p0.i64(ptr align 4 %__p32_3, ptr align 4 @D_801A0FE0, i64 8, i1 false)" in out
+    assert "call void @llvm.memset.p0.i32(ptr align 1 %__p32_6, i8 0, i32 16, i1 false)" in out
+    assert "declare void @llvm.memcpy.p0.p0.i64(" in out and "declare void @llvm.memset.p0.i32(" in out
+    assert "p271" not in out and cc.leftovers(out) == []
+
+
+def test_ir_addrspacecast_from_32_bits_is_zext_plus_the_base():
+    out = _patch("%3 = addrspacecast ptr addrspace(271) %0 to ptr",
+                 "call void @g(ptr addrspacecast (ptr addrspace(271) inttoptr (i32 -2147051520 to ptr addrspace(271)) "
+                 "to ptr))")
+    assert "%__p32_1 = ptrtoint ptr addrspace(271) %0 to i64" in out
+    assert f"%__p32_2 = or i64 %__p32_1, {BASE}" in out and "%3 = inttoptr i64 %__p32_2 to ptr" in out
+    assert f"call void @g(ptr inttoptr (i64 {BASE + (-2147051520 & 0xFFFFFFFF)} to ptr))" in out
+
+
+def test_ir_addrspacecast_to_32_bits_is_the_low_half():
+    out = _patch("%3 = alloca i32, align 4",
+                 "%4 = addrspacecast ptr %3 to ptr addrspace(271)",
+                 "store ptr addrspace(271) addrspacecast (ptr @.str to ptr addrspace(271)), ptr %1, align 4")
+    assert "%__p32_1 = ptrtoint ptr %3 to i32" in out and "%4 = inttoptr i32 %__p32_1 to ptr addrspace(271)" in out
+    assert "store ptr addrspace(271) inttoptr (i32 ptrtoint (ptr @.str to i32) to ptr addrspace(271)), ptr %1" in out
+
+
+def test_ir_a_game_functions_address_is_its_ps1_address():
+    out = _patch("store ptr addrspace(271) addrspacecast (ptr @func_8017C5F4 to ptr addrspace(271)), ptr %1, align 4",
+                 "%3 = ptrtoint ptr @func_8017C5F4 to i32",
+                 "%4 = icmp eq i32 %3, ptrtoint (ptr @func_8017C5F4 to i32)",
+                 "%5 = addrspacecast ptr @func_8017C5F4 to ptr addrspace(271)",
+                 "%6 = ptrtoint ptr @host_thing to i32")
+    addr = 0x8017C5F4 - (1 << 32)
+    assert f"store ptr addrspace(271) inttoptr (i32 {addr} to ptr addrspace(271)), ptr %1" in out
+    assert f"%3 = bitcast i32 {addr} to i32" in out and f"%4 = icmp eq i32 %3, {addr}" in out
+    assert f"%5 = inttoptr i32 {addr} to ptr addrspace(271)" in out
+    assert "%6 = ptrtoint ptr @host_thing to i32" in out  # not a game function: its truncated host address
+
+
+def test_ir_calls_through_a_32_bit_pointer_ask_the_runtime():
+    out = _patch("%3 = load ptr addrspace(271), ptr %1, align 4",
+                 "call addrspace(271) void %3(ptr addrspace(271) noundef %0) #2, !dbg !7",
+                 "%4 = call addrspace(271) i32 addrspacecast (ptr @g to ptr addrspace(271))(i32 noundef 1)",
+                 "call addrspace(271) void inttoptr (i32 -2145926668 to ptr addrspace(271))()")
+    assert "%__p32_1 = ptrtoint ptr addrspace(271) %3 to i32" in out
+    assert "%__p32_2 = call ptr @psx_host_fn(i32 %__p32_1), !dbg !7" in out
+    assert "call void %__p32_2(ptr addrspace(271) noundef %0) #2, !dbg !7" in out
+    assert "%4 = call i32 @g(i32 noundef 1)" in out  # a direct call written through a cast
+    assert "%__p32_3 = call ptr @psx_host_fn(i32 -2145926668)" in out and "call void %__p32_3()" in out
+    assert out.count("declare ptr @psx_host_fn(i32)") == 1
+
+
+def test_ir_32_bit_address_arithmetic_stays():
+    body = ["%3 = ptrtoint ptr addrspace(271) %0 to i32", "%4 = add i32 %3, 16",
+            "%5 = inttoptr i32 %4 to ptr addrspace(271)",
+            "%6 = getelementptr inbounds i8, ptr addrspace(271) %5, i32 4",
+            "%7 = icmp eq ptr addrspace(271) %6, null"]
+    out = _patch(*body)
+    for b in body:
+        assert f"  {b}\n" in out
+    assert "__p32" not in out
+    # but a 32-bit integer made into an ordinary pointer is a PS1 address
+    out = _patch("%3 = inttoptr i32 %4 to ptr")
+    assert "%__p32_1 = zext i32 %4 to i64" in out and "%3 = inttoptr i64 %__p32_2 to ptr" in out
 
 
 def test_run_log_summary():

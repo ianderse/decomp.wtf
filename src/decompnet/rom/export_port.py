@@ -4,17 +4,20 @@ against a PS1 runtime layer, links, and runs until the first thing the runtime d
 It builds on the rebuildable tree (export.py): the matched C is used from ../source/src as it is, so a re-export is
 picked up. What it adds, in <project>/port/:
 
-- PS1 RAM at its own address (2 MB at 0x80000000, mapped with MAP_FIXED), the executable's image copied in and its
-  bss cleared, so raw addresses, 32-bit pointers in the game's data and overlay images all work unchanged. That needs
-  an executable whose __PAGEZERO is smaller than 4 GB: macOS refuses that for arm64 (the kernel kills it at exec), so
-  on a Mac the port builds for x86_64 and runs under Rosetta 2 (measured 2026-10-23, docs/plans/port.md).
-- every data symbol the C uses as an absolute symbol at its PS1 address (gen/psx_symbols.S), so each file's
-  `extern` lands in that RAM; common.h's tentative definitions become common symbols the absolute ones override.
+- PS1 memory in a 4 GB window of the host's address space: PS1 address A at PSX_HOST_BASE + A (0x1_0000_0000 + A),
+  so RAM is 2 MB at 0x1_8000_0000, the game's stack is mapped in the window too, and the low 32 bits of a host
+  pointer into it are the PS1 address. The executable's image is copied in and its bss cleared, so raw addresses,
+  32-bit pointers in the game's data and overlay images all work once the game's accesses are translated: the game's
+  files are compiled to LLVM IR and every access through a 32-bit pointer becomes one through zext(p) + PSX_HOST_BASE
+  (tools/cc_ptr32.py). Native arm64 (the host's architecture); docs/plans/port.md has the measurements.
+- every data symbol the C uses as an absolute symbol at PSX_HOST_BASE + its PS1 address (gen/psx_symbols.S), so each
+  file's `extern` lands in that RAM; common.h's tentative definitions become common symbols the absolute ones override.
 - a software GTE behind the same macro names as the export's psx_gte.h; one stub per function still in assembly
   (logs, then stops unless PSX_PORT_SOFT=1); Sony's library functions as logging stubs, a few implemented (VSync,
   the environment calls, the pad, libgte's matrix arithmetic, the BIOS's C library calls).
 - a table of every function at its PS1 address, so a call through a function pointer read from the game's data (a
-  MIPS address) lands on the host function; the overlays that share an address are told apart by their code in RAM.
+  MIPS address) lands on the host function (psx_host_fn); the overlays that share an address are told apart by their
+  code in RAM. A game function's address taken in the C is its PS1 address too (gen/psx_function_addrs.txt).
 
 Generation is a set of pure functions (tested in tests/test_export_port.py); export_port() reads the tree and the
 project's database, runs them, and optionally builds and runs the result.
@@ -34,6 +37,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 RUNTIME = Path(__file__).with_name("port_runtime")
+PSX_HOST_BASE = 0x100000000  # PS1 address A lives at host PSX_HOST_BASE + A (psx/psx_runtime.h, tools/cc_ptr32.py)
 RAM_BASE, RAM_SIZE = 0x80000000, 0x200000
 SCRATCH_BASE, SCRATCH_SIZE = 0x1F800000, 0x400
 
@@ -52,6 +56,9 @@ IMPLEMENTED = {
     "PadInitDirect": "libpad", "PadStartCom": "libpad", "PadStopCom": "libpad",
     "SetRotMatrix": "libgte", "SetTransMatrix": "libgte", "RotMatrix": "libgte", "TransMatrix": "libgte",
     "ScaleMatrix": "libgte", "MulMatrix0": "libgte", "ApplyMatrix": "libgte", "SquareRoot0": "libgte",
+    "InitGeom": "libgte", "SetGeomOffset": "libgte", "SetGeomScreen": "libgte",
+    "OpenEvent": "libapi", "CloseEvent": "libapi", "EnableEvent": "libapi", "DisableEvent": "libapi",
+    "EnterCriticalSection": "libapi", "ExitCriticalSection": "libapi",
 }
 # the BIOS's C library calls (A0 table slot -> wrapper signature) the runtime implements behind the game's stub names
 BIOS_LIBC = {
@@ -65,6 +72,20 @@ BIOS_LIBC = {
     "A0_15": ("char *", "char *a, const char *b", "psx_bios_strcat(PSX_PTR(a), PSX_PTR(b))"),
     "A0_2F": ("int", "void", "psx_bios_rand()"),
     "A0_30": ("int", "unsigned a", "(psx_bios_srand(a), 0)"),
+    # the heap, in RAM (InitHeap's region)
+    "A0_39": ("int", "void *a, unsigned n", "(psx_bios_InitHeap(PSX_PTR(a), n), 0)"),
+    "A0_33": ("void *", "unsigned n", "psx_bios_malloc(n)"),
+    "A0_34": ("int", "void *a", "(psx_bios_free(PSX_PTR(a)), 0)"),
+    "A0_37": ("void *", "unsigned n, unsigned size", "psx_bios_calloc(n, size)"),
+    "A0_38": ("void *", "void *a, unsigned n", "psx_bios_realloc(PSX_PTR(a), n)"),
+    # events: a handle each, never delivered yet
+    "B0_08": ("int", "unsigned a, unsigned b, unsigned c, unsigned d", "psx_bios_OpenEvent(a, b, c, d)"),
+    "B0_09": ("int", "unsigned a", "psx_bios_CloseEvent(a)"),
+    "B0_0C": ("int", "unsigned a", "psx_bios_EnableEvent(a)"),
+    "B0_0D": ("int", "unsigned a", "psx_bios_DisableEvent(a)"),
+    # libapi's syscall wrappers (syscall_stubs)
+    "SYS_01": ("int", "void", "psx_EnterCriticalSection()"),
+    "SYS_02": ("int", "void", "psx_ExitCriticalSection()"),
 }
 # names the host's C library defines: a game function called that is renamed (-Dmemset=psx_game_memset) in the game's
 # files and the generated tables, so the runtime's own calls still reach the C library
@@ -224,8 +245,64 @@ def syscall_stubs(build: dict, image: bytes, known: dict[str, dict]) -> dict[str
         w = struct.unpack_from("<4I", image, f["rom"])
         if (w[0] & 0xFFFF0000) == 0x24040000 and w[1] == 0x0000000C and w[2] == 0x03E00008 and w[3] == 0:
             n = w[0] & 0xFFFF
-            out[f["name"]] = {"lib": "libapi", "bios": None, "label": f"syscall {n}: {SYSCALLS.get(n, '?')}",
+            out[f["name"]] = {"lib": "libapi", "bios": f"SYS_{n:02X}", "label": f"syscall {n}: {SYSCALLS.get(n, '?')}",
                               "objects": [], "vram": f["vram"]}
+    return out
+
+
+GTE_CONTROL = {24: "OFX", 25: "OFY", 26: "H", 27: "DQA", 28: "DQB", 29: "ZSF3", 30: "ZSF4"}
+
+
+def handwritten_gte(build: dict, image: bytes, skip=frozenset(), max_insns: int = 64) -> dict[str, dict]:
+    """Functions still in assembly whose whole body sets GTE control registers from constants: COP2 enabled in the
+    status register (mfc0/or/mtc0 $12), li + ctc2, jr $ra. libgte's InitGeom ends in one (SLUS-01252's
+    func_80178F28: ZSF3/ZSF4 = 0x155/0x100, H = 1000, DQA/DQB, OFX = OFY = 0), handwritten so it never matches. The
+    runtime replays its ctc2s on the software GTE. Decoded from the words (capstone stops at COP2 instructions).
+    {name: {"regs": [(reg, value)], "label", "init_geom", "vram"}}"""
+    out = {}
+    for f in build["functions"]:
+        if f.get("c") or f["name"] in skip or f.get("rom") is None or f["rom"] + 8 > len(image):
+            continue
+        regs: dict[int, int] = {0: 0}
+        sets: list[tuple[int, int]] = []
+        ok, ended, after_jr = True, False, False
+        n = min(max_insns, (len(image) - f["rom"]) // 4)
+        for w in struct.unpack_from(f"<{n}I", image, f["rom"]):
+            op, rs, rt, rd, funct = w >> 26, (w >> 21) & 31, (w >> 16) & 31, (w >> 11) & 31, w & 63
+            imm = w & 0xFFFF
+            simm = imm - 0x10000 if imm & 0x8000 else imm
+            if w == 0:
+                pass
+            elif op == 0x10 and rs in (0, 4) and rd == 12:   # mfc0/mtc0 $12 (status: COP2 on)
+                if rs == 0:
+                    regs.pop(rt, None)
+            elif op == 0x0F:                                # lui
+                regs[rt] = (imm << 16) & 0xFFFFFFFF
+            elif op in (0x08, 0x09) and rs in regs:         # addi/addiu
+                regs[rt] = (regs[rs] + simm) & 0xFFFFFFFF
+            elif op == 0x0D and rs in regs:                 # ori
+                regs[rt] = regs[rs] | imm
+            elif op == 0 and funct in (0x21, 0x25) and rd:  # addu/or
+                if rs in regs and (w >> 16) & 31 in regs:
+                    regs[rd] = (regs[rs] + regs[rt]) & 0xFFFFFFFF if funct == 0x21 else regs[rs] | regs[rt]
+                else:
+                    regs.pop(rd, None)
+            elif op == 0x12 and rs == 6 and rt in regs:     # ctc2
+                sets.append((rd, regs[rt]))
+            elif op == 0 and funct == 0x08 and rs == 31 and not after_jr:  # jr $ra, then its delay slot
+                after_jr = True
+                continue
+            else:
+                ok = False
+                break
+            if after_jr:
+                ended = True
+                break
+        if ok and ended and sets:
+            is_init = {29, 30} <= {r for r, _ in sets}
+            label = ("InitGeom's handwritten body" if is_init else "a handwritten GTE setup") + ": " + ", ".join(
+                f"{GTE_CONTROL.get(r, f'c{r}')} = 0x{v & 0xFFFFFFFF:X}" for r, v in sets)
+            out[f["name"]] = {"regs": sets, "label": label, "init_geom": is_init, "vram": f["vram"]}
     return out
 
 
@@ -305,10 +382,13 @@ def detect_entry(image: bytes, max_insns: int = 256) -> dict:
 # ---------------------------------------------------------------------------------------------- the plan
 
 def plan(build: dict, sources: dict[str, str], headers: dict[str, str], sony: dict[str, dict],
-         symbol_text: str = "", auto_text: str = "", excluded: dict[str, str] | None = None) -> dict:
+         symbol_text: str = "", auto_text: str = "", excluded: dict[str, str] | None = None,
+         handwritten: dict[str, dict] | None = None) -> dict:
     """Decide what the port is made of. sources: {path in the tree: text} of the matched C files; headers:
-    {name: text} of include/*.h; excluded: {path: why} matched files left out (they don't compile for the host)."""
+    {name: text} of include/*.h; excluded: {path: why} matched files left out (they don't compile for the host);
+    handwritten: handwritten_gte()'s functions, which the runtime replays instead of stubbing."""
     excluded = excluded or {}
+    handwritten = {k: v for k, v in (handwritten or {}).items() if k not in sony}
     fns = build["functions"]
     compiled = [f for f in fns if f.get("c") and f["c"] not in excluded]
     host_c = {f["name"] for f in compiled}
@@ -334,7 +414,8 @@ def plan(build: dict, sources: dict[str, str], headers: dict[str, str], sony: di
     as_data_unmatched = sorted(n for n in asm_names if n in data_use and n not in calls and n not in sony)
     as_data_matched = sorted(n for n in host_c if n in data_use)
     stubbed = [n for n in asm_names if n not in as_data_unmatched]
-    unmatched = [(n, None) for n in stubbed if n not in sony]
+    unmatched = [(n, None) for n in stubbed if n not in sony and n not in handwritten]
+    replayed = {n: handwritten[n] for n in stubbed if n in handwritten}
     by_name = {f["name"]: f for f in fns}
     for path, why in sorted(excluded.items()):
         f = next((g for g in fns if g.get("c") == path), None)
@@ -347,7 +428,7 @@ def plan(build: dict, sources: dict[str, str], headers: dict[str, str], sony: di
             kind = "implemented" if n in IMPLEMENTED else ("bios" if s.get("bios") in BIOS_LIBC else "stub")
             sdk.append({"name": n, "lib": IMPLEMENTED.get(n, s["lib"]), "bios": s.get("bios"), "label": s["label"],
                         "kind": kind, "called": n in calls})
-    host_fn = host_c | {n for n, _ in unmatched} | {s["name"] for s in sdk}
+    host_fn = host_c | {n for n, _ in unmatched} | {s["name"] for s in sdk} | set(replayed)
 
     explicit: dict[str, int] = {}
     for name, addr, comment in parse_symbol_addrs(symbol_text):
@@ -375,29 +456,41 @@ def plan(build: dict, sources: dict[str, str], headers: dict[str, str], sony: di
         n = f["name"]
         if n not in host_fn:
             continue
-        kind = 0 if n in host_c else 1 if n not in sony else (3 if n in IMPLEMENTED else 2)
+        kind = 0 if n in host_c else 3 if n in replayed else 1 if n not in sony else (3 if n in IMPLEMENTED else 2)
         dispatch.append({"vram": f["vram"], "rom": f.get("rom"), "name": n, "seg": f["seg"], "kind": kind})
     dispatch.sort(key=lambda d: (d["vram"], d["seg"]))
     renames = {n: f"psx_game_{n}" for n in sorted(host_fn | set(symbols)) if n in RESERVED}
     return {"renames": renames, "game_implements": sorted(n for n in IMPLEMENTED if n in host_c),"compiled": [f["c"] for f in compiled], "unmatched": unmatched, "sdk": sdk, "symbols": symbols,
             "as_data_matched": as_data_matched, "as_data_unmatched": as_data_unmatched, "unresolved": unresolved,
-            "dispatch": dispatch, "excluded": dict(excluded), "calls": calls}
+            "dispatch": dispatch, "excluded": dict(excluded), "calls": calls, "replayed": replayed}
 
 
 # ---------------------------------------------------------------------------------------------- emitters
 
 def symbols_asm(symbols: dict[str, int], renames: dict[str, str] | None = None) -> str:
-    lines = ["/* every data symbol the game's C uses, at its PS1 address (generated by decomp.wtf's port export) */",
-             "#if defined(__APPLE__)", "#define SYM(x) _##x", "#else", "#define SYM(x) x", "#endif"]
+    lines = ["/* every data symbol the game's C uses, at its PS1 address in the host's window: PS1 address A at",
+             " * PSX_HOST_BASE + A (psx/psx_runtime.h). Generated by decomp.wtf's port export. */",
+             "#if defined(__APPLE__)", "#define SYM(x) _##x", "#else", "#define SYM(x) x", "#endif",
+             f"#define PSX_HOST_BASE 0x{PSX_HOST_BASE:X}", "#define PSX(a) (PSX_HOST_BASE + a)"]
     for name, addr in sorted(symbols.items(), key=lambda kv: (kv[1], kv[0])):
         name = (renames or {}).get(name, name)
-        lines += [f".globl SYM({name})", f"SYM({name}) = 0x{addr:08X}"]
+        lines += [f".globl SYM({name})", f"SYM({name}) = PSX(0x{addr:08X})"]
     return "\n".join(lines) + "\n"
 
 
-def unmatched_c(unmatched: list[tuple[str, str | None]], renames: dict[str, str] | None = None) -> str:
+def unmatched_c(unmatched: list[tuple[str, str | None]], renames: dict[str, str] | None = None,
+                replayed: dict[str, dict] | None = None) -> str:
     out = ['/* one stub per function still in assembly (or whose C does not compile for the host): generated */',
            '#include "psx_runtime.h"', ""]
+    if replayed:
+        out += ["void psx_gte_ctc2(int reg, int value);",
+                "/* handwritten functions that only set GTE control registers: replayed on the software GTE */"]
+        for name, h in replayed.items():
+            c = (renames or {}).get(name, name)
+            body = " ".join(f"psx_gte_ctc2({r}, {_c_int(v)});" for r, v in h["regs"])
+            out.append(f"/* {h['label']} */")
+            out.append(f"int {c}(void) {{ {body} return 0; }}")
+        out.append("")
     for name, why in unmatched:
         c = (renames or {}).get(name, name)
         if why:
@@ -406,6 +499,24 @@ def unmatched_c(unmatched: list[tuple[str, str | None]], renames: dict[str, str]
                        f'{_c_string(why)})"); }}')
         else:
             out.append(f'int {c}(void) {{ return psx_unmatched("{name}"); }}')
+    return "\n".join(out) + "\n"
+
+
+def _c_int(v: int) -> str:
+    v &= 0xFFFFFFFF
+    return f"(int)0x{v:X}u" if v >= 0x80000000 else f"0x{v:X}"
+
+
+def function_addrs(dispatch: list[dict], renames: dict[str, str] | None = None) -> str:
+    """name 0xADDRESS for every host function at a PS1 address: tools/cc_ptr32.py turns a game function's address
+    taken in the C into this, so it is the MIPS address the game's data holds. Overlays sharing an address and a name
+    give one line."""
+    seen, out = set(), ["# every game function's PS1 address, for tools/cc_ptr32.py (generated)"]
+    for d in dispatch:
+        n = (renames or {}).get(d["name"], d["name"])
+        if n not in seen:
+            seen.add(n)
+            out.append(f"{n} 0x{d['vram']:08X}")
     return "\n".join(out) + "\n"
 
 
@@ -509,16 +620,10 @@ def cmakelists(slug: str) -> str:
 #   cmake -S port -B port/build && cmake --build port/build && port/build/game
 cmake_minimum_required(VERSION 3.20)
 
-# PS1 RAM lives at its own address (0x80000000), which needs a __PAGEZERO under 4 GB. macOS refuses that for arm64
-# executables (killed at exec), so on a Mac the port is x86_64 and runs under Rosetta 2. See PORT.md.
-if(APPLE AND NOT CMAKE_OSX_ARCHITECTURES)
-  set(CMAKE_OSX_ARCHITECTURES x86_64 CACHE STRING "x86_64: arm64 macOS can't map memory below 4 GB" FORCE)
-endif()
+# Native, for the host's architecture (arm64 on Apple silicon). PS1 memory lives in a 4 GB window of the host's
+# address space (PS1 address A at 0x1_0000_0000 + A, RAM at 0x1_8000_0000), the game's files translated to it by
+# tools/cc_ptr32.py; -DCMAKE_OSX_ARCHITECTURES=x86_64 builds the same thing for Rosetta 2. See PORT.md.
 project({re.sub(r'[^A-Za-z0-9_]', '_', slug)}_port C ASM)
-if(APPLE AND CMAKE_OSX_ARCHITECTURES MATCHES "arm64")
-  message(FATAL_ERROR "arm64 macOS kills executables whose __PAGEZERO is under 4 GB, and PS1 RAM must be mapped at "
-                      "0x80000000: build for x86_64 (the default here), which runs under Rosetta 2")
-endif()
 
 set(PSX_SOURCE_DIR "${{CMAKE_CURRENT_SOURCE_DIR}}/../source" CACHE PATH "the exported tree (decomp.wtf's export)")
 set(PSX_HOST "auto" CACHE STRING "window: auto, sdl, cocoa or none")
@@ -558,9 +663,11 @@ endif()
 # psx_port_game.h is force-included (inline as GCC did, and the host's psx_gte.h: common.h's own #include "psx_gte.h"
 # would find the export's copy next to it first)
 add_library(game_code OBJECT ${{GAME_COMPILE}})
-if(PSX_PTR32)  # calls and memory copies through __ptr32 pointers, which clang's backend can't do (tools/cc_ptr32.py)
+if(PSX_PTR32)  # every use of a __ptr32 pointer translated to the window (tools/cc_ptr32.py): IR, patched, compiled
   set_target_properties(game_code PROPERTIES
-                        C_COMPILER_LAUNCHER "${{Python3_EXECUTABLE}};${{CMAKE_CURRENT_SOURCE_DIR}}/tools/cc_ptr32.py")
+                        C_COMPILER_LAUNCHER "${{Python3_EXECUTABLE}};${{CMAKE_CURRENT_SOURCE_DIR}}/tools/cc_ptr32.py;--functions;${{CMAKE_CURRENT_SOURCE_DIR}}/gen/psx_function_addrs.txt")
+  set_property(SOURCE ${{GAME_COMPILE}} APPEND PROPERTY OBJECT_DEPENDS
+               ${{CMAKE_CURRENT_SOURCE_DIR}}/tools/cc_ptr32.py ${{CMAKE_CURRENT_SOURCE_DIR}}/gen/psx_function_addrs.txt)
 endif()
 target_include_directories(game_code BEFORE PRIVATE ${{GAME_INCLUDES}})
 target_compile_definitions(game_code PRIVATE ${{GAME_RENAMES}})
@@ -572,7 +679,7 @@ file(GLOB PSX_RUNTIME ${{CMAKE_CURRENT_SOURCE_DIR}}/psx/*.c ${{CMAKE_CURRENT_SOU
 list(FILTER PSX_RUNTIME EXCLUDE REGEX "/host_[a-z]+\\\\.(c|m)$")
 file(GLOB PSX_GEN ${{CMAKE_CURRENT_SOURCE_DIR}}/gen/*.c ${{CMAKE_CURRENT_SOURCE_DIR}}/gen/*.S)
 
-# the window: SDL2 when it links for this architecture (Homebrew's on Apple silicon is arm64 only), else AppKit
+# the window: SDL2 when it links for this architecture (Homebrew's sdl2-config on Apple silicon: arm64), else AppKit
 if(PSX_HOST STREQUAL "auto")
   set(PSX_HOST none)
   find_package(PkgConfig QUIET)
@@ -632,11 +739,10 @@ if(PSX_HOST STREQUAL "sdl")
 elseif(PSX_HOST STREQUAL "cocoa")
   target_link_options(game PRIVATE "SHELL:-framework Cocoa")
 endif()
-if(APPLE)
-  # map the low 4 GB (PS1 RAM at 0x80000000); text then loads below 4 GB too, so host function addresses fit in 32 bits
-  target_link_options(game PRIVATE -Wl,-pagezero_size,0x1000)
-elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
-  target_link_options(game PRIVATE -no-pie)
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+  # the executable in the window too (macOS puts it at 0x1_0000_0000 by itself): the game's string literals and
+  # globals are host memory it holds as 32-bit pointers
+  target_link_options(game PRIVATE -no-pie -Wl,-Ttext-segment=0x100400000)
 endif()
 target_link_libraries(game PRIVATE m)
 """
@@ -751,8 +857,8 @@ def check_sources(src_root: Path, paths: list[str], include_dirs: list[Path], fo
 
 
 def host_arch_flags() -> list[str]:
-    import platform
-    return ["-arch", "x86_64"] if platform.system() == "Darwin" else []
+    """The compile check builds for the host's own architecture, as the CMake build does."""
+    return []
 
 
 # ---------------------------------------------------------------------------------------------- the export
@@ -848,15 +954,16 @@ def generate(source: Path, port: Path, sony: dict[str, dict], title: str, slug: 
     auto_text = "".join((source / n).read_text(encoding="utf-8") for n in ("undefined_syms_auto.txt",)
                         if (source / n).exists())
     sony = {**sony, **syscall_stubs(b, image, sony)}
-    p = plan(b, sources, headers, sony, sym_text, auto_text, excluded)
+    p = plan(b, sources, headers, sony, sym_text, auto_text, excluded, handwritten_gte(b, image, set(sony)))
     if main_name not in {d["name"] for d in p["dispatch"]}:
         raise PortError(f"{main_name} isn't a function of this game")
     rn = p["renames"]
     files = {
         "psx_symbols.S": symbols_asm(p["symbols"], rn),
-        "psx_unmatched.c": unmatched_c(p["unmatched"], rn),
+        "psx_unmatched.c": unmatched_c(p["unmatched"], rn, p["replayed"]),
         "psx_sdk_stubs.c": sdk_stubs_c(p["sdk"], rn),
         "psx_functions.c": functions_c(p["dispatch"], image, rn),
+        "psx_function_addrs.txt": function_addrs(p["dispatch"], rn),
         "psx_config.c": config_c(title, b["image"], entry, rn.get(main_name, main_name)),
         "psx_sdk_config.h": sdk_config_h(headers, p["game_implements"]),
         "game_sources.cmake": game_sources_cmake(p["compiled"], rn),
@@ -878,6 +985,7 @@ def generate(source: Path, port: Path, sony: dict[str, dict], title: str, slug: 
         "sdk_bios": sum(1 for s in p["sdk"] if s["kind"] == "bios"),
         "sdk_implemented": sorted(s["name"] for s in p["sdk"] if s["kind"] == "implemented"),
         "sdk_called": sorted(s["name"] for s in p["sdk"] if s["called"]),
+        "replayed": {n: h["label"] for n, h in p["replayed"].items()},
         "sdk_by_lib": {lib: sum(1 for s in p["sdk"] if s["lib"] == lib) for lib in LIBRARIES},
         "symbols": len(p["symbols"]), "renamed": rn, "game_implements": p["game_implements"], "as_data_matched": p["as_data_matched"],
         "as_data_unmatched": p["as_data_unmatched"], "unresolved": p["unresolved"], "hazards": hz,
@@ -898,6 +1006,11 @@ def build_and_run(port: Path, log=print, seconds: int = 5) -> dict:
     cmake = shutil.which("cmake") or "/opt/homebrew/bin/cmake"
     bdir = port / "build"
     res = {"configured": False, "built": False, "ran": False}
+    cache = bdir / "CMakeCache.txt"
+    if cache.exists() and "arm64 macOS can't map memory below 4 GB" in cache.read_text(encoding="utf-8", errors="replace"):
+        log("cmake: the build directory was configured for x86_64 by an older generator: configuring it afresh")
+        cache.unlink()
+        shutil.rmtree(bdir / "CMakeFiles", ignore_errors=True)
     log("cmake: configuring")
     r = subprocess.run([cmake, "-S", str(port), "-B", str(bdir), "-DCMAKE_BUILD_TYPE=RelWithDebInfo"],
                        capture_output=True, text=True, encoding="utf-8", errors="replace")
@@ -916,6 +1029,11 @@ def build_and_run(port: Path, log=print, seconds: int = 5) -> dict:
         log(res["build_log_tail"])
         return res
     res["built"] = True
+    try:
+        res["executable"] = subprocess.run(["file", "-b", str(bdir / "game")], capture_output=True, text=True,
+                                           timeout=30).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        res["executable"] = "?"
     # strict: stops at the first function that is still assembly; soft: goes on past them for `seconds`
     for mode, soft in (("strict", False), ("soft", True)):
         log(f"running build/game ({mode}{', PSX_PORT_SOFT=1' if soft else ''}, at most {seconds} s)")
@@ -987,7 +1105,8 @@ def port_md(title: str, r: dict) -> str:
     bld = r.get("build") or {}
     if bld.get("ran"):
         s, f = bld["strict"], bld["soft"]
-        built = (f"Built and run here (window through {bld.get('host')}).\n\n"
+        built = (f"Built and run here: `build/game` is a {bld.get('executable', '?')}, window through "
+                 f"{bld.get('host')}.\n\n"
                  f"- **Strict** (`port/build/game`, {s['seconds']} s, exit {s['exit']}): runs: {s['story']}.\n"
                  f"- **Soft** (`PSX_PORT_SOFT=1`, {f['seconds']} s, exit {f['exit']}): runs: {f['story']}. "
                  f"{len(f['entered'])} distinct game functions entered, {len(f['unmatched_hit'])} functions still in "
@@ -1020,7 +1139,8 @@ functions that are still assembly (they return 0) instead of stopping at the fir
 distinct game functions entered (default 200); `PSX_HEADLESS=1` no window; `PSX_TIMEOUT=S` stops after S seconds;
 `PSX_SOURCE_DIR` the exported tree if it moved. Keys: arrows (d-pad), Z/X/A/S (cross/circle/square/triangle),
 Return (start), right shift (select), Q/W (L1/R1), 1/2 (L2/R2). CMake options: `-DPSX_PTR32=OFF` (the C as it is,
-8-byte pointers), `-DPSX_HOST=sdl|cocoa|none`.
+8-byte pointers), `-DPSX_HOST=sdl|cocoa|none`, `-DCMAKE_OSX_ARCHITECTURES=x86_64` (the same build for Rosetta 2;
+the default is the host's architecture, arm64 on Apple silicon).
 
 {built}
 ## What was generated
@@ -1033,6 +1153,7 @@ Return (start), right shift (select), Q/W (L1/R1), 1/2 (L2/R2). CMake options: `
 | Sony functions as logging stubs (`gen/psx_sdk_stubs.c`) | {r['sdk_stubs']} ({sdk_lib}) |
 | BIOS C library calls (memcpy, strlen, rand, ...) implemented behind the game's stub names | {r['sdk_bios']} |
 | Sony functions implemented (`psx/sdk/*.c`) | {len(r['sdk_implemented'])}: {', '.join(r['sdk_implemented'])} |
+| Handwritten GTE setups replayed on the software GTE (`gen/psx_unmatched.c`) | {len(r.get('replayed') or {})}{': ' + '; '.join(f"`{n}` ({v})" for n, v in (r.get('replayed') or {}).items()) if r.get('replayed') else ''} |
 | Sony functions the matched C calls by name | {len(r['sdk_called'])} |
 | Data symbols at their PS1 address (`gen/psx_symbols.S`) | {r['symbols']} |
 | Game functions renamed because the C library has the name | {renamed} |
@@ -1048,30 +1169,38 @@ generated from this game). `port.json` has these numbers.
 
 ## How it works, and what was measured (2026-10-23, Apple clang 21, ld64, macOS 26 on Apple silicon)
 
-- **PS1 RAM at its own address.** 2 MB at 0x80000000 and the scratchpad at 0x1F800000, mapped with MAP_FIXED; the
-  executable's image is copied to 0x{e['load']:08X} and bss cleared as crt0 does. Raw addresses (`*(s32 *)0x8002B590`),
-  pointers stored in the game's data and overlay images then work unchanged.
-- **x86_64, not arm64.** Mapping below 4 GB needs a __PAGEZERO smaller than 4 GB (`-Wl,-pagezero_size,0x1000`).
-  The kernel kills (SIGKILL at exec) any arm64 executable with one (tried 0, 0x4000, 0x80000000), and without it mmap at
-  0x80000000 fails. The same test built `-arch x86_64` runs under Rosetta 2: it maps 0x80000000 and its text loads
-  below 4 GB, so host function addresses fit in 32 bits. So the port builds for x86_64 on a Mac. Homebrew's SDL2 on
-  Apple silicon is arm64 only, so the window goes through AppKit there (SDL2 when one for the architecture links).
-- **Data symbols are absolute symbols** at their PS1 address (`.globl _D_801A18E0` / `_D_801A18E0 = 0x801A18E0`), so
-  each file's own `extern` lands in that RAM. ld accepts them from a PIE and reaches them through the GOT; a tentative
-  definition (`s32 D_801A1A40;`, the way common.h declares small globals) with `-fcommon` is overridden by the
-  absolute symbol (ld warns "tentative definition ... replaced by real definition").
+- **Native arm64, PS1 memory in a window.** PS1 address A lives at host address 0x1_0000_0000 + A
+  (`PSX_HOST_BASE`, `psx_host()`/`psx_ps1()` in `psx/psx_runtime.h`): RAM is 2 MB at 0x1_8000_0000, the scratchpad
+  at 0x1_1F80_0000, the game's stack 8 MB at 0x1_6000_0000 (the game sees sp as 0x6000xxxx), and the low 32 bits of a
+  host pointer into the window are the PS1 address again. The executable's image is copied to 0x{e['load']:08X}
+  (host 0x1_{e['load']:08X}) and bss cleared as crt0 does. The first pass mapped RAM at 0x80000000 itself, which
+  needs a __PAGEZERO under 4 GB: arm64 macOS kills such executables at exec, so that build was x86_64 under
+  Rosetta 2. 0x1_8000_0000 is the start of macOS's shared region, but the dyld shared cache is slid into it at boot
+  and the part before it is a no-access reservation (0x1_8000_0000-0x1_8795_8000 here): RAM is mapped with
+  MAP_FIXED only after checking every region it covers is unmapped or no-access, so a boot whose slide puts the cache
+  under RAM gets an error, never a clobbered cache.
+- **Data symbols are absolute symbols** at 0x1_0000_0000 + their PS1 address (`.globl _D_801A18E0` /
+  `_D_801A18E0 = PSX(0x801A18E0)`), so each file's own `extern` lands in that RAM. ld accepts them in an arm64 PIE
+  and reaches them through the GOT; a tentative definition (`s32 D_801A1A40;`, the way common.h declares small
+  globals) with `-fcommon` is overridden by the absolute symbol (ld warns "tentative definition ... replaced by real
+  definition").
 - **4-byte pointers (`PSX_PTR32`, on by default).** A host pointer is 8 bytes; one stored in the game's RAM is 4.
   Without the rewrite the run dies at the third function: func_8017C4F4 reads a function pointer from a table in RAM
-  as 8 bytes and jumps to 0x8017C8C08017C5F4 (two entries). `tools/ptr32.py` rewrites the game's files and headers
-  into `build/ptr32` (rerun when the export changes): every pointer declarator gets clang's `__ptr32 __uptr`
-  (`-fms-extensions`), `long` becomes `int`. clang's x86-64 backend can't call through such a pointer ("Cannot select
-  X86ISD::CALL", at -O0 and -O1; LLVM 21 and Homebrew's 22) or memcpy through one ("cannot lower memory intrinsic"), so
-  `tools/cc_ptr32.py` compiles each game file to LLVM IR, casts those pointers to ordinary ones at each call and
-  memcpy/memset, and compiles the IR (without it 127 of the 4000 files fail at -O1, 189 at -O0). With RAM, the game's stack (8 MB near
-  0x60000000) and the host code all below 4 GB, every 32-bit pointer is valid.
-- **Calls through the game's function pointers**: a pointer read from the game's data is a MIPS address; jumping
-  there faults (RAM isn't executable) and the fault handler sends it to the host function at that address
-  (`gen/psx_functions.c`, overlays at the same address told apart by their first two instructions in RAM).
+  as 8 bytes. `tools/ptr32.py` rewrites the game's files and headers into `build/ptr32` (rerun when the export
+  changes): every pointer declarator gets clang's `__ptr32 __uptr` (`-fms-extensions`; clang's AArch64 target has the
+  same 32-bit address space 271 as x86), `long` becomes `int`.
+- **The translation (`tools/cc_ptr32.py`).** clang lowers an access through a `__ptr32` pointer with a plain
+  zero-extension, below 4 GB, and can't call through one at all. So each game file goes to LLVM IR first and every
+  use of a 32-bit pointer is rewritten: loads, stores and memcpy/memset through one go to `zext(p) | 0x1_0000_0000`
+  (two instructions on arm64: `mov w8, w0; orr x8, x8, #0x100000000`); a host pointer given to the game (a local's
+  address) is its low 32 bits; a game function's address taken in the C is its PS1 address (`gen/psx_function_addrs.txt`),
+  so function pointers in RAM are MIPS addresses and compare equal to the game's data; a call through a 32-bit
+  pointer asks the runtime (`psx_host_fn`: the function table, overlays told apart by their code in RAM). 32-bit
+  address arithmetic stays as it is. All 4000 files' IR goes through it; the same 3 fail as before (their C).
+- **The runtime's side**: a pointer the game passes is a PS1 address (`PSX_PTR`/`psx_host`), and a pointer the
+  runtime hands the game must be in the window: RAM, the game's stack, or the PS1 heap (`InitHeap`/`malloc`, in RAM).
+- **Calls through the game's function pointers** go through `psx_host_fn`; the SIGSEGV handler that sent a jump
+  into RAM to the host function stays as a safety net for jumps from anywhere else.
 - **GTE**: `psx/gte.c` is a software GTE written from psx-spx (registers and their side effects, RTPS/RTPT, NCLIP,
   AVSZ3/4, MVMVA, SQR, OP, GPF/GPL, DPCS/DPCT, INTPL, DCPL, NCS/NCT, NCCS/NCCT, NCDS/NCDT, CC, CDP, the FLAG bits);
   not compared with hardware yet.
@@ -1085,14 +1214,17 @@ generated from this game). `port.json` has these numbers.
   declared as pointers; {sum(hz['pointer_members'].values())} pointer members in {len(ptr)} structs of common.h: {ptr_lines or 'none'};
   members declared `long`: {longs or 'none'}. The rewrite is token-level: a macro that takes a type as a parameter
   (`CAST(T, x)`) keeps 8-byte pointers in its casts (harmless in a cast, wrong in a declaration).
-- **arm64**: the rewrite doesn't help there; RAM can't be below 4 GB. A native arm64 build needs every PS1 address
-  translated (a base added to each pointer use: an LLVM pass, since `__ptr32` is x86 only), or a fault handler that
-  emulates each access.
+- **Host memory the game holds**: string literals and globals defined in the game's own files (2 string literals,
+  and common globals no symbol covers) are host memory; they round-trip through 32 bits only because macOS loads the
+  executable at 0x1_0000_0000 plus a small slide, inside the window (the run warns if not). An `int` compared with a
+  game function's address in an 8-byte-pointer context (`func_X` declared as data in 2 files) still compares with the
+  host address.
+- **Mirrors**: KUSEG (0x00000000) and KSEG1 (0xA0000000) views of RAM aren't mapped; a game that uses them faults.
 - **Functions used as data** that are matched (their name is a host function, so `func_X + N` is host code, not the
   game's): {', '.join(f'`{n}`' for n in r['as_data_matched']) or 'none'}. Unmatched ones are absolute symbols at
   their PS1 address: {', '.join(f'`{n}`' for n in r['as_data_unmatched']) or 'none'}.
-- **Raw addresses**: {hz['raw_address_casts']} casts of a constant address to a pointer in {hz['raw_address_files']} files; fine with RAM at
-  0x80000000, to fix for any other layout.
+- **Raw addresses**: {hz['raw_address_casts']} casts of a constant address to a pointer in {hz['raw_address_files']} files; translated like
+  any other 32-bit pointer.
 - **Overlays** are compiled into the one executable and share addresses; the game loads their images from the disc,
   and no CD is emulated yet. **Hardware registers** (0x1F801000 on) are plain memory.
 - **Calls nothing answers** (named in the C, but neither matched, a stub nor a symbol):
@@ -1104,9 +1236,9 @@ generated from this game). `port.json` has these numbers.
 [PsyCross](https://github.com/OpenDriver2/PsyCross) (OpenDriver2) reimplements PSY-Q's libraries on SDL2 (2.0.16+),
 OpenAL-soft and OpenGL: a renderer that emulates VRAM, an SPU, a software GTE with PGXP. REDRIVER2 and the Silent Hill
 PC port use it. Its repository says MIT, so linking it is fine. Its README names no operating system (macOS isn't
-mentioned; Emscripten is) and lists the CMake build scripts as a TODO. Here it would have to build for x86_64 like
-the port, with an x86_64 SDL2 and OpenAL (Homebrew on Apple silicon has arm64 only), and its PSY-Q headers declare
-`long`-based structs, which need the 32-bit layout this port's headers keep. A later `-DPSX_SDK=psycross` replacing
+mentioned; Emscripten is) and lists the CMake build scripts as a TODO. With the port native on arm64, Homebrew's
+SDL2 links; its PSY-Q headers declare `long`-based structs, which need the 32-bit layout this port's headers keep,
+and its pointers would have to follow the window rule. A later `-DPSX_SDK=psycross` replacing
 `psx/sdk` is worth it for the renderer and the SPU, which are most of the work left, but not before the CPU side
 (this port's RAM, pointers and calls) runs a frame.
 """

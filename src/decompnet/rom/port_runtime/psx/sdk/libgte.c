@@ -31,6 +31,33 @@ void SetTransMatrix(MATRIX *m) {
 }
 #endif
 
+/* InitGeom: COP2 on (always, here) and the GTE's control registers as libgte's handwritten body sets them: ZSF3/ZSF4
+ * for AVSZ3/AVSZ4 (0x155 = 4096/12, 0x100 = 4096/16), H = 1000, DQA/DQB (depth cueing), OFX = OFY = 0 */
+#ifndef PSX_GAME_HAS_InitGeom /* the game has its own, as matched C */
+void InitGeom(void) {
+    psx_gte_ctc2(29, 0x155);
+    psx_gte_ctc2(30, 0x100);
+    psx_gte_ctc2(26, 1000);
+    psx_gte_ctc2(27, -0x1062);
+    psx_gte_ctc2(28, 0x1400000);
+    psx_gte_ctc2(24, 0);
+    psx_gte_ctc2(25, 0);
+}
+#endif
+
+/* the screen offset, in 16.16 fixed point in OFX/OFY */
+#ifndef PSX_GAME_HAS_SetGeomOffset
+void SetGeomOffset(int ofx, int ofy) {
+    psx_gte_ctc2(24, (int)((uint32_t)ofx << 16));
+    psx_gte_ctc2(25, (int)((uint32_t)ofy << 16));
+}
+#endif
+
+/* the projection plane distance H */
+#ifndef PSX_GAME_HAS_SetGeomScreen
+void SetGeomScreen(int h) { psx_gte_ctc2(26, h); }
+#endif
+
 int rsin(int a) { return (int)lround(sin((a & 4095) * (2.0 * M_PI / 4096.0)) * 4096.0); }
 int rcos(int a) { return (int)lround(cos((a & 4095) * (2.0 * M_PI / 4096.0)) * 4096.0); }
 

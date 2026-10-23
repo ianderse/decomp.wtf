@@ -1,5 +1,5 @@
-/* What the run reports: calls into PS1 addresses (the game's function pointers) sent to the host function at that
- * address, the matched functions it enters (-finstrument-functions on the game's files), the unmatched and Sony
+/* Calls through the game's function pointers (PS1 addresses) to the host function at that address (psx_host_fn,
+ * which tools/cc_ptr32.py puts in front of every such call), and what the run reports: the matched functions it enters (-finstrument-functions on the game's files), the unmatched and Sony
  * functions it reaches, and where it crashed. */
 #define _XOPEN_SOURCE 700
 #define _DARWIN_C_SOURCE
@@ -66,13 +66,51 @@ const PsxFunction *psx_function_at(uint32_t vram) {
         else hi = mid;
     }
     for (k = lo; k < psx_function_count && psx_functions[k].vram == vram; k++) {
-        const uint32_t *code = (const uint32_t *)(uintptr_t)vram;
+        const uint32_t *code = psx_host(vram);
         if (!first) first = &psx_functions[k];
         if (vram >= PSX_RAM_BASE && vram + 8 <= PSX_RAM_BASE + PSX_RAM_SIZE && code[0] == psx_functions[k].word0
             && code[1] == psx_functions[k].word1)
             return &psx_functions[k];
     }
     return first;
+}
+
+static void report_recent(void);
+
+/* the first call through each PS1 address is logged */
+static void log_call(uint32_t addr, const PsxFunction *f) {
+    static uint32_t logged[256];
+    static unsigned n_logged;
+    unsigned i;
+    for (i = 0; i < n_logged && logged[i] != addr; i++) {}
+    if (i == n_logged && n_logged < 256) {
+        logged[n_logged++] = addr;
+        psx_log("psx: call through a PS1 address 0x%08X: %s (%s)\n", addr, f->name, f->segment);
+    }
+}
+
+NO_TRACE void *psx_host_fn(uint32_t addr) {
+    const PsxFunction *f = psx_function_at(addr);
+    Dl_info info;
+    void *host;
+    if (f && f->fn) {
+        log_call(addr, f);
+        return (void *)f->fn;
+    }
+    if (!addr) {
+        psx_log("psx: call through a null function pointer\n");
+    } else if ((addr >= PSX_RAM_BASE && addr < PSX_RAM_BASE + PSX_RAM_SIZE)
+               || (addr >= PSX_SCRATCH_BASE && addr < PSX_SCRATCH_BASE + PSX_SCRATCH_SIZE)) {
+        psx_log("psx: call into PS1 code at 0x%08X, where no function is known\n", addr);
+    } else {
+        /* a host function's address the game kept in 32 bits (the executable is in the window) */
+        host = psx_host(addr);
+        if (dladdr(host, &info) && info.dli_saddr == host) return host;
+        psx_log("psx: call through 0x%08X, which is neither a game function nor a host one\n", addr);
+    }
+    report_recent();
+    psx_exit_report();
+    _exit(139);
 }
 
 /* ---- trace of the game's functions */
@@ -158,45 +196,55 @@ static void report_recent(void) {
     }
 }
 
+/* the safety net: psx_host_fn covers every call through a 32-bit pointer in the game's files, but a jump into PS1
+ * code from anywhere else (an ordinary pointer built from a PS1 address) faults in RAM, which isn't executable;
+ * that is sent to the host function too. Anything else is reported. */
+static uint32_t window_addr(uintptr_t a, int *in) {
+    *in = psx_in_window((const void *)a);
+    return (uint32_t)a;
+}
+
 static void on_fault(int sig, siginfo_t *info, void *ctx) {
     uintptr_t pc = 0;
     ucontext_t *uc = ctx;
+    int in_pc, in_addr;
+    uint32_t ps1_pc, ps1_addr;
 #if defined(__APPLE__) && defined(__x86_64__)
     pc = uc->uc_mcontext->__ss.__rip;
 #elif defined(__APPLE__) && defined(__aarch64__)
     pc = uc->uc_mcontext->__ss.__pc;
 #elif defined(__linux__) && defined(__x86_64__)
     pc = uc->uc_mcontext.gregs[REG_RIP];
+#elif defined(__linux__) && defined(__aarch64__)
+    pc = uc->uc_mcontext.pc;
 #endif
-    if (pc >= PSX_RAM_BASE && pc < PSX_RAM_BASE + PSX_RAM_SIZE) {
-        const PsxFunction *f = psx_function_at((uint32_t)pc);
+    ps1_pc = window_addr(pc, &in_pc);
+    if (in_pc && ps1_pc >= PSX_RAM_BASE && ps1_pc < PSX_RAM_BASE + PSX_RAM_SIZE) {
+        const PsxFunction *f = psx_function_at(ps1_pc);
         if (f && f->fn) {
-            static uint32_t logged[256];
-            static unsigned n_logged;
-            unsigned i;
-            for (i = 0; i < n_logged && logged[i] != (uint32_t)pc; i++) {}
-            if (i == n_logged && n_logged < 256) {
-                logged[n_logged++] = (uint32_t)pc;
-                psx_log("psx: call through a PS1 address 0x%08X: %s (%s)\n", (uint32_t)pc, f->name, f->segment);
-            }
+            log_call(ps1_pc, f);
 #if defined(__APPLE__) && defined(__x86_64__)
             uc->uc_mcontext->__ss.__rip = (uintptr_t)f->fn;
 #elif defined(__APPLE__) && defined(__aarch64__)
             uc->uc_mcontext->__ss.__pc = (uintptr_t)f->fn;
 #elif defined(__linux__) && defined(__x86_64__)
             uc->uc_mcontext.gregs[REG_RIP] = (uintptr_t)f->fn;
+#elif defined(__linux__) && defined(__aarch64__)
+            uc->uc_mcontext.pc = (uintptr_t)f->fn;
 #endif
             return;
         }
-        psx_log("psx: call into PS1 code at 0x%08X, where no function is known\n", (uint32_t)pc);
+        psx_log("psx: call into PS1 code at 0x%08X, where no function is known\n", ps1_pc);
     } else {
         const char *where = psx_host_name((void *)pc);
+        ps1_addr = window_addr((uintptr_t)info->si_addr, &in_addr);
         psx_log("psx: %s at address %p (pc %p, in %s)\n", sig == SIGBUS ? "bus error" : "segmentation fault",
                 info->si_addr, (void *)pc, where ? where : "?");
-        if ((uintptr_t)info->si_addr >= 0x100000000ull && ((uintptr_t)info->si_addr & 0xFFFFFFFFu) >= PSX_RAM_BASE
-            && ((uintptr_t)info->si_addr & 0xFFFFFFFFu) < PSX_RAM_BASE + PSX_RAM_SIZE)
-            psx_log("psx: its low 32 bits are a PS1 RAM address: a pointer read as 8 bytes from a 4-byte slot "
-                    "(see PORT.md, pointer-sized fields)\n");
+        if (in_addr)
+            psx_log("psx: that is PS1 address 0x%08X%s\n", ps1_addr,
+                    ps1_addr < 0x10000 ? " (a null pointer's field, in the game's terms)" : "");
+        else if ((uintptr_t)info->si_addr < PSX_HOST_BASE && (uintptr_t)info->si_addr >= 0x10000)
+            psx_log("psx: below the window: a PS1 address used as a host pointer without the translation\n");
     }
     report_recent();
     psx_exit_report();
