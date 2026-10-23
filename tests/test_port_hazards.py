@@ -383,9 +383,12 @@ def test_argument_registers_live_at_entry():
 def test_port_md_lists_the_hazards():
     h = _hazards()
     h["dropped"][0]["register"] = "pass-through"
+    h["dropped"][1].update(register="leftover", callee_reads=[])
+    h["dropped"][2].update(register="leftover", callee_reads=["$a0"])
     md = ep.call_hazards_md(h)
     assert "## Arguments the matched C drops" in md and "3 calls in 1 functions" in md
-    assert "| `caller` | `func_A` | `()` | `(void *arg0)` | 0 |" in md
+    assert "| `caller` | `func_A` | `()` | `(void *arg0)` | 0 | pass-through | ? |" in md
+    assert "| leftover | none |" in md and "| leftover | $a0 |" in md
     assert "none (common.h `(void)`)" in md and "`caller`: `M2C_FIELD(D_801A1480, M2C_UNK (**)(), 0x2C)()`" in md
     assert "`caller` -> `func_Y` (declared `(void)`): reads $a0" in md and "`caller` -> `func_Q` (unknown)" in md
     assert ep.call_hazards_md(None) == ""

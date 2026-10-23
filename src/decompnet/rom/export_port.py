@@ -1836,14 +1836,40 @@ def port_call_hazards(build: dict, image: bytes, sources: dict[str, str], header
     out = call_hazards(sources, p["compiled"], headers, {f["name"] for f in fns}, matched, replaced,
                        runtime_prototypes(), reads)
     by_name = {f["name"]: f for f in fns}
+
+    def code(f) -> list[int] | None:
+        if f is None or f.get("rom") is None or f["name"] not in sizes:
+            return None
+        count = min(sizes[f["name"]][1], 4096, (len(image) - f["rom"]) // 4)
+        return list(struct.unpack_from(f"<{count}I", image, f["rom"]))
+    at: dict[int, list[dict]] = {}
+    for f in fns:
+        at.setdefault(f["vram"], []).append(f)
+    live: dict[int, list[int] | None] = {}
+
+    def reads_of(v: int) -> list[int] | None:  # what a function's code reads (None: unknown, or an overlay's address)
+        if v not in live:
+            live[v] = None
+            fs = at.get(v) or []
+            w = code(fs[0]) if len(fs) == 1 else None
+            if w:
+                live[v] = mips_arg_live(w, v, reads_of)
+        return live[v]
     for d in out["dropped"]:
         f, g = by_name.get(d["caller"]), by_name.get(d["callee"])
         d["register"] = "?"
-        if f and g and f.get("rom") is not None and d["caller"] in sizes:
-            count = min(sizes[d["caller"]][1], 4096, (len(image) - f["rom"]) // 4)
-            d["register"] = passes_through(list(struct.unpack_from(f"<{count}I", image, f["rom"])), g["vram"],
-                                           d["args"], min(d["params"], 4), vram=f["vram"])
+        w = code(f)
+        if f and g and w:
+            d["register"] = "stack argument" if d["args"] >= 4 else \
+                passes_through(w, g["vram"], d["args"], min(d["params"], 4), vram=f["vram"])
+        gw = code(g)
+        if gw is not None:  # what the callee's code reads of what the call drops
+            regs = mips_arg_live(gw, g["vram"], reads_of)
+            d["callee_reads"] = [f"$a{i}" for i in range(d["args"], min(d["params"], 4)) if i in regs] + \
+                [f"stack {k}" for k in range(max(4, d["args"]), d["params"]) if mips_stack_arg_read(gw, k)]
     out["counts"]["dropped_pass_through"] = sum(1 for d in out["dropped"] if d["register"] == "pass-through")
+    out["counts"]["dropped_callee_ignores"] = sum(1 for d in out["dropped"] if d.get("callee_reads") == [] and
+                                                  d["register"] != "pass-through")
     for u in out["unmatched"]:
         u["sony"] = u["callee"] in sony
     out["counts"]["unmatched_sony"] = sum(1 for u in out["unmatched"] if u["sony"])
@@ -2266,7 +2292,8 @@ is the same. Found by {ch['method']}; the lists are in `hazards.json` too.
 - **a. Fewer arguments than the definition takes: {c['dropped']} calls in {c['dropped_callers']} functions** ({by};
   `none`: no prototype of the caller's own, only common.h's or an implicit declaration). In
   {c.get('dropped_pass_through', 0)} of them the registers are the caller's own arguments, untouched (pass-through:
-  the fix is mechanical). Calls through a cast of a game function (`((T (*)(...)) func_X)(...)`, `cast`) are
+  the fix is mechanical); in {c.get('dropped_callee_ignores', 0)} of the others the callee's code never reads what
+  is dropped (harmless). Calls through a cast of a game function (`((T (*)(...)) func_X)(...)`, `cast`) are
   checked the same way: {c.get('cast_calls', 0)} of them, {c.get('dropped_through_cast', 0)} dropping arguments.
 - **b. Calls with no arguments through an unprototyped function pointer (`M2C_UNK (**)()`), in C the port compiles:
   {c['table_calls']}** (the libraries' ones the runtime replaces by their code, SONY_SHAPES, aren't counted).
@@ -2277,19 +2304,25 @@ is the same. Found by {ch['method']}; the lists are in `hazards.json` too.
 """]
     if ch["dropped"]:
         out.append("\n### a. Fewer arguments than the definition takes\n\n"
-                   "`register`: what the dropped argument registers hold at the call on the PS1, by the caller's code: "
-                   "`pass-through` (the caller's own arguments, untouched: take them as parameters and pass them "
-                   "on), `leftover` (an earlier call or instruction wrote them: the callee gets that; read the "
-                   "assembly to see what it is).\n\n"
-                   "| caller | callee | declared | defined | args | register |\n"
-                   "| :-- | :-- | :-- | :-- | --: | :-- |\n")
+                   "`register`: what the dropped argument registers hold at the call on the PS1, by the caller's code "
+                   "along its control flow: `pass-through` (the caller's own arguments, untouched: take them as "
+                   "parameters and pass them on), `leftover` (an earlier call or instruction wrote them: the callee "
+                   "gets that; read the assembly to see what it is), `stack argument` (a fifth parameter or later). "
+                   "`callee reads`: which of the dropped arguments the callee's code can read (argument registers "
+                   "live at its entry, stack arguments it loads); `none` means the callee ignores them, so what the "
+                   "caller leaves there doesn't matter (the call is harmless as long as the callee's C doesn't read "
+                   "them either); anything else under `leftover` or `stack argument` is a real bug for a person.\n\n"
+                   "| caller | callee | declared | defined | args | register | callee reads |\n"
+                   "| :-- | :-- | :-- | :-- | --: | :-- | :-- |\n")
         for d in sorted(ch["dropped"], key=lambda d: (d["file"], d["callee"])):
             decl = d["declared"] if d["declared"] != "none" else ("none" + (f" (common.h `{d['declaration']}`)"
                                                                             if d.get("declaration") else ""))
             decl = f"`{decl}`" if decl.startswith("(") else decl
             where = "" if d["definition"] == "matched C" else f" ({d['definition']})"
+            reads = d.get("callee_reads")
+            reads = "?" if reads is None else ", ".join(reads) or "none"
             out.append(f"| `{d['caller']}` | `{d['callee']}` | {decl} | `{d['defined']}`{where} | {d['args']} | "
-                       f"{d.get('register', '?')} |\n")
+                       f"{d.get('register', '?')} | {reads} |\n")
     if ch["table_calls"]:
         out.append("\n### b. No-argument calls through `(**)()`\n\n")
         out += [f"- `{t['caller']}`: `{t['call']}()`\n" for t in ch["table_calls"]]
