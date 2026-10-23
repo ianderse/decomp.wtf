@@ -103,11 +103,13 @@ typedef struct {
 } SpuEnvelope;
 void spu_env_step(SpuEnvelope *e, uint16_t adsr1, uint16_t adsr2);
 
-/* XA-ADPCM (psx/xa.c): the CD layer calls this with each raw 2352-byte XA audio sector (Form 2, the sync and
- * header included), at the disc's pace; it decodes the 18 sound groups (4 or 8 bits, mono or stereo, 37.8 or
- * 18.9 kHz), resamples to 44.1 kHz and queues the result on the CD input. Returns the frames queued (0: not an
- * audio sector). psx_cd_xa_reset forgets the decoder's history (a new stream, a seek). */
-int psx_cd_xa_sector(const uint8_t *raw2352);
+/* XA-ADPCM (psx/xa.c): the CD layer (psx/sdk/libcd.c, which has a weak no-op of it) calls psx_cd_xa_sector with
+ * each raw 2352-byte XA audio sector (Form 2, the sync and header included), at the disc's pace; it decodes the 18
+ * sound groups (4 or 8 bits, mono or stereo, 37.8 or 18.9 kHz), resamples to 44.1 kHz and queues the result on the
+ * CD input. psx_cd_xa_queue does the same and returns the frames queued (0: not an audio sector).
+ * psx_cd_xa_reset forgets the decoder's history (a new stream, a seek). */
+void psx_cd_xa_sector(const uint8_t *raw2352);
+int psx_cd_xa_queue(const uint8_t *raw2352);
 void psx_cd_xa_reset(void);
 /* decode one sector's sound data (raw + 0x18, 18 x 128 bytes) at its own rate: returns frames, stereo or mono in
  * *channels, the rate in *rate; out holds up to 4032 samples (mono) or 2016 frames x 2 (stereo) */

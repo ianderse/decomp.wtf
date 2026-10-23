@@ -4,6 +4,7 @@
 
 #include "../psx_runtime.h"
 #include "libetc.h"
+#include "libcd.h"
 #include "libgpu.h"
 #include "libpad.h"
 
@@ -21,6 +22,7 @@ static void one_frame(void) {
     psx_gpu_clear_color(&r, &g, &b);
     host_frame(r, g, b);
     psx_pad_update();
+    psx_cd_vblank(); /* the CD's events of this frame (libcd.h) */
     if (host_quit()) {
         psx_log("psx: window closed after %d frames\n", frames);
         exit(0);

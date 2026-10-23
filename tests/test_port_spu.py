@@ -95,7 +95,7 @@ int main(int argc, char **argv) {
         static int16_t out[4032 * 2];
         int ch = 0, rate = 0, m = xa_decode_sector(raw, out, &ch, &rate), q;
         spu_init(io);
-        q = psx_cd_xa_sector(raw);
+        q = psx_cd_xa_queue(raw);
         printf("{\"n\": %d, \"channels\": %d, \"rate\": %d, \"queued\": %d, \"pcm\": [", m, ch, rate, q);
         for (i = 0; i < m * ch; i++) printf("%s%d", i ? ", " : "", out[i]);
         printf("]}\n");
@@ -486,8 +486,8 @@ def test_sdk_range_functions_are_the_runtimes():
     assert p["compiled"] == ["src/main/func_800DA380.c", "src/main/func_8016A028.c"]  # the range's C isn't
     by = {s["name"]: s for s in p["sdk"]}
     assert by["SsSetMVol"]["kind"] == "implemented"                    # libsnd.c has it
-    assert by["func_8016A860"]["kind"] == "alias" and by["func_8016A860"]["alias"] == "SsInit"
-    assert by["func_80175434"]["alias"] == "SpuSetTransferStartAddr"    # a Sony row named by address
+    assert by["func_8016A860"]["kind"] == "alias" and by["func_8016A860"]["target"] == "SsInit"
+    assert by["func_80175434"]["target"] == "SpuSetTransferStartAddr"    # a Sony row named by address
     assert by["func_8016A880"]["kind"] == "stub" and by["func_8016B0B8"]["kind"] == "stub"  # no identification
     assert by["func_8017295C"]["kind"] == "stub" and by["func_8017295C"]["lib"] == "libspu"
     c = ep.sdk_stubs_c(p["sdk"])

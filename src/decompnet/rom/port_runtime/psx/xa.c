@@ -70,7 +70,7 @@ int xa_decode_sector(const uint8_t *raw, int16_t *out, int *channels, int *rate)
 /* the most output frames one sector makes: 4032 mono samples at 18.9 kHz, at 44.1 kHz */
 #define XA_OUT_MAX 9416
 
-int psx_cd_xa_sector(const uint8_t *raw) {
+int psx_cd_xa_queue(const uint8_t *raw) {
     static int16_t pcm[4032 * 2], st[XA_OUT_MAX * 2];
     int ch, rate, n, m = 0;
     uint32_t step;
@@ -102,3 +102,5 @@ int psx_cd_xa_sector(const uint8_t *raw) {
     rs_prev[1] = pcm[(n - 1) * ch + (ch == 2 ? 1 : 0)];
     return spu_cd_push(st, m);
 }
+
+void psx_cd_xa_sector(const uint8_t *raw) { psx_cd_xa_queue(raw); }
