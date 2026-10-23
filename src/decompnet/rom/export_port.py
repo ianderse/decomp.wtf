@@ -916,8 +916,13 @@ def export_port(net, slug: str, out: Path | None = None, log=print, build: bool 
     port = out or root / "port"
     rows = net.store.all("SELECT name, vram, meta FROM functions WHERE project_id=? AND status='asm' AND "
                          "(meta LIKE '%\"library\"%' OR meta LIKE '%BIOS call stub%')", proj["id"])
-    return generate(source, port, sony_from_rows(rows), title=proj["name"], slug=slug, log=log, build=build,
-                    main=main, check=check, run_seconds=run_seconds)
+    report = generate(source, port, sony_from_rows(rows), title=proj["name"], slug=slug, log=log, build=build,
+                      main=main, check=check, run_seconds=run_seconds)
+    if out is None:  # the project's own port/ (in the owner's repository, if any); not a folder given elsewhere
+        from .export import commit_tree
+        commit_tree(port, f"Port: {report['compiled']} matched files, {report['unmatched']} unmatched stubs, "
+                          f"{len(report['sdk_implemented'])} Sony functions implemented", log)
+    return report
 
 
 def generate(source: Path, port: Path, sony: dict[str, dict], title: str, slug: str, log=print, build: bool = False,
@@ -1029,10 +1034,7 @@ def build_and_run(port: Path, log=print, seconds: int = 5) -> dict:
     res["configure_log"] = (r.stdout + r.stderr)[-3000:]
     if r.returncode != 0:
         log(res["configure_log"])
-        from .export import commit_tree
-    commit_tree(port, f"Port: {report['compiled']} matched files, {report['unmatched']} unmatched stubs, "
-                      f"{len(report['sdk_implemented'])} Sony functions implemented", log)
-    return res
+        return res
     res["configured"] = True
     res["host"] = (re.search(r"PS1 port: window through (\w+)", r.stdout) or [None, "?"])[1]
     log("cmake: building")
