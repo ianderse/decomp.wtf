@@ -14,6 +14,7 @@ typedef struct {
     uint32_t initial_pc, initial_sp, gp;
     const char *main_name;
     void (*main_fn)(void);
+    const char *disc;           /* the disc image `decomp port --disc` saved ("" if none); PSX_DISC overrides it */
 } PsxConfig;
 extern const PsxConfig psx_config;
 
@@ -57,6 +58,8 @@ const char *psx_host_name(const void *fn);
 #define PSX_STACK_SIZE 0x00800000u
 #define PSX_LITERAL_BASE 0x70000000u /* the game's string literals (tools/cc_ptr32.py --collect-literals) */
 #define PSX_LITERAL_SIZE 0x00100000u
+#define PSX_RUNTIME_BUF_BASE 0x7F000000u /* the runtime's own buffers it hands the game (psx_runtime_alloc) */
+#define PSX_RUNTIME_BUF_SIZE 0x00100000u
 extern const unsigned char psx_literal_image[];
 extern const uint32_t psx_literal_size;
 
@@ -82,6 +85,9 @@ void *psx_host_fn(uint32_t addr);
 void psx_heap_init(uint32_t addr, uint32_t size);
 void *psx_malloc(uint32_t size);
 void psx_free(void *p);
+/* memory in the window for the runtime's own buffers the game is given a pointer to (a callback's result bytes):
+ * zeroed, never freed, NULL when the 1 MB at PSX_RUNTIME_BUF_BASE is used up */
+void *psx_runtime_alloc(uint32_t size);
 
 void psx_log(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 void psx_ram_init(void);

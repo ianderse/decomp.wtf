@@ -2,17 +2,35 @@
 
 Status (2026-10-23): native arm64. `decomp port <slug> [--build] [--main NAME]` (src/decompnet/rom/export_port.py,
 the runtime in src/decompnet/rom/port_runtime/) writes `<project>/port/`, a CMake project over the exported tree.
-On SLUS-01252 it compiles 3,984 matched files (of 4,005 in today's export: 3 don't compile, 18 are replaced by the
-runtime, below) to an arm64 Mach-O, links, opens a window (SDL2) and runs the game's main (func_800C27B8) through
-23 game functions (was 16) to func_8017295C, still in assembly (libspu: a switch on reverb modes over the SPU's
-registers at D_801A144C). It gets past ClearImage (func_80176270, found by its code and forwarded to the runtime's)
-and draws through a software GPU: ResetGraph, SetDispMask, ClearImage's fill, ClearOTag and the environments run;
-the game hasn't reached its first VSync, so nothing of its own is on screen yet. InitGeom's handwritten body
-(func_80178F28) is replayed on the software GTE. With `PSX_PORT_SOFT=1` it goes on through 69 distinct game
-functions (70 before; 1 of them, func_8017C4F4, is the runtime's ResetCallback now), 3 functions still in assembly
-and 12 Sony stubs, one LoadImage (a CLUT at 0,508 from 0x8001F57C, overlay space the CD hasn't filled), before a
-null pointer ends it (a null PS1 pointer + 6, in func_800FD5BC: D_801AC4C4, set by func_800CF0D0 when a scene is
-loaded). No audio. `PSX_GPU_SELFTEST=N` draws N frames through libgpu as a game would, and the window shows them.
+**All three together (2026-10-23, the merge of the GPU, CD and sound branches, `--disc` the Arc the Lad II .bin,
+built from a copy of the 12:22 export):** 3,968 matched files compiled (4,005 in the export: 3 don't compile, the
+rest replaced by the runtime through the one aliases map: libcd's, the sound SDK range, and 25 Sony functions known
+by their code). Strict: 54 game functions (16 at the start of the day, 23 with the GPU alone), past ClearImage and
+_spu_t, to func_80158ECC, a game function still in assembly; no VSync yet. Soft: 118 distinct game functions, 6
+functions in assembly passed over, the game reads COMM.IMG/COMM.SND/COMM.DAT, reaches VSync and draws: 680
+primitives in 340 packets, 239 fills, 482 VRAM loads, double-buffered (display 0,0 and 0,224, drawing area
+0,240/0,16 320x208), before the fault in func_800F5120 (the argument the trace instrumentation clobbers, below).
+**On screen: "Working Designs Presents" in white on black** (the SDL window read back with PSX_PORT_DUMP_SCREEN),
+and VRAM holds the title screen's art (the Arc the Lad II logo with New Game / Continue / Convert, the copyright
+lines), the font and the sprite sheets (PSX_PORT_DUMP_VRAM).
+
+Each branch on its own, as measured before the merge:
+
+On SLUS-01252 it compiles 3,997 of the 4,000 matched files to an arm64 Mach-O, links, opens a window (SDL2) and
+runs the game's main (func_800C27B8) through 16 game functions to func_80176270, still in assembly (libgpu's
+ClearImage by its shape: it calls the GPU table at D_801A1480 with the rect, 8 and the colour). InitGeom's
+handwritten body (func_80178F28, where the first pass stopped) is replayed on the software GTE, and the event and
+critical-section calls answer. With `PSX_PORT_SOFT=1` it went on through 70 distinct game functions, 5 functions
+still in assembly and 15 Sony stubs before a null pointer ended it (a null PS1 pointer + 6, in func_800FD5BC: the
+game reads a camera pointer before the camera exists, RAM at 6 on the PS1). With RAM's mirrors mapped and libcd
+over the disc image (`--disc`, below) it goes on through 121: the main loop runs frames, and the game reads
+COMM.IMG, COMM.SND and COMM.DAT from the disc (224, 161 and 33 sectors) before a function whose matched C drops an
+argument hands its callee a host address (func_80104228, under the trace instrumentation; see the next pass).
+No rendering. Sound: a software SPU under libspu and a host libsnd, mixed to SDL2's audio device. With the disc, the
+soft run goes through the game's sound set-up on them and loads COMM.SND's bank (SsVabOpenHead, SsVabTransBody:
+294,944 bytes to SPU RAM) before the same func_800F5120 fault ends it, 114 distinct game functions: the 121 less
+the 7 libsnd functions the runtime now answers. No SEQ is opened before that, so the run's own output is silent;
+the same bank played through the same code outside the game sounds (below).
 
 ## The design
 
@@ -61,6 +79,15 @@ loaded). No audio. `PSX_GPU_SELFTEST=N` draws N frames through libgpu as a game 
   the BIOS's memcpy/memset/strlen/rand family, InitHeap/malloc/free/calloc/realloc (a first-fit heap in RAM),
   OpenEvent (handles 0xF1000000 + n)/CloseEvent/EnableEvent/DisableEvent and Enter/ExitCriticalSection. psx/gte.c
   is a software GTE from psx-spx.
+- **SDK ranges.** An address range whose every function is the SDK's, matched C or not: its C isn't compiled and
+  each function is a Sony function (the runtime's when it has one, a labelled stub otherwise). The default is the
+  project's compiler regions (`regions` in its config) that hold Sony functions the database names, each starting
+  at the first of them; `decomp port --sdk-range FROM-TO` (repeatable, `none`) overrides. An unnamed SDK function
+  identified from its code (export_port.SDK_IDENTIFIED, per project, with the evidence) forwards to the runtime's
+  function of that name, as does a Sony row the database names by its address (SLUS-01252's func_80175434,
+  SpuSetTransferStartAddr).
+- **Sound.** psx/spu.c is a software SPU from psx-spx; psx/sdk/libspu.c drives it as Sony's libspu does, and
+  psx/sdk/libsnd.c is libsnd on the host (below).
 - **Trace.** The game's files build with `-finstrument-functions`; the run logs the first 200 distinct functions it
   enters, and on a crash the last 16 (a fault in the window is given as the PS1 address).
 
@@ -129,7 +156,7 @@ loaded). No audio. `PSX_GPU_SELFTEST=N` draws N frames through libgpu as a game 
   RECT16 and PsyX_BeginScene), so the AppKit and headless backends would draw nothing, and the CMake project would
   need C++ and OpenGL. Taking it would be about 5,800 lines vendored plus glue for the tags, the window rule and a
   GL backend, against 624 lines of gpu.c and 729 of libgpu.c written here, which keep VRAM exact and work in all
-  three backends. Nothing of it was copied. Worth revisiting for a later accelerated backend (upscaling, PGXP needs
+  three backends. Nothing of its renderer was copied (what the CD and sound branches took from it is below). Worth revisiting for a later accelerated backend (upscaling, PGXP needs
   the GTE's vertices per primitive, which the extended tags carry and the real tags can't), with gpu.c kept as the
   reference and for VRAM-side effects.
 
@@ -194,22 +221,198 @@ loaded). No audio. `PSX_GPU_SELFTEST=N` draws N frames through libgpu as a game 
 - Homebrew's SDL2 on Apple silicon is arm64 only: the native build's window is SDL2 (sdl2-config); an x86_64 build
   falls back to AppKit (psx/host_cocoa.m), headless otherwise.
 
+## The CD: libcd over the disc image (2026-10-23)
+
+`decomp port <slug> --disc PATH` saves the game's disc image (.bin/.cue/.iso) in port.json and gen/psx_config.c;
+`PSX_DISC` overrides it at run time; the image is read in place, never copied.
+
+- **psx/cd.c** (335 lines, plain C, no runtime dependency): the sector size from the volume descriptor's "CD001" at
+  sector 16 (2048, 2352 Mode 2 or Mode 1, 2448 with subchannel data, as decompnet/rom/psx.py's reader does), a .cue's
+  FILE line, a .chd refused with the chdman command to convert it; whole raw sectors through a 64-sector cache (a
+  2048-byte image's get a made-up Mode 2 Form 1 header), user data per sector mode and form (16/2048, 24/2048,
+  24/2324); ISO 9660 lookup by path (`\` or `/`, `cdrom:` and `;1` optional, any case, directories longer than a
+  sector, nested ones), every file indexed by LBA so the logs name the file a read is in, SYSTEM.CNF's BOOT.
+- **psx/sdk/libcd.c** (661 lines) and **libcd.h** (178): a drive that is deterministic per frame. A command's result
+  is written back at once and its completion (and the sync callback) comes at the next CD event point: a VSync
+  (libetc's frame calls `psx_cd_vblank`) or a CdSync/CdReady/CdReadSync poll. Reads move 2.5 sectors a frame at
+  double speed, 1.25 at single, one per poll, to the end in a blocking wait (`PSX_CD_FAST=1`: a CdRead at once).
+  CdRead writes 2048/2340/2328 bytes a sector straight into the game's buffer and fires the read callback at the end;
+  ReadN/ReadS without a CdRead make a current sector (CdReady reports CdlDataReady, the ready callback fires,
+  CdGetSector copies from it and goes on where it stopped, then the data callback); CdlModeRT routes Form 2 audio
+  sectors through the channel filter to `psx_cd_xa_sector(raw2352)` (a weak no-op until the SPU defines it); CdRead2
+  with CdlModeStream fills the St ring (StSetRing's ring_size x 2016 bytes of frame data, then the 32-byte STR
+  headers; StGetNext/StFreeRing hand frames out oldest first; a frame that doesn't fit is dropped). Commands: Nop,
+  Setloc, Play (logged, CD-DA not played), ReadN/ReadS, Standby/Stop/Pause, Init/Reset, Mute/Demute, Setfilter,
+  Setmode, Getparam, GetlocL/GetlocP, GetTN/GetTD, SeekL/SeekP, Test, GetID. CdSearchFile, CdIntToPos/CdPosToInt,
+  CdMix (kept in `psx_cd_mix` for the SPU), CdReadFile, CdDataSync, CdDiskReady. Callbacks are called through
+  psx_host_fn with their result bytes in a runtime buffer in the window (`psx_runtime_alloc`, 0x7F000000).
+- **Which functions are libcd.** SLUS-01252's libcd is half matched C: CdSync, CdReady, CdControl/F/B, the callback
+  setters are matched wrappers over the drive's internals (CD_cw, CD_sync, getintr: hardware, still assembly), and
+  CdControl's core, CdRead and CdRead2 are assembly; the database names 30 of its functions, not the wrappers. The
+  generator (`libcd_aliases`) takes a libcd function by name, by the library's own name for a second copy (SJ00's
+  CdDataCallback at 0x8006DAD0), and the unnamed ones by their offset from a named one in the same object (CdRead,
+  StClearRing) checked against their code with immediates and jump targets masked (LIBCD_LAYOUT: a different libcd
+  version doesn't match and keeps its stubs). Each becomes the runtime's: a thunk under the game's name in
+  gen/psx_sdk_stubs.c, the matched copy left out of the build (16 files here), the dispatch table pointing at it.
+- **Overlays.** SLUS-01252's eight overlays (SDIC/SMITH/YEND/YGUILD/YPROP/YSEG/YSHOP.BIN at 0x80026000, SJ00.STG at
+  0x8006D800) are byte for byte the export's segments. A finished CdRead logs the overlay it brought in;
+  `PSX_CD_LOAD=SMITH.BIN@0x80026000,SJ00.STG@0x8006D800,YSHOP.BIN@0x80026000,SDIC.BIN@0x80026000` gives 107 of 107,
+  66 of 66, 58 of 58 and 28 of 28 functions resolving to the right overlay through psx_function_at. The game
+  itself reads no overlay before the run ends.
+- **SYSTEM.CNF** boots SLUS_012.52 (LBA 25, 921,600 bytes), whose first 4 KB are the export's baserom.exe.
+- **RAM's mirrors** are mapped now (ram.c, mach_vm_remap of the same pages at KUSEG 0x00000000 and KSEG1
+  0xA0000000): func_800FD5BC's null read is the PS1's behaviour, and libcd's _96_init writes the BIOS's tables at
+  0xA00003E0. `PSX_NULL_FAULT=1` leaves KUSEG unmapped to find null pointers.
+- **From PsyCross** (github.com/OpenDriver2/PsyCross, MIT, at e56e4cd; LICENSE as psx/sdk/LICENSE.PsyCross): 93 of
+  libcd.h's 178 lines are its include/psx/libcd.h (of 262): the CdlMode/CdlStat bits, command numbers, interrupt
+  codes, CdlLOC/CdlFILTER/CdlATV/CdlFILE/StHEADER and the St constants, with u_long made 32-bit; CdIntToPos and
+  CdPosToInt (12 lines of its 1,032-line LIBCD.C); and the shape of the model: CdRead queues and CdReadSync drains
+  (mode 1 returning the sectors left), and its spooler's per-sector order (ready callback with CdlDataReady,
+  CdGetSector from the current sector, then the data callback). Not taken: its image reader (a fixed 2352-byte Mode
+  2 sector; CdSearchFile reads one sector of the root directory at LBA 22, so a deeper or longer directory isn't
+  found), the cue parser (asserts MODE2/2352), the SDL thread that streams ReadS, CdControl/CdControlB/CdControlF
+  (Setloc, ReadS, Pause and Setfilter/Setmode as no-ops; the rest "Unhandled"), CdSync (asserts on mode 0),
+  CdReadCallback/CdSyncCallback/CdComstr (unimplemented), and its St functions, which are prototypes only. CD-XA is
+  on its TODO list; here it is the hook.
+
 ## What the next pass needs
 
-1. **The rest of the CPU side:** func_8017295C (libspu, the next strict stop), the unlabelled BIOS/syscall wrappers
+1. **The rest of the CPU side:** func_80158ECC (a game function in assembly, the next strict stop), the BIOS wrappers
    and the Sony functions the C calls, enough that main reaches its first VSync. Sony stubs that return pointers
    (the CD's file lookups) need real implementations before soft mode means much. More SONY_SHAPES as they turn
    up: any matched m2c draft that calls through a library's table with `()` loses its arguments on the host.
 2. **The GPU's next steps.** Dithering (E1h bit 9) and interlace; the game's own frames to compare with an
    emulator's VRAM; an accelerated backend later (PsyCross's renderer, above, or Metal), keeping gpu.c as the
    reference.
-3. **SPU.** libsnd/libspu as stubs today; the SPU's 512 KB, ADPCM voices and the sequencer, through SDL audio or
-   CoreAudio.
-4. **CD from the disc image.** CdInit/CdSearchFile/CdRead against the user's .bin/.cue (the project already reads
-   discs for overlays), so the game loads its own overlays and data; overlay code is already compiled in, and
-   psx_function_at picks the one in RAM.
-5. **The window's edges.** RAM's mirrors (KUSEG 0x00000000, KSEG1 0xA0000000) aren't mapped; a game function
-   compared with an int through an 8-byte pointer (2 files, `extern M2C_UNK func_X`) compares with the host address;
-   Linux is untested (nothing there needs the executable in the window any more).
-6. **Checking.** The GTE against hardware traces or a reference, and the matched C against the original by replaying
+3. **Sound, the rest.** Reverb (the work area and the 32 registers are kept; nothing is mixed), noise, pitch
+   modulation, the gaussian interpolation, vibrato/portamento and SEP files in libsnd; CoreAudio for the AppKit
+   host (it runs the mixer without output); a listening test against the console.
+4. **Arguments the matched C drops.** An m2c draft that calls `func_800F5120()` from a `void` function matches on
+   the PS1 because `$a0` passes through; on the host it does only while nothing touches x0. `-finstrument-functions`
+   (the trace) loads x0 with the function's own address for `__cyg_profile_func_enter`, so func_80104228 hands
+   func_800F5120 a host code address and the soft run ends there (121 functions). Built without the instrumentation
+   the same tree runs on for 15 s (about 900 frames) in its frame loop and stops advancing at func_800DB780, a state
+   handler still in assembly. A trace hook that keeps the argument registers (`-finstrument-function-entry-bare`
+   with an assembly hook that saves x0-x7 and identifies the function by its return address) would keep both.
+5. **The window's edges.** A game function compared with an int through an 8-byte pointer (2 files, `extern
+   M2C_UNK func_X`) compares with the host address; Linux is untested and maps no mirrors (mach_vm_remap is
+   macOS's; memfd_create would do it there).
+6. **The CD's rest.** CD-DA (CdlPlay) isn't played; XA goes to the SPU's `psx_cd_xa_sector` (psx/xa.c); the St ring has no
+   MDEC behind it (libpress is stubs); the BIOS's own file calls (B0 open/read on "cdrom:") are stubs.
+7. **Checking.** The GTE against hardware traces or a reference, and the matched C against the original by replaying
    inputs (psx-spx is a reference, not a test).
+
+## Sound (2026-10-23)
+
+### libsnd: replaced wholesale, not run as C (option (a) of the brief)
+
+Two ways were open: (a) treat libsnd's address range as Sony's and play SEQs with a host sequencer, or (b) run the
+decompiled libsnd as C over an emulated SPU register file. Measured on SLUS-01252 (the database and the export's
+assembly, docs/plans/libsnd-push.md for the range):
+
+- **Coverage.** The libsnd range (the project's compiler regions, 8016A000-80172000) has 125 functions and 8,193
+  instructions: 34 matched (437 instructions, 5%), 41 Sony rows (1,863) and 50 open (5,893). The matched ones are
+  wrappers and accessors (`_SsInit(0)`, `_SsStart(0)`, `SpuSetReverb(1)`, flag setters, table getters); the whole
+  path a SEQ takes (SsSeqCalledTbyT, _SsGetSeqData, GetMetaEvent, the note handlers func_8016BFEC/func_8016CA60,
+  SpuVmAlloc, the key-on paths func_8016E650/func_8016EFF0/func_8016F558, SsSeqOpen/Play, SsVabOpenHead's
+  _SsVabOpenHeadWithMode) is assembly. Under (b) not one note plays until about 91 functions (7,756 instructions)
+  are matched or written by hand against libsnd's own data layout.
+- **Hardware reads.** Through _spu_RXX (D_801A1448, gp-relative) libsnd's code (matched and not) writes voice
+  VOLL/VOLR/PITCH/SSA/ADSR1/ADSR2 (3 functions), KON/KOFF/EON (func_8016F558) and NON (func_8016EE00), and reads
+  only voice ADSRVOL (once, func_8016F558's voice allocator) and voice volumes (func_80170E94, func_80170F48).
+  libspu's reads are SPUSTAT/SPUCNT handshakes (_spu_init, _spu_writeByIO, _spu_t), which a host libspu replaces.
+  So (b) was feasible in principle (a polled register file answers all of them) but useless today.
+- **The game's own code** never touches libsnd's private state (the score table D_801FAD50, the voice records
+  D_801A73B8, the sequencer block D_801F4CC0, the voice register shadow D_801A7220): only libspu's helpers read the
+  register file. Replacing libsnd changes nothing the game can see.
+
+So libsnd's range is an SDK range: its 124 functions from 8016A05C are Sony's (33 matched files aren't compiled),
+the 16 unnamed entry points the game's driver calls are identified (SsInit, SsInitHot, SsStart, SsStart2, SsEnd, SsQuit,
+SsSetSerialAttr, SsSeqClose, SsVabClose, SsVabOpenHead, SsVabTransBody, SsVabTransCompleted, SsSetMono,
+SsSetStereo, SsUtReverbOn/Off; the evidence for each is in export_port.SDK_IDENTIFIED) and forward to
+psx/sdk/libsnd.c, and the rest are stubs. The range starts at 8016A05C, libsnd's first Sony function (SsSetMVol):
+the region's 8016A028 is the game's (it calls CdRead). The SPU is still modelled as the register file (b) would
+have needed: libspu's matched helpers that read and write 0x1F801C00 see the same state, and if the decompiled
+libsnd is ever complete, `--sdk-range none` runs it over the same SPU.
+
+### What runs
+
+- **psx/spu.c** (388 lines): the register file is the window's 0x1F801C00 (0x280 bytes), the truth for both the
+  host libspu and the game's raw stores; each mix step polls it (KON/KOFF consumed as triggers, KOFF first; a
+  repeat address software wrote is noticed by comparing with the last one seen) and writes back ADSRVOL, ENDX, the
+  repeat address a loop-start flag sets, SPUSTAT's mirror of SPUCNT and the current main volume. 512 KB of SPU RAM;
+  24 voices of 4-bit ADPCM (filters 0-4, shift 13-15 as 9, the loop-start/end/repeat flags, loop end without repeat
+  releasing at level 0); the envelope exactly as psx-spx gives it (AdsrCycles/AdsrStep, exponential increase
+  slowed above 0x6000, exponential decrease scaled by the level); the 4.12 pitch counter (clamped at 0x4000) with
+  linear interpolation between decoded samples (one sample of delay); fixed volumes (a sweep holds the last fixed
+  level), the main volume, the CD input (with SPUCNT's CD bit and the CD volume), mute; 44.1 kHz, so no
+  resampling. One recursive lock; the mix runs on the audio thread.
+- **psx/xa.c** (104 lines): `int psx_cd_xa_sector(const uint8_t *raw2352)` for the CD layer: a raw Form 2 sector
+  (sync and header included) whose subheader says audio; the 18 sound groups, 4- or 8-bit, mono or stereo, 37.8 or
+  18.9 kHz, the decoder's history kept across sectors (`psx_cd_xa_reset` for a new stream), resampled linearly to
+  44.1 kHz onto the SPU's CD input (a 0.74 s queue: the caller paces sectors at the disc's rate, filters the file and
+  channel it wants, and can read `spu_cd_queued()`).
+- **psx/sdk/libspu.c** (636 lines): libspu's functions on the register file (voice and common attributes with the
+  ADSR mode/rate packing, key on/off and status, reverb switches/voices/depth/mode with the work-area sizes, noise
+  and pitch-LFO voice bits, IRQ address), SpuMalloc (first fit from 0x1010 to the reverb work area, 16-byte blocks,
+  the table on the host), transfers that land in SPU RAM at once (SpuIsTransferCompleted is always 1; a transfer
+  callback is called through psx_host_fn), and the PsyCross-style shortcuts (SpuSetVoiceVolume ... SpuGetVoice*).
+- **psx/sdk/libsnd.c** (806 lines): VABs (SsVabOpenHead, the body to SpuMalloc'd SPU RAM, Sticky, Partly,
+  SsVabTransfer, SsVabClose), SEQs (SsSeqOpen/Close/Play/Stop/Pause/Replay/SetVol, SsIsEos, l_count plays, the
+  NRPN loop markers, tempo events, running status), the tick (SsSetTickMode's rate, from the audio thread once
+  SsStart/SsStart2 is called; a game that calls SsSeqCalledTbyT itself takes over), the voice manager (free voices,
+  then the quietest releasing one, then the oldest of no higher priority), note pitch from the tone's center/shift
+  and the channel's bend (pbmin/pbmax), volume and pan from velocity, tone, program, VAB, channel volume/expression/
+  pan and the sequence's volume (SsSetMono centres it), SsVoKeyOn/Off and SsUtKeyOn/Off for sound effects,
+  SsSetMVol/RVol/SerialAttr/SerialVol, SsUtSetReverb*, SpuVmSet/GetProgVol/Pan.
+- **psx/audio.c** (132 lines): SDL2's audio device (44.1 kHz, S16, 512 frames, the callback mixing) when the port
+  links SDL2 (`PSX_AUDIO_SDL`, set by CMake for `PSX_HOST=sdl`); otherwise, or for `PSX_HEADLESS` runs, a thread
+  that runs the mixer at real time so the tick still goes on, writing a WAV with `PSX_AUDIO_WAV=path`; `PSX_AUDIO=0`
+  turns both off.
+- Every Sony function in libspu.c/libsnd.c is a weak definition (a game that has one as matched C keeps its own),
+  and export_port.IMPLEMENTED reads their names from the files.
+
+On SLUS-01252 (port built to its own folder, 2026-10-23): strict as before (16 game functions, stops at
+func_80176270); soft: the same game functions and the same end (a null PS1 pointer + 6 in func_800FD5BC); its count
+is 65 instead of 70 because the five libsnd wrappers it passed through (func_8016A10C, func_8016A860, func_8016ADD8,
+func_801711F0, func_80171C1C) are now the runtime's, not instrumented game C; it reaches 7 Sony stubs instead of
+15 (the sound set-up's are answered) and 4 functions in assembly instead of 5 (libspu's _spu_t, func_8017295C, is
+no longer reached).
+
+With the disc (`--disc`, merged with the CD layer): strict 15 (the CD layer's own count, unchanged by sound); soft
+114 against the CD branch's 121, the difference exactly func_8016A10C, func_8016A860, func_8016ADD8, func_801711F0,
+func_801712D8 (SsVabOpenHead), func_801717D0 (SsVabTransCompleted) and func_80171C1C, and the same end (func_800F5120
+given a host address). load_vab_bank opens COMM.SND as VAB 0 (21 programs, 92 tones, 92 VAGs; the header at
+0x80020800, the body at 0x80026000) and its 294,944-byte body goes to SPU RAM. Nothing keys a voice before the fault:
+`PSX_AUDIO_WAV` recorded 3 s at peak 0. The bank itself, taken from the disc and played through spu.c, libspu.c and
+libsnd.c (program 0, its centre note 82, for 2 s): peak 20,470, RMS 6,068.
+
+Generated (without the disc): 3,969 matched files compiled (4,002 before: the 33 in libsnd's range are replaced),
+124 functions in the SDK range, 19 functions forwarded by name (the 16 identified, and 3 Sony rows the database
+names by address: SpuSetTransferStartAddr, and SpuDataCallback/SpuCallback in an overlay's copy of libetc).
+
+Tests (tests/test_port_spu.py, clang into a harness): ADPCM blocks by hand and against a Python model of psx-spx's
+decoder (7 shift/filter cases), envelopes against a Python model of psx-spx's ADSR (4 settings, 2,000 samples
+each, and one by hand), a two-voice mix to exact samples (with ENDX, the repeat addresses and ADSRVOL written
+back), a key-on by a raw register store, half-speed pitch interpolation, XA sectors (4/8-bit, mono/stereo, both
+rates) against a Python model of the XA decoder, a VAB + SEQ played through the host libsnd (pitch an octave up,
+the body at SpuMalloc's first address, the note off at the 30th tick of a 120 bpm quarter, end of sequence), and
+the generator's SDK ranges, identification and forwarding.
+
+### PsyCross: what was taken and what wasn't
+
+PsyCross (https://github.com/OpenDriver2/PsyCross, MIT, Copyright (c) 2020 REDRIVER2 Project; its licence is in
+psx/sdk/LICENSE.PsyCross), at e56e4cd:
+
+- **Taken: include/psx/libspu.h**, 452 of its 533 lines, as psx/sdk/libspu.h (the constants, SpuVoiceAttr,
+  SpuCommonAttr, SpuReverbAttr and the rest, the prototypes); left out: the C++ guards and the SpuSt streaming API
+  (69 lines, not implemented here). Its structs have no pointers or longs, so they are the PS1's layout.
+- **Followed, not copied: src/psx/LIBSPU.C** (375 lines): its function surface and the shortcut pattern (one
+  SpuVoiceAttr with one mask bit for SpuSetVoiceVolume, SpuSetVoiceAR, ...), and SpuWrite calling the transfer
+  callback. Its own bodies mostly forward to SPU-AL or are `PSYX_UNIMPLEMENTED()` (SpuSetCommonAttr, the reverb
+  parameters, SpuMallocWithStartAddr, the IRQ calls); SpuMalloc is a bump allocator that frees everything at once.
+- **Not taken: src/audio/PsyX_SPUAL.cpp** (848 lines) and its header (41): it plays each voice as an OpenAL source,
+  decoding the whole sample at key-on with a float ADPCM decoder (`pow`, rounding) and approximate loop points
+  (its own FIXME), with no ADSR, no register file, no ENDX or envelope read-back and no CD/XA. A register-level
+  mixer needs the decoder per block with the hardware's integer arithmetic and flags, so psx/spu.c's decoder,
+  envelope, mixer and XA decoder are written from psx-spx. OpenAL isn't a dependency; output is SDL2's.

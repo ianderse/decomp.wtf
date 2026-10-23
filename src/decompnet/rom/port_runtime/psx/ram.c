@@ -66,6 +66,44 @@ static void map_required(uint32_t addr, uint32_t size, const char *what) {
     }
 }
 
+/* RAM's mirrors, as the PS1 maps it: KUSEG 0x00000000 and KSEG1 0xA0000000 are the same 2 MB as KSEG0 0x80000000.
+ * The game reads through a null pointer as the hardware lets it (SLUS-01252's func_800FD5BC reads a camera pointer
+ * + 6 before the camera exists: RAM at 6 on the PS1, a fault here without the mirror) and libcd patches the BIOS's
+ * tables at 0xA00003E0. PSX_NULL_FAULT=1 leaves KUSEG unmapped, so a null PS1 pointer faults and is reported. */
+static void map_mirror(uint32_t addr, const char *what) {
+#if defined(__APPLE__)
+    mach_vm_address_t at = PSX_HOST_BASE + addr;
+    vm_prot_t cur, max;
+    kern_return_t kr;
+    if (!only_reserved(at, at + PSX_RAM_SIZE)) {
+        psx_log("psx: %s (PS1 0x%08X) not mirrored: something is mapped there\n", what, addr);
+        return;
+    }
+    kr = mach_vm_remap(mach_task_self(), &at, PSX_RAM_SIZE, 0, VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE, mach_task_self(),
+                       (mach_vm_address_t)(PSX_HOST_BASE + PSX_RAM_BASE), FALSE, &cur, &max, VM_INHERIT_SHARE);
+    if (kr != KERN_SUCCESS) psx_log("psx: %s (PS1 0x%08X) not mirrored: mach_vm_remap %d\n", what, addr, kr);
+#else
+    (void)addr;
+    psx_log("psx: %s not mirrored on this host\n", what);
+#endif
+}
+
+/* the runtime's buffers in the window (psx_runtime_alloc) */
+void *psx_runtime_alloc(uint32_t size) {
+    static uint32_t used;
+    static int mapped;
+    void *p;
+    if (!mapped) {
+        if (!psx_map(PSX_RUNTIME_BUF_BASE, PSX_RUNTIME_BUF_SIZE)) return NULL;
+        mapped = 1;
+    }
+    size = (size + 15) & ~15u;
+    if (used + size > PSX_RUNTIME_BUF_SIZE) return NULL;
+    p = psx_host(PSX_RUNTIME_BUF_BASE + used);
+    used += size;
+    return p;
+}
+
 static unsigned char *read_file(const char *path, size_t *size) {
     FILE *f = fopen(path, "rb");
     unsigned char *buf;
@@ -89,6 +127,8 @@ void psx_ram_init(void) {
     uint32_t load, len, off;
     map_required(PSX_RAM_BASE, PSX_RAM_SIZE, "PS1 RAM");
     map_required(PSX_SCRATCH_BASE, PSX_SCRATCH_SIZE, "the scratchpad");
+    if (!getenv("PSX_NULL_FAULT") || atoi(getenv("PSX_NULL_FAULT")) <= 0) map_mirror(0x00000000u, "RAM's KUSEG mirror");
+    map_mirror(0xA0000000u, "RAM's KSEG1 mirror");
     snprintf(path, sizeof path, "%s/%s", dir ? dir : psx_config.source_dir, psx_config.image);
     exe = read_file(path, &size);
     if (!exe || size < 0x800 || memcmp(exe, "PS-X EXE", 8) != 0) {

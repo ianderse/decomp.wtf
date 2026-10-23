@@ -207,15 +207,19 @@ def test_sony_functions_known_by_their_code():
         {"name": "func_80070000", "seg": "ovl", "vram": 0x80070000, "rom": 0x140},
         {"name": "func_80070030", "seg": "ovl", "vram": 0x80070030, "rom": 0x170},
         {"name": "func_80176270", "seg": "main", "vram": 0x80176270, "rom": 0x130}]}
-    fp = ep.shape_fingerprint(bytes(image), 0x100, 0x30)
-    assert fp == ep.shape_fingerprint(bytes(image), 0x140, 0x30) and ep.SONY_SHAPES[fp][0] == "DrawSync"
+    fp = ep.shape_fingerprint(bytes(image), 0x100, 12)
+    assert fp == ep.shape_fingerprint(bytes(image), 0x140, 12) and ep.SONY_SHAPES[fp][0] == "DrawSync"
     s = ep.sony_by_shape(build, bytes(image), {})
-    assert s["func_80176240"]["alias"] == "DrawSync" and s["func_80176240"]["replace"]
-    assert s["func_80070000"]["alias"] == "DrawSync" and not s["func_80070000"]["replace"]
-    sdk = ep.sdk_stubs_c([{"name": "func_80176240", "lib": "libgpu", "bios": None, "label": s["func_80176240"]["label"],
-                           "kind": "alias", "alias": "DrawSync", "called": True}])
-    assert 'extern void psx_impl_DrawSync(void) __asm__(PSX_ASM_NAME("DrawSync"));' in sdk
-    assert "long func_80176240(long a0, long a1, long a2, long a3, long a4, long a5, long a6, long a7)" in sdk
+    assert s["func_80176240"]["label"] == "DrawSync" and s["func_80070000"]["label"] == "DrawSync"
+    assert ep.sony_by_shape(build, bytes(image), {}, {"func_80176240": "Other"}).keys() == {"func_80070000"}
+    # into plan()'s one aliases map: the matched C dropped, both forwarded by name
+    p = ep.plan(build, {"src/main/func_80176240.c": "void func_80176240(void) {}"}, {}, s)
+    assert p["replaced"] == {"src/main/func_80176240.c": "func_80176240"}
+    alias = {x["name"]: x for x in p["sdk"] if x["kind"] == "alias"}
+    assert alias["func_80176240"]["target"] == "DrawSync" and alias["func_80070000"]["target"] == "DrawSync"
+    sdk = ep.sdk_stubs_c(p["sdk"])
+    assert "int func_80176240(long a0, long a1, long a2, long a3, long a4, long a5, long a6, long a7)" in sdk
+    assert "DrawSync" in sdk and "by its code" in sdk
     # a function still in assembly named like one the runtime implements (SLUS-01252's LoadImage) is the runtime's
     named = ep.sony_by_name({"functions": [{"name": "LoadImage", "seg": "main", "vram": 0x801762C0}]}, {})
     assert named["LoadImage"]["lib"] == "libgpu"

@@ -121,13 +121,13 @@ def test_unmatched_and_sdk_stubs():
     assert 'int func_800C2838(void) { return psx_unmatched("func_800C2838"); }' in c
     assert "its C is excluded: expected ';'" in c
     by = {s["name"]: s for s in p["sdk"]}
-    assert by["VSync"]["kind"] == "implemented" and by["SsSeqPlay"]["kind"] == "stub"
+    assert by["VSync"]["kind"] == "implemented" and by["SsSeqPlay"]["kind"] == "implemented"
     assert by["func_8017CF60"]["kind"] == "bios" and all(s["called"] for s in p["sdk"])
     sdk = ep.sdk_stubs_c(p["sdk"], p["renames"])
     assert "VSync" not in sdk                                       # the runtime's own
-    assert 'int SsSeqPlay(void) { return psx_sdk_stub("SsSeqPlay", &calls_SsSeqPlay); }' in sdk
+    assert "SsSeqPlay" not in sdk                                   # libsnd.c's
     assert "void * func_8017CF60(void *a, const void *b, int n) { return psx_bios_memcpy(PSX_PTR(a), PSX_PTR(b), n); }" in sdk
-    assert "/* ---- libsnd */" in sdk
+    assert "/* ---- libapi */" in sdk
 
 
 def test_c_library_names_are_renamed_and_the_dispatch_table():
@@ -389,3 +389,63 @@ psx: func_80178F28 is not decompiled yet (it is still assembly in the export): s
     assert s["story"] == ("calls func_800C27B8, func_801676E0; first Sony stub reached: intInit; first function still "
                           "in assembly: func_80178F28; stops at func_80178F28 (not decompiled)")
     assert "(call 2)" not in s["log_head"]
+
+
+# SLUS-01252's libcd wrappers: CdControl (func_80168B1C) and CdSyncCallback (func_801689B4), relocated elsewhere
+CD_CONTROL = [0x27BDFFE8, 0xAFBF0010, 0x308400FF, 0x0C05A27F, 0x00003821, 0x8FBF0010, 0x2C420001, 0x03E00008,
+              0x27BD0018]
+CD_SWAP = [0x3C02801F, 0x8C424EB0, 0x3C01801F, 0xAC244EB0, 0x03E00008, 0x00000000]
+
+
+def _libcd_build():
+    """CdRead (named) at 0x80100400; CdControl's code 0xB8 before it; CdSyncCallback's 0x220 before it with other
+    relocations (masked out); the same swap code at CdReadyCallback's offset but a word longer"""
+    image = bytearray(0x800)
+    base = 0x80100000
+
+    def put(vram, words):
+        struct.pack_into(f"<{len(words)}I", image, vram - base, *words)
+
+    put(0x80100400 - 0x220, [0x3C028020, 0x8C421234, 0x3C018020, 0xAC241234, 0x03E00008, 0x00000000])
+    put(0x80100400 - 0x208, CD_SWAP + [0])
+    put(0x80100400 - 0xB8, CD_CONTROL)
+    fns = [("func_801001E0", 0x80100400 - 0x220, None), ("func_801001F8", 0x80100400 - 0x208, None),
+           ("func_80100348", 0x80100400 - 0xB8, "src/main/func_80100348.c"),
+           ("func_8010036C", 0x80100400 - 0x94, None), ("CdRead", 0x80100400, None),
+           ("func_80100500", 0x80100500, None)]
+    build = {"functions": [dict({"name": n, "seg": "main", "vram": v, "rom": v - base}, **({"c": c} if c else {}))
+                           for n, v, c in fns]}
+    return build, bytes(image)
+
+
+def test_libcd_functions_found_by_offset_and_masked_code():
+    build, image = _libcd_build()
+    sony = {"func_8006DAD0": {"lib": "libetc", "label": "CdDataCallback"}}
+    build["functions"].append({"name": "func_8006DAD0", "seg": "ovl_sj00", "vram": 0x8006DAD0, "rom": 0x700})
+    a = ep.libcd_aliases(build, image, sony)
+    assert a == {"CdRead": "CdRead", "func_80100348": "CdControl", "func_801001E0": "CdSyncCallback",
+                 "func_8006DAD0": "CdDataCallback"}  # CdReadyCallback's slot is a word too long: not taken
+
+
+def test_libcd_replaces_the_games_matched_copy_with_a_thunk():
+    build, image = _libcd_build()
+    a = ep.libcd_aliases(build, image, {})
+    sources = {"src/main/func_80100348.c": "int func_80100348(int a, int *b, int c) { return CD_cw(a, b, c, 0); }"}
+    p = ep.plan(build, sources, {}, {}, "", "", {}, {}, a)
+    assert p["compiled"] == [] and p["replaced"] == {"src/main/func_80100348.c": "func_80100348"}
+    assert "CD_cw" not in p["calls"] and not any(n == "func_80100348" for n, _ in p["unmatched"])
+    sdk = ep.sdk_stubs_c(p["sdk"], p["renames"])
+    assert ("int func_80100348(int com, unsigned param, unsigned result) { return CdControl(com, param, result); }"
+            in sdk)
+    assert "unsigned func_801001E0(unsigned func) { return CdSyncCallback(func); }" in sdk
+    assert "int CdRead(" not in sdk  # the runtime's own, under its name
+    assert '#include "libcd.h"' in sdk
+    assert {d["name"]: d["kind"] for d in p["dispatch"]}["func_80100348"] == 3
+
+
+def test_config_carries_the_disc():
+    entry = {"load": 0x800C1400, "size": 0xE0800, "offset": 0x800, "bss": [0x801A1570, 0x801FFA20],
+             "bss_detected": True, "pc": 0x801676E8, "sp": 0x801FFFF0, "gp": 0x801A0F68}
+    c = ep.config_c("SLUS-01252", "baserom.exe", entry, "func_800C27B8", '/discs/Arc "II".bin')
+    assert '"/discs/Arc \\"II\\".bin", /* the disc image' in c
+    assert '"", /* the disc image' in ep.config_c("SLUS-01252", "baserom.exe", entry, "func_800C27B8")
