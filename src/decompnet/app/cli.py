@@ -487,6 +487,8 @@ def main(argv: list[str] | None = None) -> int:
                          "'none' for none)")
     po.add_argument("--disc", help="the game's disc image (.bin/.cue/.iso), read in place by the port's CD (saved in "
                                    "port.json; PSX_DISC overrides it at run time)")
+    po.add_argument("--trace", action="store_true", help="with --build: compile the entry trace in (`trace: enters`, "
+                                                         "the last functions entered at a crash; off by default)")
     m = sub.add_parser("mcp", help="serve decomp.wtf to the AI agent you talk to (stdio MCP; starts the app if needed)")
     m.add_argument("--name", default=os.environ.get("DECOMP_AGENT_NAME") or "chat",
                    help="how this agent shows up in the app (e.g. claude-code; or set DECOMP_AGENT_NAME)")
@@ -521,7 +523,7 @@ def main(argv: list[str] | None = None) -> int:
         net = RomNetwork(home_dir() / ".decomp" / "decomp.db", home_dir())
         try:
             res = export_port(net, args.project, build=args.build, main=args.main, check=not args.no_check,
-                              sdk_range=args.sdk_range, disc=args.disc)
+                              sdk_range=args.sdk_range, disc=args.disc, trace=args.trace)
         except PortError as e:
             print(f"port: {e}")
             return 1

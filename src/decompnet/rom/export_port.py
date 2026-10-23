@@ -978,6 +978,14 @@ set(PSX_HOST "auto" CACHE STRING "window: auto, sdl, cocoa or none")
 get_filename_component(PSX_SOURCE_DIR "${{PSX_SOURCE_DIR}}" ABSOLUTE)
 
 option(PSX_PTR32 "the PS1's data layout: 4-byte pointers (__ptr32) and 32-bit long, through tools/ptr32.py" ON)
+# the entry trace (`trace: enters ...`, the last functions entered at a crash): off by default; PSX_PORT_TRACE=1 in
+# the environment at configure time turns the default on (decomp port --trace passes -DPSX_TRACE=ON)
+if(DEFINED ENV{{PSX_PORT_TRACE}} AND NOT "$ENV{{PSX_PORT_TRACE}}" STREQUAL "0")
+  set(_psx_trace_default ON)
+else()
+  set(_psx_trace_default OFF)
+endif()
+option(PSX_TRACE "log the game functions entered (tools/cc_ptr32.py --trace: argument registers kept)" ${{_psx_trace_default}})
 
 include(${{CMAKE_CURRENT_SOURCE_DIR}}/gen/game_sources.cmake)
 set(GAME_INPUTS ${{GAME_SOURCES}})
@@ -1011,15 +1019,32 @@ endif()
 # psx_port_game.h is force-included (inline as GCC did, and the host's psx_gte.h: common.h's own #include "psx_gte.h"
 # would find the export's copy next to it first)
 add_library(game_code OBJECT ${{GAME_COMPILE}})
+set(GAME_TRACE_FLAGS)
 if(PSX_PTR32)  # every use of a __ptr32 pointer translated to the window (tools/cc_ptr32.py): IR, patched, compiled
-  set_target_properties(game_code PROPERTIES
-                        C_COMPILER_LAUNCHER "${{Python3_EXECUTABLE}};${{CMAKE_CURRENT_SOURCE_DIR}}/tools/cc_ptr32.py;--functions;${{CMAKE_CURRENT_SOURCE_DIR}}/gen/psx_function_addrs.txt;--literals;${{CMAKE_BINARY_DIR}}/literals")
-  set_property(SOURCE ${{GAME_COMPILE}} APPEND PROPERTY OBJECT_DEPENDS
+  set(_launcher "${{Python3_EXECUTABLE}};${{CMAKE_CURRENT_SOURCE_DIR}}/tools/cc_ptr32.py;--functions;${{CMAKE_CURRENT_SOURCE_DIR}}/gen/psx_function_addrs.txt;--literals;${{CMAKE_BINARY_DIR}}/literals")
+  if(PSX_TRACE)  # a call to psx/trace.S first in each game function, the argument registers kept
+    string(APPEND _launcher ";--trace")
+  endif()
+  set_target_properties(game_code PROPERTIES C_COMPILER_LAUNCHER "${{_launcher}}")
+  # the launcher's arguments aren't part of what make checks: a file that changes with them is
+  set(_trace_stamp "${{CMAKE_BINARY_DIR}}/psx_trace.txt")
+  if(NOT EXISTS "${{_trace_stamp}}")
+    file(WRITE "${{_trace_stamp}}" "")
+  endif()
+  file(READ "${{_trace_stamp}}" _was)
+  if(NOT _was STREQUAL "${{PSX_TRACE}}")
+    file(WRITE "${{_trace_stamp}}" "${{PSX_TRACE}}")
+  endif()
+  set_property(SOURCE ${{GAME_COMPILE}} APPEND PROPERTY OBJECT_DEPENDS ${{_trace_stamp}}
                ${{CMAKE_CURRENT_SOURCE_DIR}}/tools/cc_ptr32.py ${{CMAKE_CURRENT_SOURCE_DIR}}/gen/psx_function_addrs.txt)
+elseif(PSX_TRACE)
+  message(WARNING "PSX_TRACE without PSX_PTR32 is -finstrument-functions, which puts the function's address in x0: "
+                  "matched C that passes an argument through (func_X() from a void function) breaks under it")
+  set(GAME_TRACE_FLAGS -finstrument-functions)
 endif()
 target_include_directories(game_code BEFORE PRIVATE ${{GAME_INCLUDES}})
 target_compile_definitions(game_code PRIVATE ${{GAME_RENAMES}})
-target_compile_options(game_code PRIVATE {flags} ${{GAME_PTR32_FLAGS}} {GAME_OPT} -g -finstrument-functions
+target_compile_options(game_code PRIVATE {flags} ${{GAME_PTR32_FLAGS}} {GAME_OPT} -g ${{GAME_TRACE_FLAGS}}
                        -include ${{CMAKE_CURRENT_SOURCE_DIR}}/include/psx_port_game.h)
 
 file(GLOB PSX_RUNTIME ${{CMAKE_CURRENT_SOURCE_DIR}}/psx/*.c ${{CMAKE_CURRENT_SOURCE_DIR}}/psx/*.S
@@ -1074,7 +1099,7 @@ if(PSX_HOST STREQUAL "auto")
     set(PSX_HOST cocoa)
   endif()
 endif()
-message(STATUS "PS1 port: window through ${{PSX_HOST}}, ${{CMAKE_OSX_ARCHITECTURES}}${{CMAKE_SYSTEM_PROCESSOR}}")
+message(STATUS "PS1 port: window through ${{PSX_HOST}}, ${{CMAKE_OSX_ARCHITECTURES}}${{CMAKE_SYSTEM_PROCESSOR}}, trace ${{PSX_TRACE}}")
 
 if(PSX_HOST STREQUAL "sdl")
   set(PSX_HOST_SRC ${{CMAKE_CURRENT_SOURCE_DIR}}/psx/host_sdl.c)
@@ -1154,6 +1179,416 @@ def hazards(headers: dict[str, str], sources: dict[str, str]) -> dict:
         raw_files += 1 if n else 0
     return {"pointer_members": ptr_members, "long_members": long_members, "pointer_globals": sorted(ptr_globals),
             "raw_address_casts": raw_derefs, "raw_address_files": raw_files}
+
+
+# ---------------------------------------------------------------------------------------------- dropped arguments
+#
+# Matched C that calls a function with fewer arguments than it takes is byte-exact on the PS1: the argument
+# registers ($a0-$a3) pass through untouched, so the callee reads whatever its caller's caller left there. On the
+# host the same is true only while nothing touches x0-x7 between the caller's entry and the call; clang owes nothing
+# to a value it doesn't know about. m2c drafts do this (`M2C_UNK func_X();` then `func_X()`), and so do calls
+# through a library's function table (`M2C_FIELD(t, M2C_UNK (**)(), 0x2C)()`). The fix is in the C: pass the
+# argument through explicitly (the caller takes it as a parameter and hands it on), which still matches on MIPS.
+#
+# The parser is a regex/bracket scanner over the export's one-function-per-file layout (top-level declarations and
+# definitions, calls in the bodies), not clang's AST: it's fast over 4,000 files and sees the C as written, before
+# the pointer rewrite. It doesn't see calls through casts (`((T (*)())f)(x)`), K&R definitions or declarations
+# made inside a body.
+
+class CSig(dict):
+    """A function's parameters as declared: n (None: `()`, unprototyped), variadic, text (the parameter list)."""
+
+
+def _parse_params(text: str) -> CSig:
+    t = re.sub(r"\s+", " ", text).strip()
+    if t == "":
+        return CSig(n=None, variadic=False, text="()")
+    if t == "void":
+        return CSig(n=0, variadic=False, text="(void)")
+    parts = _split_commas(t)
+    variadic = parts[-1].strip() == "..."
+    return CSig(n=len(parts) - (1 if variadic else 0), variadic=variadic, text=f"({t})")
+
+
+def _split_commas(s: str) -> list[str]:
+    parts, depth, cur = [], 0, []
+    for c in s:
+        if c in "([{":
+            depth += 1
+        elif c in ")]}":
+            depth -= 1
+        if c == "," and depth == 0:
+            parts.append("".join(cur))
+            cur = []
+        else:
+            cur.append(c)
+    parts.append("".join(cur))
+    return parts
+
+
+def _close(s: str, i: int, o: str = "(", c: str = ")") -> int:
+    """s[i] == o: the index of its matching c (len(s) when unbalanced)."""
+    depth = 0
+    for j in range(i, len(s)):
+        if s[j] == o:
+            depth += 1
+        elif s[j] == c:
+            depth -= 1
+            if depth == 0:
+                return j
+    return len(s)
+
+
+def _open(s: str, j: int) -> int:
+    """s[j] == ')': the index of its matching '(' (-1 when unbalanced)."""
+    depth = 0
+    for i in range(j, -1, -1):
+        if s[i] == ")":
+            depth += 1
+        elif s[i] == "(":
+            depth -= 1
+            if depth == 0:
+                return i
+    return -1
+
+
+_NOT_FN = _C_KEYWORDS | {"__attribute__", "__asm__", "asm", "__typeof__", "typeof", "__declspec", "defined"}
+_FN_HEAD = re.compile(r"\b([A-Za-z_]\w*)\s*\(")
+
+
+def _code(text: str) -> str:
+    """C without comments, literals and every preprocessor line (strip_c keeps #define bodies, which would land in
+    the top level here)."""
+    return strip_c(re.sub(r"(?m)^[ \t]*#(?:[^\n]*\\\n)*[^\n]*", "", text))
+
+
+def _declared(decl: str) -> list[tuple[str, CSig]]:
+    """The functions a top-level declaration (no trailing ;) declares: name and parameters, at paren depth 0 (a
+    function pointer `T (*fp)(int)` declares none)."""
+    d = decl.strip()
+    if not d or d.startswith("typedef") or re.match(r"(?:struct|union|enum)\b[^(]*$", d):
+        return []
+    out = []
+    for m in _FN_HEAD.finditer(d):
+        if m.group(1) in _NOT_FN:
+            continue
+        depth = d[:m.start()].count("(") - d[:m.start()].count(")")
+        if depth != 0 or "=" in d[:m.start()]:
+            continue
+        end = _close(d, m.end() - 1)
+        out.append((m.group(1), _parse_params(d[m.end():end])))
+    return out
+
+
+def c_toplevel(text: str) -> dict:
+    """One C file's top level: {"prototypes": {name: CSig}, "definitions": {name: (CSig, body)}}."""
+    s = _code(text)
+    protos: dict[str, CSig] = {}
+    defs: dict[str, tuple[CSig, str]] = {}
+    i, start, n = 0, 0, len(s)
+    while i < n:
+        c = s[i]
+        if c == ";":
+            for name, sig in _declared(s[start:i]):
+                protos.setdefault(name, sig)
+            start = i + 1
+        elif c == "{":
+            end = _close(s, i, "{", "}")
+            head = s[start:i].strip()
+            m = None
+            for m2 in _FN_HEAD.finditer(head):
+                if m2.group(1) not in _NOT_FN and head[:m2.start()].count("(") == head[:m2.start()].count(")"):
+                    m = m2
+            if m and "=" not in head and not re.match(r"(?:typedef|struct|union|enum)\b", head):
+                pend = _close(head, m.end() - 1)
+                if not head[pend + 1:].strip() or head[pend + 1:].strip().startswith("__attribute__"):
+                    defs[m.group(1)] = (_parse_params(head[m.end():pend]), s[i + 1:end])
+                    i, start = end + 1, end + 1
+                    continue
+            i = end + 1  # a struct body or an initializer: the declaration goes on to its ;
+            continue
+        i += 1
+    return {"prototypes": protos, "definitions": defs}
+
+
+def body_calls(body: str, functions: set[str]) -> list[tuple[str, int]]:
+    """(callee, arguments) for each direct call of a game function in a function body."""
+    out = []
+    for m in _FN_HEAD.finditer(body):
+        name = m.group(1)
+        if name not in functions:
+            continue
+        before = body[:m.start()].rstrip()
+        if before.endswith((".", "->", "&")) or re.search(
+                r"\b(?:void|s8|u8|s16|u16|s32|u32|int|char|short|long|unsigned|signed|M2C_UNK\w*|extern|static)"
+                r"\s*\**$", before):
+            continue  # a member, an address taken, or a declaration inside the body
+        end = _close(body, m.end() - 1)
+        args = body[m.end():end].strip()
+        out.append((name, 0 if not args else len(_split_commas(args))))
+    return out
+
+
+_NOPROTO_FNPTR = re.compile(r"\(\s*\*+\s*\)\s*\(\s*\)")
+
+
+def table_calls(body: str) -> list[str]:
+    """Calls with no arguments through an unprototyped function pointer type (`M2C_UNK (**)()`): the callee
+    expression of each, as written."""
+    out = []
+    locals_ = set(re.findall(r"\(\s*\*\s*([A-Za-z_]\w*)\s*\)\s*\(\s*\)", body))
+    for m in re.finditer(r"\)\s*\(\s*\)", body):
+        o = _open(body, m.start())
+        if o < 0:
+            continue
+        name = re.search(r"([A-Za-z_]\w*)\s*$", body[:o])
+        start = name.start(1) if name else o
+        expr = body[start:m.start() + 1]
+        if _NOPROTO_FNPTR.search(expr):
+            out.append(re.sub(r"\s+", " ", expr))
+    for v in locals_:
+        for m in re.finditer(rf"(?<![\w.>])\b{re.escape(v)}\s*\(\s*\)", body):
+            if not re.search(r"\(\s*\*\s*$", body[:m.start()]):
+                out.append(v)
+    return out
+
+
+def mips_arg_reads(words: list[int]) -> list[int]:
+    """The argument registers ($a0-$a3, as 0-3) a MIPS function reads before it writes them, scanning its code in
+    order up to `jr $ra` and its delay slot (a heuristic: branches aren't followed; after a call, $a0-$a3 count as
+    written). An assembly function's evidence of the parameters it takes."""
+    read: set[int] = set()
+    written: set[int] = set()
+
+    def use(*regs):
+        for r in regs:
+            if 4 <= r <= 7 and r not in written:
+                read.add(r - 4)
+
+    def define(r):
+        if 4 <= r <= 7:
+            written.add(r)
+
+    def call(k):  # jal/jalr: the delay slot runs first, then $a0-$a3 are the callee's
+        if k + 1 < len(words):
+            d = words[k + 1]
+            dop, drs, drt = d >> 26, (d >> 21) & 31, (d >> 16) & 31
+            if dop == 0:
+                use(drs, drt)
+            elif 8 <= dop <= 14 or 0x20 <= dop <= 0x26:
+                use(drs)
+            elif 0x28 <= dop <= 0x2E:
+                use(drs, drt)
+        written.update(range(4, 8))
+
+    stop_after = None
+    for k, w in enumerate(words):
+        op, rs, rt, rd, fn = w >> 26, (w >> 21) & 31, (w >> 16) & 31, (w >> 11) & 31, w & 63
+        if op == 0:
+            if fn in (0, 2, 3):  # shifts by an immediate
+                use(rt)
+                define(rd)
+            elif fn == 8:  # jr
+                use(rs)
+                if rs == 31:
+                    stop_after = k + 1
+            elif fn == 9:  # jalr
+                use(rs)
+                call(k)
+            elif fn in (12, 13):  # syscall, break
+                pass
+            elif fn in (16, 18):  # mfhi, mflo
+                define(rd)
+            elif fn in (17, 19):  # mthi, mtlo
+                use(rs)
+            elif 24 <= fn <= 27:  # mult, div
+                use(rs, rt)
+            else:
+                use(rs, rt)
+                define(rd)
+        elif op == 1:
+            use(rs)
+        elif op == 2:
+            pass
+        elif op == 3:
+            call(k)
+        elif op in (4, 5):
+            use(rs, rt)
+        elif op in (6, 7):
+            use(rs)
+        elif 8 <= op <= 14:
+            use(rs)
+            define(rt)
+        elif op == 15:
+            define(rt)
+        elif 0x20 <= op <= 0x26:
+            use(rs)
+            define(rt)
+        elif 0x28 <= op <= 0x2E:
+            use(rs, rt)
+        elif op in (0x10, 0x12):
+            if rs in (4, 6):
+                use(rt)
+            elif rs in (0, 2):
+                define(rt)
+        elif op in (0x32, 0x3A):
+            use(rs)
+        if stop_after is not None and k >= stop_after:
+            break
+    return sorted(read)
+
+
+def passes_through(words: list[int], callee_vram: int, args: int, params: int) -> str:
+    """What the dropped argument registers ($a<args>..$a<params-1>) hold at a caller's first call to the callee, by
+    its MIPS code in order: "pass-through" (nothing wrote them and no call came before: the caller's own arguments,
+    so the fix is to take them as parameters and hand them on), "leftover" (written or clobbered by an earlier call
+    first: what the callee gets is whatever was there), "?" (no jal/j to the callee found)."""
+    target = (callee_vram >> 2) & 0x3FFFFFF
+    written, called = set(), False
+    for k, w in enumerate(words):
+        op, rs, rt, rd, fn = w >> 26, (w >> 21) & 31, (w >> 16) & 31, (w >> 11) & 31, w & 63
+        if op in (2, 3) and (w & 0x3FFFFFF) == target:
+            if k + 1 < len(words):  # the delay slot runs first
+                d = words[k + 1]
+                dop, drt, drd = d >> 26, (d >> 16) & 31, (d >> 11) & 31
+                written.add(drd if dop == 0 else drt if (8 <= dop <= 15 or 0x20 <= dop <= 0x26) else -1)
+            dropped = set(range(4 + args, 4 + params))
+            return "pass-through" if not called and not (written & dropped) else "leftover"
+        if op == 3 or (op == 0 and fn == 9):
+            called = True
+        elif op == 0 and fn not in (8, 9, 12, 13, 17, 19) and not 24 <= fn <= 27:
+            written.add(rd)
+        elif 8 <= op <= 15 or 0x20 <= op <= 0x26 or (op in (0x10, 0x12) and rs in (0, 2)):
+            written.add(rt)
+    return "?"
+
+
+def call_hazards(sources: dict[str, str], compiled: list[str], headers: dict[str, str], functions: set[str],
+                 matched: dict[str, str], replaced: dict[str, str] | None = None,
+                 runtime_sigs: dict[str, CSig] | None = None, asm_reads: dict[str, list[int]] | None = None) -> dict:
+    """The dropped-argument hazards of the matched C the port compiles.
+
+    sources: {path: text} of every matched file; compiled: the paths the port compiles (callers); headers: include/
+    (common.h's prototypes stand in for a caller's own); functions: every game function's name; matched: {name: path}
+    of the matched ones; replaced: {game function: the runtime function that stands in for it}; runtime_sigs: the
+    runtime's prototypes (psx/sdk/*.h); asm_reads: {unmatched function: the argument registers its code reads first}
+    (mips_arg_reads).
+
+    a. "dropped": a call passing fewer arguments than the callee's definition (matched C, or the runtime's prototype
+       for a function it replaces) takes, with how the caller declared it: "(void)", "fewer" (a prototype with fewer
+       parameters), "()" (unprototyped) or "none" (only common.h's, or implicit).
+    b. "table_calls": calls with no arguments through an unprototyped function pointer (`M2C_UNK (**)()`).
+    c. "unmatched": calls with no arguments to a function still in assembly, which no definition checks; with
+       common.h's prototype if it has one, else the argument registers its code reads ("reads $a0, $a1"), else
+       "unknown"."""
+    replaced = replaced or {}
+    runtime_sigs = runtime_sigs or {}
+    asm_reads = asm_reads or {}
+    common: dict[str, CSig] = {}
+    for t in headers.values():
+        for k, v in c_toplevel(t)["prototypes"].items():
+            common.setdefault(k, v)
+    parsed = {p: c_toplevel(t) for p, t in sources.items()}
+    defined: dict[str, CSig] = {}
+    for name, path in matched.items():
+        d = parsed.get(path, {}).get("definitions", {}).get(name)
+        if d:
+            defined[name] = d[0]
+    dropped, tables, unmatched = [], [], []
+    for path in compiled:
+        top = parsed.get(path)
+        if not top:
+            continue
+        for caller, (_, body) in top["definitions"].items():
+            for expr in table_calls(body):
+                tables.append({"caller": caller, "file": path, "call": expr[:160]})
+            seen = set()
+            for callee, nargs in body_calls(body, functions):
+                if (callee, nargs) in seen:
+                    continue
+                seen.add((callee, nargs))
+                local = top["prototypes"].get(callee)
+                decl = local or common.get(callee)
+                how = "none" if local is None else local["text"] if local["n"] in (None, 0) else "fewer"
+                if callee in replaced and replaced[callee] in runtime_sigs:
+                    sig, where = runtime_sigs[replaced[callee]], f"the runtime's {replaced[callee]}"
+                elif callee in defined:
+                    sig, where = defined[callee], "matched C"
+                else:
+                    sig, where = None, None
+                if sig is not None:
+                    if sig["n"] and not sig["variadic"] and nargs < sig["n"]:
+                        dropped.append({"caller": caller, "file": path, "callee": callee, "declared": how,
+                                        "declaration": decl["text"] if decl else None, "defined": sig["text"],
+                                        "params": sig["n"], "args": nargs, "definition": where})
+                    continue
+                if callee in matched or nargs:
+                    continue
+                if callee in common and common[callee]["n"] is not None:
+                    n_ev = common[callee]["n"]
+                    evidence = f"common.h: {common[callee]['text']}"
+                elif callee in asm_reads:
+                    regs = asm_reads[callee]
+                    n_ev = max(regs) + 1 if regs else 0
+                    evidence = ("reads " + ", ".join(f"$a{r}" for r in regs)) if regs else "reads no argument register"
+                else:
+                    n_ev, evidence = None, "unknown"
+                unmatched.append({"caller": caller, "file": path, "callee": callee, "declared": how,
+                                  "evidence": evidence, "params": n_ev})
+    unmatched_args = [u for u in unmatched if u["params"]]
+    return {
+        "method": "regex/bracket scan of the export's one-function-per-file C (not clang's AST); "
+                  "assembly evidence: argument registers read before written, straight-line scan to jr $ra",
+        "dropped": dropped, "table_calls": tables, "unmatched": unmatched,
+        "counts": {"dropped": len(dropped), "dropped_callers": len({d["caller"] for d in dropped}),
+                   "dropped_by_declaration": {k: sum(1 for d in dropped if d["declared"] == k)
+                                              for k in sorted({d["declared"] for d in dropped})},
+                   "table_calls": len(tables), "table_callers": len({t["caller"] for t in tables}),
+                   "unmatched": len(unmatched), "unmatched_takes_args": len(unmatched_args),
+                   "unmatched_no_args": sum(1 for u in unmatched if u["params"] == 0),
+                   "unmatched_unknown": sum(1 for u in unmatched if u["params"] is None)},
+    }
+
+
+def port_call_hazards(build: dict, image: bytes, sources: dict[str, str], headers: dict[str, str], p: dict,
+                      sony: dict[str, dict], aliases: dict[str, str]) -> dict:
+    """call_hazards() for a port: plan() p's compiled files as the callers, the runtime's prototypes for the
+    functions it stands in for, the assembly's argument registers for the unmatched ones."""
+    fns = build["functions"]
+    matched = {f["name"]: f["c"] for f in fns if f.get("c")}
+    replaced = {n: s.get("label") or n for n, s in sony.items()}
+    replaced.update(aliases)
+    sizes = _sizes(build, image)
+    reads = {}
+    for f in fns:
+        n = f["name"]
+        if n not in matched and f.get("rom") is not None and n in sizes:
+            count = min(sizes[n][1], 4096, (len(image) - f["rom"]) // 4)
+            reads[n] = mips_arg_reads(list(struct.unpack_from(f"<{count}I", image, f["rom"])))
+    out = call_hazards(sources, p["compiled"], headers, {f["name"] for f in fns}, matched, replaced,
+                       runtime_prototypes(), reads)
+    by_name = {f["name"]: f for f in fns}
+    for d in out["dropped"]:
+        f, g = by_name.get(d["caller"]), by_name.get(d["callee"])
+        d["register"] = "?"
+        if f and g and f.get("rom") is not None and d["caller"] in sizes:
+            count = min(sizes[d["caller"]][1], 4096, (len(image) - f["rom"]) // 4)
+            d["register"] = passes_through(list(struct.unpack_from(f"<{count}I", image, f["rom"])), g["vram"],
+                                           d["args"], d["params"])
+    out["counts"]["dropped_pass_through"] = sum(1 for d in out["dropped"] if d["register"] == "pass-through")
+    for u in out["unmatched"]:
+        u["sony"] = u["callee"] in sony
+    out["counts"]["unmatched_sony"] = sum(1 for u in out["unmatched"] if u["sony"])
+    return out
+
+
+def runtime_prototypes() -> dict[str, CSig]:
+    """The runtime's own prototypes (psx/sdk/*.h, psx/*.h): what a function it replaces takes."""
+    out: dict[str, CSig] = {}
+    for h in sorted((RUNTIME / "psx").rglob("*.h")):
+        for k, v in c_toplevel(h.read_text(encoding="utf-8", errors="replace"))["prototypes"].items():
+            out.setdefault(k, v)
+    return out
 
 
 # ---------------------------------------------------------------------------------------------- compile check
@@ -1244,7 +1679,7 @@ def write_runtime(port: Path) -> None:
 
 def export_port(net, slug: str, out: Path | None = None, log=print, build: bool = False, main: str | None = None,
                 check: bool = True, run_seconds: int = 5, disc: str | None = None, commit: bool | None = None,
-                sdk_range: list[str] | None = None) -> dict:
+                sdk_range: list[str] | None = None, trace: bool = False) -> dict:
     """Write <project root>/port/ from the project's export (source/), optionally build and run it; returns the
     counts PORT.md reports."""
     proj = net._project(slug)
@@ -1267,7 +1702,7 @@ def export_port(net, slug: str, out: Path | None = None, log=print, build: bool 
     else:
         ranges = sdk_ranges(cfg.get("regions") or [], sony)
     return generate(source, port, sony, title=proj["name"], slug=slug, log=log, build=build,
-                    main=main, check=check, run_seconds=run_seconds, disc=disc,
+                    main=main, check=check, run_seconds=run_seconds, disc=disc, trace=trace,
                     commit=out is None if commit is None else commit, sdk_range=ranges)
 
 
@@ -1300,7 +1735,7 @@ def sdk_functions(build: dict, sony: dict[str, dict], ranges: list[tuple[int, in
 
 
 def generate(source: Path, port: Path, sony: dict[str, dict], title: str, slug: str, log=print, build: bool = False,
-             main: str | None = None, check: bool = True, run_seconds: int = 5, ptr32: bool = True,
+             main: str | None = None, check: bool = True, run_seconds: int = 5, ptr32: bool = True, trace: bool = False,
              disc: str | None = None, commit: bool = False, sdk_range: list[tuple[int, int]] | None = None) -> dict:
     """disc: the game's disc image, read in place by the port's CD (kept in port.json: None keeps the one saved
     there). commit: commit the port when it sits in a git repository (export.commit_tree). sdk_range: address ranges
@@ -1395,6 +1830,11 @@ def generate(source: Path, port: Path, sony: dict[str, dict], title: str, slug: 
     put(port / "CMakeLists.txt", cmakelists(slug))
     put(port / ".gitignore", "build/\n")
     hz = hazards(headers, {k: v for k, v in sources.items() if k not in excluded})
+    ch = port_call_hazards(b, image, sources, headers, p, sony, aliases)
+    put(port / "hazards.json", json.dumps(ch, indent=1) + "\n")
+    log(f"dropped arguments: {ch['counts']['dropped']} calls pass fewer than the callee takes, "
+        f"{ch['counts']['table_calls']} table calls with (), {ch['counts']['unmatched']} ()-calls to assembly "
+        f"({ch['counts']['unmatched_takes_args']} of whose callees take arguments): port/hazards.json")
     report = {
         "path": str(port), "main": main_name, "main_detected": detected, "main_matched": main_name in matched_names,
         "entry": {k: entry[k] for k in ("pc", "load", "size", "sp", "gp", "bss", "bss_detected", "calls")},
@@ -1412,6 +1852,7 @@ def generate(source: Path, port: Path, sony: dict[str, dict], title: str, slug: 
         "sdk_aliases": {s["name"]: s["target"] for s in p["sdk"] if s["kind"] == "alias" and s["lib"] != "libcd"},
         "symbols": len(p["symbols"]), "renamed": rn, "game_implements": p["game_implements"], "as_data_matched": p["as_data_matched"],
         "as_data_unmatched": p["as_data_unmatched"], "unresolved": p["unresolved"], "hazards": hz,
+        "call_hazards": ch,
         "generated_in": round(time.time() - t0, 1),
         "disc": disc or "",
         "libcd": {n: a for n, a in sorted(aliases.items())},
@@ -1421,7 +1862,7 @@ def generate(source: Path, port: Path, sony: dict[str, dict], title: str, slug: 
         f"{report['sdk_stubs']} Sony stubs, {len(report['sdk_implemented'])} Sony functions implemented, "
         f"{report['symbols']} data symbols")
     if build:
-        report["build"] = build_and_run(port, log=log, seconds=run_seconds)
+        report["build"] = build_and_run(port, log=log, seconds=run_seconds, trace=trace)
     (port / "port.json").write_text(json.dumps(report, indent=1, default=list), encoding="utf-8")
     (port / "PORT.md").write_text(port_md(title, report), encoding="utf-8")
     if commit:
@@ -1431,8 +1872,10 @@ def generate(source: Path, port: Path, sony: dict[str, dict], title: str, slug: 
     return report
 
 
-def build_and_run(port: Path, log=print, seconds: int = 5) -> dict:
-    """cmake configure + build, then the game with PSX_PORT_SOFT=1 for `seconds`, its log in build/run.log."""
+def build_and_run(port: Path, log=print, seconds: int = 5, trace: bool = False) -> dict:
+    """cmake configure + build, then the game with PSX_PORT_SOFT=1 for `seconds`, its log in build/run.log. trace (or
+    PSX_PORT_TRACE=1 in the environment): the entry trace compiled in (-DPSX_TRACE=ON)."""
+    trace = trace or os.environ.get("PSX_PORT_TRACE", "0") not in ("", "0")
     cmake = shutil.which("cmake") or "/opt/homebrew/bin/cmake"
     bdir = port / "build"
     res = {"configured": False, "built": False, "ran": False}
@@ -1442,7 +1885,9 @@ def build_and_run(port: Path, log=print, seconds: int = 5) -> dict:
         cache.unlink()
         shutil.rmtree(bdir / "CMakeFiles", ignore_errors=True)
     log("cmake: configuring")
-    r = subprocess.run([cmake, "-S", str(port), "-B", str(bdir), "-DCMAKE_BUILD_TYPE=RelWithDebInfo"],
+    res["trace"] = trace
+    r = subprocess.run([cmake, "-S", str(port), "-B", str(bdir), "-DCMAKE_BUILD_TYPE=RelWithDebInfo",
+                        f"-DPSX_TRACE={'ON' if trace else 'OFF'}"],
                        capture_output=True, text=True, encoding="utf-8", errors="replace")
     res["configure_log"] = (r.stdout + r.stderr)[-3000:]
     if r.returncode != 0:
@@ -1506,7 +1951,9 @@ def summarize_run(text: str) -> dict:
     stopped = re.search(r"^psx: (\S+) is not decompiled yet", text, re.M)
     timed = re.search(r"^psx: (stopped|terminated) after the time", text, re.M)
     reads = re.findall(r"^cd: CdRead \d+ sectors .*? from LBA \d+ \(([^)]*?)(?: \+0x[0-9A-F]+)?\)", text, re.M)
-    story = "calls " + ", ".join(entered[:12]) + (f" (+{len(entered) - 12} more)" if len(entered) > 12 else "")
+    story = ("calls " + ", ".join(entered[:12]) + (f" (+{len(entered) - 12} more)" if len(entered) > 12 else "")
+             if entered else "no trace (built without it: decomp port --trace)")
+    frames = re.search(r"^psx: (\d+) frames \(vertical blanks\)", text, re.M)
     if sdk:
         story += f"; first Sony stub reached: {sdk[0]}"
     if unmatched:
@@ -1519,6 +1966,8 @@ def summarize_run(text: str) -> dict:
         story += f"; ends with a {fault.group(1)}"
     elif timed:
         story += "; still running when the time was up"
+    if frames:
+        story += f" ({frames.group(1)} frames)"
     gpu = re.search(r"^gpu: (\d+) packets, (\d+) primitives, (\d+) pixels, (\d+) fills, (\d+) loads; display (on|off)",
                     text, re.M)
     if gpu:
@@ -1529,6 +1978,63 @@ def summarize_run(text: str) -> dict:
     return {"entered": entered, "unmatched_hit": unmatched, "sdk_hit": sdk, "fault": fault.group(1) if fault else None,
             "cd_reads": reads,
             "stopped_at": stopped.group(1) if stopped else None, "story": story, "log_head": "\n".join(keep[:70])}
+
+
+def call_hazards_md(ch: dict | None) -> str:
+    """PORT.md's section on the arguments the matched C drops (call_hazards), every entry listed."""
+    if not ch:
+        return ""
+    c = ch["counts"]
+    by = ", ".join(f"{n} declared `{k}`" if k.startswith("(") else f"{n} {k}" for k, n in c["dropped_by_declaration"].items())
+    out = [f"""## Arguments the matched C drops
+
+Matched C that calls a function with fewer arguments than it takes is byte-exact on the PS1, where $a0-$a3 pass
+through untouched, and works on the host only while nothing touches x0-x7 before the call: clang owes nothing to a
+value it doesn't know about, so any change to the compiler, the flags or the code around the call can break it.
+Nothing at run time can repair it. The fix is in the C: the caller takes the argument as a parameter and passes it
+on (`void func_80104228(void *arg0) {{ func_800F5120(arg0); }}`), which still matches on MIPS because the register
+is the same. Found by {ch['method']}; the lists are in `hazards.json` too.
+
+- **a. Fewer arguments than the definition takes: {c['dropped']} calls in {c['dropped_callers']} functions** ({by};
+  `none`: no prototype of the caller's own, only common.h's or an implicit declaration). In
+  {c.get('dropped_pass_through', 0)} of them the registers are the caller's own arguments, untouched (pass-through:
+  the fix is mechanical).
+- **b. Calls with no arguments through an unprototyped function pointer (`M2C_UNK (**)()`), in C the port compiles:
+  {c['table_calls']}** (the libraries' ones the runtime replaces by their code, SONY_SHAPES, aren't counted).
+- **c. Calls with no arguments to a function still in assembly: {c['unmatched']}**, which no definition checks (the
+  database records no signatures): {c['unmatched_takes_args']} callees take arguments by common.h's prototype or
+  their code (they read an argument register before writing it), {c['unmatched_no_args']} read none,
+  {c['unmatched_unknown']} unknown. Harmless while the callee is a stub; each becomes case a when it's matched.
+"""]
+    if ch["dropped"]:
+        out.append("\n### a. Fewer arguments than the definition takes\n\n"
+                   "`register`: what the dropped argument registers hold at the call on the PS1, by the caller's code: "
+                   "`pass-through` (the caller's own arguments, untouched: take them as parameters and pass them "
+                   "on), `leftover` (an earlier call or instruction wrote them: the callee gets that; read the "
+                   "assembly to see what it is).\n\n"
+                   "| caller | callee | declared | defined | args | register |\n"
+                   "| :-- | :-- | :-- | :-- | --: | :-- |\n")
+        for d in sorted(ch["dropped"], key=lambda d: (d["file"], d["callee"])):
+            decl = d["declared"] if d["declared"] != "none" else ("none" + (f" (common.h `{d['declaration']}`)"
+                                                                            if d.get("declaration") else ""))
+            decl = f"`{decl}`" if decl.startswith("(") else decl
+            where = "" if d["definition"] == "matched C" else f" ({d['definition']})"
+            out.append(f"| `{d['caller']}` | `{d['callee']}` | {decl} | `{d['defined']}`{where} | {d['args']} | "
+                       f"{d.get('register', '?')} |\n")
+    if ch["table_calls"]:
+        out.append("\n### b. No-argument calls through `(**)()`\n\n")
+        out += [f"- `{t['caller']}`: `{t['call']}()`\n" for t in ch["table_calls"]]
+    if ch["unmatched"]:
+        takes = [u for u in ch["unmatched"] if u["params"]]
+        rest = [u for u in ch["unmatched"] if not u["params"]]
+        out.append("\n### c. No-argument calls to assembly\n\nCallees that take arguments:\n\n")
+        out += [f"- `{u['caller']}` -> `{u['callee']}` (declared `{u['declared']}`): {u['evidence']}\n"
+                for u in sorted(takes, key=lambda u: (u["callee"], u["caller"]))]
+        if rest:
+            out.append("\nCallees that read no argument register (or unknown): "
+                       + ", ".join(f"`{u['caller']}` -> `{u['callee']}`" + (" (unknown)" if u["params"] is None else "")
+                                   for u in sorted(rest, key=lambda u: (u["callee"], u["caller"]))) + ".\n")
+    return "".join(out) + "\n"
 
 
 def port_md(title: str, r: dict) -> str:
@@ -1578,7 +2084,9 @@ cmake -S port -B port/build && cmake --build port/build && port/build/game
 
 Needs cmake, clang and python3 (the build rewrites the game's C, below). Environment: `PSX_PORT_SOFT=1` goes on past
 functions that are still assembly (they return 0) instead of stopping at the first; `PSX_TRACE=N` logs the first N
-distinct game functions entered (default 200); `PSX_HEADLESS=1` no window; `PSX_TIMEOUT=S` stops after S seconds;
+distinct game functions entered (default 200) in a build with the trace compiled in (`-DPSX_TRACE=ON`, `decomp port
+--trace` or `PSX_PORT_TRACE=1` at configure time; off by default: a call to `psx/trace.S` first in every game
+function, which keeps the argument registers); `PSX_HEADLESS=1` no window; `PSX_TIMEOUT=S` stops after S seconds;
 `PSX_SOURCE_DIR` the exported tree if it moved; `PSX_DISC` the disc image (default: the one `decomp port --disc`
 saved, {('`' + r['disc'] + '`') if r.get('disc') else 'none saved'}), `PSX_CD_FAST=1` a CdRead's sectors all at once,
 `PSX_CD_LOG=1` every CD command, `PSX_CD_LOAD=FILE@ADDR` a disc file into RAM at CdInit (an overlay, to check it
@@ -1703,8 +2211,10 @@ generated from this game). `port.json` has these numbers.
 - **Calls nothing answers** (named in the C, but neither matched, a stub nor a symbol):
   {', '.join(f'`{n}`' for n in r['unresolved'][:40]) or 'none'}.
 - **Matched files that don't compile for the host**:{ex_lines or ' none.'}
+- **Arguments the matched C drops**: {(r.get('call_hazards') or {}).get('counts', {}).get('dropped', 0)} calls pass
+  fewer arguments than the callee takes (below).
 
-## PsyCross
+{call_hazards_md(r.get('call_hazards'))}## PsyCross
 
 [PsyCross](https://github.com/OpenDriver2/PsyCross) (OpenDriver2) reimplements PSY-Q's libraries on SDL2 (2.0.16+),
 OpenAL-soft and OpenGL: a renderer that emulates VRAM, an SPU, a software GTE with PGXP. REDRIVER2 and the Silent Hill

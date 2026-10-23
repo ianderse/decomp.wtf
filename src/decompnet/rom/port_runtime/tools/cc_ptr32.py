@@ -31,8 +31,15 @@ except values and arithmetic:
 A constant (a raw address, a data symbol's address) is translated as a constant expression; a 32-bit integer turned
 into an ordinary pointer (`(T *)0x8002B590` through a macro that kept a plain `*`) is a PS1 address too.
 
+--trace (cmake -DPSX_TRACE=ON) also puts, first in every game function (one --functions names), an inline-asm call
+to psx_trace_thunk (psx/trace.S) with the function's PS1 address and host address in x16/x17 (r10/r11 on x86_64):
+the thunk keeps every argument register around the runtime's psx_trace_enter(ps1, fn), and the asm declares the
+other caller-saved registers clobbered. -finstrument-functions can't do that: its __cyg_profile_func_enter call puts
+the function's address in x0, which breaks matched C that relies on an argument passing through (`func_X()` from a
+`void` function, right on the PS1 where $a0 is untouched).
+
 CMake runs it as the C compiler launcher:
-  cc_ptr32.py [--functions FILE] [--literals DIR] <compiler> <args...> -o <out.o> -c <in.c>
+  cc_ptr32.py [--functions FILE] [--literals DIR] [--trace] <compiler> <args...> -o <out.o> -c <in.c>
 FILE has one `name 0xADDRESS` line per game function (gen/psx_function_addrs.txt). PSX_KEEP_IR=1 keeps the patched
 .ll next to the object. Standard library only.
 """
@@ -64,6 +71,35 @@ HOST_FN_DECL = "declare ptr @psx_host_fn(i32)"
 
 class IRError(RuntimeError):
     pass
+
+
+# the trace call (--trace): its two inputs in scratch registers the thunk saves; every caller-saved register the
+# thunk doesn't save declared clobbered, so the compiler keeps nothing there across it
+TRACE_ASM = {
+    "aarch64": ("bl SYM",
+                # ~{lr}, not ~{x30}: LLVM ignores the latter (no frame, and the function's ret loops back)
+                "{x16},{x17}," + ",".join(f"~{{x{r}}}" for r in range(10, 16)) + ",~{lr},"
+                + ",".join(f"~{{q{r}}}" for r in range(16, 32)) + ",~{cc},~{memory}"),
+    "x86_64": ("leaq -128(%rsp), %rsp\\0Acall SYM\\0Aleaq 128(%rsp), %rsp",  # past the red zone
+               "{r10},{r11}," + ",".join(f"~{{xmm{r}}}" for r in range(8, 16))
+               + ",~{dirflag},~{fpsr},~{flags},~{memory}"),
+}
+_DEFINE_NAME = re.compile(r"^define [^@]*@([-\w.$]+)\(")
+
+
+def ir_arch(ir: str) -> tuple[str, bool]:
+    """(the trace's architecture, whether symbols take a leading underscore) from the module's target triple."""
+    m = re.search(r'^target triple = "([^"]*)"', ir, re.M)
+    triple = m.group(1) if m else ""
+    arch = "x86_64" if triple.startswith(("x86_64", "amd64")) else "aarch64"
+    return arch, any(k in triple for k in ("apple", "darwin", "macos"))
+
+
+def trace_call(addr: int, name: str, arch: str = "aarch64", underscore: bool = True) -> str:
+    """The instruction --trace puts first in a game function: psx_trace_thunk with (PS1 address, the function)."""
+    text, constraints = TRACE_ASM[arch]
+    text = text.replace("SYM", ("_" if underscore else "") + "psx_trace_thunk")
+    return f'  call void asm sideeffect "{text}", "{constraints}"(i64 {addr & 0xFFFFFFFF}, ptr @{name})'
 
 
 def _i32(v: int) -> int:
@@ -413,17 +449,23 @@ def collect_literals(directory: str) -> str:
     return "\n".join(out) + "\n"
 
 
-def patch(ir: str, functions: dict[str, int] | None = None, literals: dict[str, bytes] | None = None) -> str:
+def patch(ir: str, functions: dict[str, int] | None = None, literals: dict[str, bytes] | None = None,
+          trace: bool = False) -> str:
     """The IR of one game file, translated (see the module docstring). functions: {name: PS1 address}; literals
-    receives the string literals moved into the window ({symbol: bytes})."""
+    receives the string literals moved into the window ({symbol: bytes}); trace: the entry trace call first in each
+    game function."""
     ir = move_literals(ir, literals)
     t = Transform(functions)
+    arch, underscore = ir_arch(ir)
     out = []
     in_fn = False
     for line in ir.split("\n"):
         if line.startswith("define "):
             in_fn = True
             out.append(line)
+            m = _DEFINE_NAME.match(line)
+            if trace and m and m.group(1) in t.functions and line.rstrip().endswith("{"):
+                out.append(trace_call(t.functions[m.group(1)], m.group(1), arch, underscore))
             continue
         if in_fn:
             if line == "}":
@@ -502,7 +544,11 @@ def main(argv: list[str]) -> int:
             fh.write(text)
         return 0
     functions_file = literals_dir = None
-    while argv[:1] in (["--functions"], ["--literals"]):
+    trace = False
+    while argv[:1] in (["--functions"], ["--literals"], ["--trace"]):
+        if argv[0] == "--trace":
+            trace, argv = True, argv[1:]
+            continue
         if argv[0] == "--functions":
             functions_file = argv[1]
         else:
@@ -523,7 +569,7 @@ def main(argv: list[str]) -> int:
         ir = fh.read()
     literals: dict[str, bytes] = {}
     try:
-        patched = patch(ir, read_functions(functions_file), literals)
+        patched = patch(ir, read_functions(functions_file), literals, trace=trace)
         if literals_dir and literals:
             _write_literals(literals_dir, literals)
     except IRError as e:

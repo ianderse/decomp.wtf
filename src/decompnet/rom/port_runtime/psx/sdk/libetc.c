@@ -31,6 +31,8 @@ static long long ns_between(const struct timespec *a, const struct timespec *b) 
 
 static void call_ps1(psx_addr fn) { ((void (*)(void))psx_host_fn(fn))(); }
 
+int psx_frames(void) { return frames; }
+
 /* one vertical blank: wait for it, show the frame, then what the interrupt would run */
 static void one_frame(void) {
     struct timespec now;
