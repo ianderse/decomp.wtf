@@ -385,8 +385,30 @@ def export_rom(net, slug: str, out: Path, log=print) -> dict:
     identical = proc.returncode == 0 and "identical" in proc.stdout
     if not identical:
         log((proc.stdout + proc.stderr)[-3000:])
+    commit_tree(out, f"Export: {matched} of {len(functions)} functions as matching C"
+                     + ("" if identical else " (the rebuilt game isn't identical yet)"), log)
     return {"path": str(out), "identical": identical, "matched": matched, "functions": len(functions),
             "fallback": as_fallback, "log": (proc.stdout + proc.stderr)[-3000:]}
+
+
+def commit_tree(out: Path, message: str, log=print) -> bool:
+    """Commit what an export wrote when the tree is in a git repository (the export's folder or one above it: the
+    project's owner keeps the decompilation in a private repo of their own), so progress is recorded without
+    anyone remembering to. Only what's under `out` is staged. Nothing to commit, no repository or no git: False."""
+    try:
+        top = subprocess.run(["git", "-C", str(out), "rev-parse", "--show-toplevel"], capture_output=True, text=True,
+                             timeout=60)
+        if top.returncode != 0:
+            return False
+        subprocess.run(["git", "-C", str(out), "add", "-A", "--", str(out)], check=True, capture_output=True, timeout=600)
+        if subprocess.run(["git", "-C", str(out), "diff", "--cached", "--quiet"], timeout=60).returncode == 0:
+            return False
+        subprocess.run(["git", "-C", str(out), "commit", "-q", "-m", message], check=True, capture_output=True, timeout=600)
+        log(f"committed to {top.stdout.strip()}: {message}")
+        return True
+    except (OSError, subprocess.SubprocessError) as e:
+        log(f"not committed: {e}")
+        return False
 
 
 def _write_docs(out: Path, title: str, platform: str, base: str, matched: int, total: int, fallback) -> None:
