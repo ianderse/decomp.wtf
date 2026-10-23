@@ -26,6 +26,7 @@ project's database, runs them, and optionally builds and runs the result.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -60,6 +61,20 @@ IMPLEMENTED = {
     "InitGeom": "libgte", "SetGeomOffset": "libgte", "SetGeomScreen": "libgte",
     "OpenEvent": "libapi", "CloseEvent": "libapi", "EnableEvent": "libapi", "DisableEvent": "libapi",
     "EnterCriticalSection": "libapi", "ExitCriticalSection": "libapi",
+    # libgpu over the software GPU (psx/gpu.c, psx/sdk/libgpu.c): the library and the driver under it
+    **{n: "libgpu" for n in """SetGraphReverse SetGraphQueue GetGraphType GetGraphDebug GetDrawEnv GetDispEnv DrawSync
+       DrawSyncCallback ClearOTag ClearOTagR AddPrim AddPrims CatPrim TermPrim DrawOTag DrawOTagIO DrawOTagEnv DrawPrim
+       LoadImage LoadImage2 StoreImage StoreImage2 MoveImage ClearImage ClearImage2 LoadTPage LoadClut LoadClut2
+       GetTPage GetClut SetDrawEnv SetDrawMode SetDrawTPage SetDrawArea SetDrawOffset SetDrawStp SetTexWindow
+       SetDrawMove SetPriority get_mode get_cs get_ce get_ofs get_tw get_dx SetPolyF3 SetPolyFT3 SetPolyG3
+       SetPolyGT3 SetPolyF4 SetPolyFT4 SetPolyG4 SetPolyGT4 SetSprt SetSprt8 SetSprt16 SetTile SetTile1 SetTile8
+       SetTile16 SetLineF2 SetLineG2 SetLineF3 SetLineG3 SetLineF4 SetLineG4 SetSemiTrans SetShadeTex _addque
+       _addque2 _exeque _clr _dws _drs _ctl _cwb _cwc _getctl _otc _param _reset _status _sync""".split()},
+    # libetc: the callbacks (called from VSync, on the main thread), the video mode, the old pad interface
+    **{n: "libetc" for n in """VSyncCallback VSyncCallbacks InterruptCallback DMACallback ResetCallback StopCallback
+       RestartCallback CheckCallback SetVideoMode GetVideoMode PadInit PadRead PadStop""".split()},
+    # the root counters (libapi's COUNTER.OBJ)
+    **{n: "libapi" for n in "SetRCnt GetRCnt StartRCnt StopRCnt ResetRCnt".split()},
 }
 # the BIOS's C library calls (A0 table slot -> wrapper signature) the runtime implements behind the game's stub names
 BIOS_LIBC = {
@@ -251,6 +266,126 @@ def syscall_stubs(build: dict, image: bytes, known: dict[str, dict]) -> dict[str
     return out
 
 
+_LUI_USERS = {0x08, 0x09, 0x0D, 0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x28, 0x29, 0x2A, 0x2B, 0x2E}
+
+
+def function_sizes(build: dict) -> dict[str, int]:
+    """Each function's size in bytes: to the next function of its segment (build.json has no sizes)."""
+    by_seg: dict[str, list[dict]] = {}
+    for f in build["functions"]:
+        if f.get("rom") is not None:
+            by_seg.setdefault(f["seg"], []).append(f)
+    out = {}
+    for fs in by_seg.values():
+        fs.sort(key=lambda f: f["vram"])
+        for a, b in zip(fs, fs[1:] + [None]):
+            out.setdefault(a["name"], (b["vram"] - a["vram"]) if b and b["vram"] > a["vram"] else 0x100)
+    return out
+
+
+def shape_fingerprint(image: bytes, rom: int, size: int, max_words: int = 256) -> str | None:
+    """A function's code with its relocations masked: lui immediates, the %lo half of an access or addiu through a
+    register a lui set, and jal/j targets. PSY-Q's libraries are the same object code in every game linked with the
+    same version, so this names a Sony function wherever it lands. sha1 of the masked words (16 hex digits) + its
+    length in words."""
+    n = min(size // 4, max_words, (len(image) - rom) // 4)
+    if n <= 0:
+        return None
+    lui: set[int] = set()
+    words = []
+    for w in struct.unpack_from(f"<{n}I", image, rom):
+        op, rs, rt = w >> 26, (w >> 21) & 31, (w >> 16) & 31
+        if op == 0x0F:
+            lui.add(rt)
+            w &= 0xFFFF0000
+        elif op in (0x02, 0x03):
+            w &= 0xFC000000
+        elif op in _LUI_USERS and rs in lui:
+            w &= 0xFFFF0000
+            if op < 0x28:  # a load or addiu/ori writes rt: no longer a lui's (unless it was the same register)
+                lui.discard(rt)
+        elif op == 0 and (w >> 11) & 31:
+            lui.discard((w >> 11) & 31)
+        elif 0x08 <= op < 0x28:
+            lui.discard(rt)
+        words.append(w)
+    return hashlib.sha1(struct.pack(f"<{len(words)}I", *words)).hexdigest()[:16] + f":{len(words)}"
+
+
+# Sony functions known by their code (shape_fingerprint), for games whose database doesn't name them: the name the
+# runtime implements, and the evidence. Measured on SLUS-01252 (Arc the Lad II), whose libgpu/libetc are partly
+# unnamed assembly and partly matched C that calls libgpu's driver table (D_801A1480: {ver, addque, addque2, clr, ctl,
+# cwb, cwc, drs, dws, exeque, getctl, otc, param, reset, status, sync}, every slot read from the EXE) or libetc's
+# interrupt table (D_801A153C) through m2c drafts that drop the call's arguments (`M2C_FIELD(t, M2C_UNK (**)(),
+# 0x2C)()`: right on the MIPS, where a0-a3 pass through untouched, wrong on the host). A matched function with one of
+# these shapes is replaced by the runtime's (its C left out); an unmatched one forwards to it.
+SONY_SHAPES: dict[str, tuple[str, str]] = {
+    # libgpu, unnamed assembly
+    "c0e6397316af7129:20": ("ClearImage", "addque2(clr, rect, 8, b<<16|g<<8|r) through the driver table"),
+    "df741f8f33943cc7:27": ("MoveImage", "builds {0x04FFFFFF, 0x80000000, src xy, dst y<<16|x, wh} and addque2(cwc, it, 0x14)"),
+    "89cba2e884601913:33": ("DrawPrim", "CheckPrim when debugging, sync(0), cwb(p + 4, p's length byte)"),
+    "67daaeb3b1748ec9:52": ("SetGraphReverse", "ctl(getctl(8) | 0x08000000 | (reverse ? 0x80 : 0)), 0x20000501/4 on a type-2 GPU"),
+    "817a852b9661cb20:21": ("SetDrawMode", "len 2, code[0] = get_mode(dfe, dtd, tpage), code[1] = get_tw(5th argument)"),
+    "f216cdea5b31f948:33": ("get_tw", "0xE2000000 | y>>3 << 15 | x>>3 << 10 | (-h & 0xFF)>>3 << 5 | (-w & 0xFF)>>3"),
+    "39a0a51f5f49bd8f:54": ("get_dx", "the display x by GPU type (D_801A148C) and reverse (D_801A1490)"),
+    # libgpu, matched C that drops its arguments, or pokes the GPU's registers (plain memory here)
+    "17874598bd8c1e51:14": ("ClearOTagR", "otc(ot, n) through the driver table, returns ot"),
+    "8d76deebeba4ab66:12": ("DrawSync", "sync(mode) through the driver table"),
+    "adabd31564311dad:9": ("_addque", "_addque2(a, b, 0, c): driver table slot 1"),
+    "8584fbbaf56031c0:20": ("_cwc", "DMA2: GP1 = 0x04000002, MADR = p, BCR = 0, CHCR = 0x01000401 (linked list): slot 6"),
+    "26bbd38d41f04c6f:8": ("_getctl", "n << 24 | the saved GP1 word n: slot 10"),
+    "9f4018f77f5b2d17:13": ("_param", "GP1 = 0x10000000 | n, returns GPUREAD & 0xFFFFFF: slot 12"),
+    "255f730c9bc1b559:6": ("_status", "returns GPUSTAT: slot 14"),
+    # libetc's interrupt table (D_801A153C: {?, VSyncCallbacks, InterruptCallback, ResetCallback, StopCallback,
+    # DMACallback}; slots 1 and 5 are null in the EXE until ResetCallback's intInit fills them)
+    "ff47d39e431c6826:12": ("ResetCallback", "calls interrupt-table slot 3 (intInit)"),
+    "b1c6029eb5247457:12": ("InterruptCallback", "calls interrupt-table slot 2 (setIntCallback) with (irq, func)"),
+    "ce2db528128895db:12": ("VSyncCallbacks", "calls interrupt-table slot 1 with (ch, func); VSyncCallback(f) is it with ch 0"),
+    "6af7f4aabe2d1255:12": ("DMACallback", "calls interrupt-table slot 5 with (ch, func)"),
+    "33ac02314cce677c:12": ("StopCallback", "calls interrupt-table slot 4 (stopInit)"),
+}
+
+
+def sony_by_shape(build: dict, image: bytes, known: dict[str, dict], shapes: dict | None = None) -> dict[str, dict]:
+    """Functions (assembly or matched C) whose code is a Sony function in SONY_SHAPES: {name: {"lib", "bios": None,
+    "label", "alias": the runtime's name, "replace": True for matched C, "vram"}}. A fingerprint several functions
+    have (an overlay linked with its own copy of the library) names each. Functions already named as that Sony function are left alone."""
+    shapes = SONY_SHAPES if shapes is None else shapes
+    sizes = function_sizes(build)
+    hits: dict[str, list[dict]] = {}
+    for f in build["functions"]:
+        if f.get("rom") is None or f["name"] in known:
+            continue
+        fp = shape_fingerprint(image, f["rom"], sizes.get(f["name"], 0))
+        if fp in shapes:
+            hits.setdefault(fp, []).append(f)
+    by_file: dict[str, int] = {}
+    for f in build["functions"]:
+        if f.get("c"):
+            by_file[f["c"]] = by_file.get(f["c"], 0) + 1
+    out = {}
+    for fp, fs in hits.items():
+        target, why = shapes[fp]
+        for f in fs:  # an overlay linked with its own copy of the library has the same code again
+            if f["name"] == target or (f.get("c") and by_file.get(f["c"], 0) > 1):
+                continue
+            lib = IMPLEMENTED.get(target) or sony_library(target)
+            out[f["name"]] = {"lib": lib, "bios": None, "alias": target, "replace": bool(f.get("c")),
+                              "label": f"{target} by its code: {why}", "objects": [], "vram": f["vram"]}
+    return out
+
+
+def sony_by_name(build: dict, known: dict[str, dict]) -> dict[str, dict]:
+    """Functions still in assembly that carry the name of a Sony function the runtime implements but aren't marked as
+    Sony's in the database (SLUS-01252's LoadImage at 0x801762C0): the runtime's then."""
+    out = {}
+    for f in build["functions"]:
+        n = f["name"]
+        if not f.get("c") and n in IMPLEMENTED and n not in known:
+            out[n] = {"lib": IMPLEMENTED[n], "bios": None, "label": n, "objects": [], "vram": f["vram"]}
+    return out
+
+
 GTE_CONTROL = {24: "OFX", 25: "OFY", 26: "H", 27: "DQA", 28: "DQB", 29: "ZSF3", 30: "ZSF4"}
 
 
@@ -426,9 +561,11 @@ def plan(build: dict, sources: dict[str, str], headers: dict[str, str], sony: di
     for n in stubbed:
         if n in sony:
             s = sony[n]
-            kind = "implemented" if n in IMPLEMENTED else ("bios" if s.get("bios") in BIOS_LIBC else "stub")
+            alias = s.get("alias")
+            kind = ("implemented" if n in IMPLEMENTED else "alias" if alias in IMPLEMENTED else
+                    "bios" if s.get("bios") in BIOS_LIBC else "stub")
             sdk.append({"name": n, "lib": IMPLEMENTED.get(n, s["lib"]), "bios": s.get("bios"), "label": s["label"],
-                        "kind": kind, "called": n in calls})
+                        "kind": kind, "called": n in calls, "alias": alias if kind == "alias" else None})
     host_fn = host_c | {n for n, _ in unmatched} | {s["name"] for s in sdk} | set(replayed)
 
     explicit: dict[str, int] = {}
@@ -457,7 +594,8 @@ def plan(build: dict, sources: dict[str, str], headers: dict[str, str], sony: di
         n = f["name"]
         if n not in host_fn:
             continue
-        kind = 0 if n in host_c else 3 if n in replayed else 1 if n not in sony else (3 if n in IMPLEMENTED else 2)
+        kind = 0 if n in host_c else 3 if n in replayed else 1 if n not in sony else (
+            3 if n in IMPLEMENTED or sony[n].get("alias") in IMPLEMENTED else 2)
         dispatch.append({"vram": f["vram"], "rom": f.get("rom"), "name": n, "seg": f["seg"], "kind": kind})
     dispatch.sort(key=lambda d: (d["vram"], d["seg"]))
     renames = {n: f"psx_game_{n}" for n in sorted(host_fn | set(symbols)) if n in RESERVED}
@@ -536,6 +674,11 @@ def sdk_stubs_c(sdk: list[dict], renames: dict[str, str] | None = None) -> str:
     out = ["/* Sony's library functions and BIOS call stubs: a logging stub each (the first 20 calls of each), or the",
            " * runtime's implementation of the BIOS's C library calls. The implemented ones (psx/sdk) are not here. */",
            '#include "psx_runtime.h"', '#include "libapi.h"', ""]
+    if any(s["kind"] == "alias" for s in sdk):
+        out += ["/* functions known by their code (SONY_SHAPES): each forwards to the runtime's, its arguments as they",
+                " * came (at most 8, all in integer registers) */",
+                "#if defined(__APPLE__)", '#define PSX_ASM_NAME(n) "_" n', "#else", "#define PSX_ASM_NAME(n) n",
+                "#endif", "typedef long (*psx_fwd8)(long, long, long, long, long, long, long, long);", ""]
     for lib in LIBRARIES:
         group = [s for s in sdk if s["lib"] == lib and s["kind"] != "implemented"]
         if not group:
@@ -547,6 +690,12 @@ def sdk_stubs_c(sdk: list[dict], renames: dict[str, str] | None = None) -> str:
             if s["kind"] == "bios":
                 ret, params, call = BIOS_LIBC[s["bios"]]
                 out.append(f"{ret} {c}({params}) {{ return {call}; }}{note}")
+            elif s["kind"] == "alias":
+                t = s["alias"]
+                out.append(f"/* {s['label']} */")
+                out.append(f'extern void psx_impl_{t}(void) __asm__(PSX_ASM_NAME("{t}"));')
+                out.append(f"long {c}(long a0, long a1, long a2, long a3, long a4, long a5, long a6, long a7) "
+                           f"{{ return ((psx_fwd8)psx_impl_{t})(a0, a1, a2, a3, a4, a5, a6, a7); }}")
             else:
                 out.append(f"static int calls_{s['name']};")
                 label = s["name"] if s["label"] == s["name"] else f"{s['name']} ({s['label']})"
@@ -917,11 +1066,12 @@ def export_port(net, slug: str, out: Path | None = None, log=print, build: bool 
     rows = net.store.all("SELECT name, vram, meta FROM functions WHERE project_id=? AND status='asm' AND "
                          "(meta LIKE '%\"library\"%' OR meta LIKE '%BIOS call stub%')", proj["id"])
     return generate(source, port, sony_from_rows(rows), title=proj["name"], slug=slug, log=log, build=build,
-                    main=main, check=check, run_seconds=run_seconds)
+                    main=main, check=check, run_seconds=run_seconds, commit=out is None)
 
 
 def generate(source: Path, port: Path, sony: dict[str, dict], title: str, slug: str, log=print, build: bool = False,
-             main: str | None = None, check: bool = True, run_seconds: int = 5, ptr32: bool = True) -> dict:
+             main: str | None = None, check: bool = True, run_seconds: int = 5, ptr32: bool = True,
+             commit: bool = False) -> dict:
     t0 = time.time()
     b = json.loads((source / "build.json").read_text(encoding="utf-8"))
     image = (source / b["image"]).read_bytes()
@@ -966,6 +1116,17 @@ def generate(source: Path, port: Path, sony: dict[str, dict], title: str, slug: 
     auto_text = "".join((source / n).read_text(encoding="utf-8") for n in ("undefined_syms_auto.txt",)
                         if (source / n).exists())
     sony = {**sony, **syscall_stubs(b, image, sony)}
+    sony = {**sony, **sony_by_name(b, sony)}
+    shaped = sony_by_shape(b, image, sony)
+    sony = {**sony, **shaped}
+    # matched C the runtime replaces (a Sony function by its code: see SONY_SHAPES) is left out of the build
+    replaced = {n for n, s in shaped.items() if s["replace"] and s["alias"] in IMPLEMENTED}
+    if replaced:
+        gone = {f["c"] for f in b["functions"] if f["name"] in replaced}
+        b = {**b, "functions": [{**f, "c": None} if f["name"] in replaced else f for f in b["functions"]]}
+        sources = {k: v for k, v in sources.items() if k not in gone}
+        log(f"  {len(replaced)} matched functions replaced by the runtime's (known by their code): "
+            + ", ".join(f"{n} = {shaped[n]['alias']}" for n in sorted(replaced)))
     p = plan(b, sources, headers, sony, sym_text, auto_text, excluded, handwritten_gte(b, image, set(sony)))
     if main_name not in {d["name"] for d in p["dispatch"]}:
         raise PortError(f"{main_name} isn't a function of this game")
@@ -996,6 +1157,8 @@ def generate(source: Path, port: Path, sony: dict[str, dict], title: str, slug: 
         "sdk_stubs": sum(1 for s in p["sdk"] if s["kind"] == "stub"),
         "sdk_bios": sum(1 for s in p["sdk"] if s["kind"] == "bios"),
         "sdk_implemented": sorted(s["name"] for s in p["sdk"] if s["kind"] == "implemented"),
+        "sdk_by_shape": {s["name"]: s["alias"] for s in p["sdk"] if s["kind"] == "alias"},
+        "replaced": sorted(replaced),
         "sdk_called": sorted(s["name"] for s in p["sdk"] if s["called"]),
         "replayed": {n: h["label"] for n, h in p["replayed"].items()},
         "sdk_by_lib": {lib: sum(1 for s in p["sdk"] if s["lib"] == lib) for lib in LIBRARIES},
@@ -1010,6 +1173,10 @@ def generate(source: Path, port: Path, sony: dict[str, dict], title: str, slug: 
         report["build"] = build_and_run(port, log=log, seconds=run_seconds)
     (port / "port.json").write_text(json.dumps(report, indent=1, default=list), encoding="utf-8")
     (port / "PORT.md").write_text(port_md(title, report), encoding="utf-8")
+    if commit:  # the project's own port/ (not a folder given with --out) is committed when it is in a repository
+        from .export import commit_tree
+        commit_tree(port, f"Port: {report['compiled']} matched files, {report['unmatched']} unmatched stubs, "
+                          f"{len(report['sdk_implemented'])} Sony functions implemented", log)
     return report
 
 
@@ -1029,10 +1196,7 @@ def build_and_run(port: Path, log=print, seconds: int = 5) -> dict:
     res["configure_log"] = (r.stdout + r.stderr)[-3000:]
     if r.returncode != 0:
         log(res["configure_log"])
-        from .export import commit_tree
-    commit_tree(port, f"Port: {report['compiled']} matched files, {report['unmatched']} unmatched stubs, "
-                      f"{len(report['sdk_implemented'])} Sony functions implemented", log)
-    return res
+        return res
     res["configured"] = True
     res["host"] = (re.search(r"PS1 port: window through (\w+)", r.stdout) or [None, "?"])[1]
     log("cmake: building")
@@ -1141,7 +1305,8 @@ def port_md(title: str, r: dict) -> str:
 
 Generated by decomp.wtf's port export (`decomp port <project>`) from the exported tree in `../source`. It compiles
 the game's matched C with clang for the host against a PS1 runtime layer, links, and runs the game's main until the
-first thing the runtime doesn't do yet. No rendering or audio yet: the window exists and is cleared each frame.
+first thing the runtime doesn't do yet. It draws through a software GPU (`psx/gpu.c`: 1024x512 VRAM, the GP0
+primitives, libgpu's ordering tables walked in PS1 RAM) and shows the display area each VSync; no audio yet.
 
 ## Build and run
 
@@ -1152,7 +1317,9 @@ cmake -S port -B port/build && cmake --build port/build && port/build/game
 Needs cmake, clang and python3 (the build rewrites the game's C, below). Environment: `PSX_PORT_SOFT=1` goes on past
 functions that are still assembly (they return 0) instead of stopping at the first; `PSX_TRACE=N` logs the first N
 distinct game functions entered (default 200); `PSX_HEADLESS=1` no window; `PSX_TIMEOUT=S` stops after S seconds;
-`PSX_SOURCE_DIR` the exported tree if it moved. Keys: arrows (d-pad), Z/X/A/S (cross/circle/square/triangle),
+`PSX_SOURCE_DIR` the exported tree if it moved; `PSX_PORT_DUMP_VRAM=file.png` writes the VRAM at exit (also after a
+crash); `PSX_PORT_DUMP_SCREEN=file.png` what the SDL window shows, every 30 frames; `PSX_GPU_SELFTEST=N` draws N
+frames through libgpu (environments, an ordering table, polygons, a CLUT sprite, a polyline) instead of the game. Keys: arrows (d-pad), Z/X/A/S (cross/circle/square/triangle),
 Return (start), right shift (select), Q/W (L1/R1), 1/2 (L2/R2). CMake options: `-DPSX_PTR32=OFF` (the C as it is,
 8-byte pointers), `-DPSX_HOST=sdl|cocoa|none`, `-DCMAKE_OSX_ARCHITECTURES=x86_64` (the same build for Rosetta 2;
 the default is the host's architecture, arm64 on Apple silicon).
@@ -1168,6 +1335,7 @@ the default is the host's architecture, arm64 on Apple silicon).
 | Sony functions as logging stubs (`gen/psx_sdk_stubs.c`) | {r['sdk_stubs']} ({sdk_lib}) |
 | BIOS C library calls (memcpy, strlen, rand, ...) implemented behind the game's stub names | {r['sdk_bios']} |
 | Sony functions implemented (`psx/sdk/*.c`) | {len(r['sdk_implemented'])}: {', '.join(r['sdk_implemented'])} |
+| Unnamed Sony functions known by their code (`SONY_SHAPES`; forwarders in `gen/psx_sdk_stubs.c`) | {len(r.get('sdk_by_shape') or {})}{': ' + ', '.join(f"`{n}` = {t}" + (' (matched C replaced)' if n in (r.get('replaced') or []) else '') for n, t in sorted((r.get('sdk_by_shape') or {}).items())) if r.get('sdk_by_shape') else ''} |
 | Handwritten GTE setups replayed on the software GTE (`gen/psx_unmatched.c`) | {len(r.get('replayed') or {})}{': ' + '; '.join(f"`{n}` ({v})" for n, v in (r.get('replayed') or {}).items()) if r.get('replayed') else ''} |
 | Sony functions the matched C calls by name | {len(r['sdk_called'])} |
 | Data symbols at their PS1 address (`gen/psx_symbols.S`) | {r['symbols']} |

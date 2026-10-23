@@ -7,15 +7,29 @@
 static NSWindow *win;
 static int quit;
 static uint16_t pad_bits;
-static uint8_t clear_rgb[3];
+static uint32_t pixels[1024 * 512];
+static int pic_w, pic_h;
 
 @interface PsxView : NSView
 @end
 @implementation PsxView
 - (void)drawRect:(NSRect)rect {
-    [[NSColor colorWithCalibratedRed:clear_rgb[0] / 255.0 green:clear_rgb[1] / 255.0 blue:clear_rgb[2] / 255.0
-                               alpha:1.0] setFill];
+    CGContextRef cg = [[NSGraphicsContext currentContext] CGContext];
+    [[NSColor blackColor] setFill];
     NSRectFill(rect);
+    if (pic_w > 0 && pic_h > 0) { /* the display area, nearest-neighbour over the whole view */
+        CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB();
+        CGContextRef bm = CGBitmapContextCreate(pixels, (size_t)pic_w, (size_t)pic_h, 8, (size_t)pic_w * 4, cs,
+                                                kCGImageAlphaNoneSkipFirst | kCGBitmapByteOrder32Little);
+        CGImageRef img = bm ? CGBitmapContextCreateImage(bm) : NULL;
+        if (img) {
+            CGContextSetInterpolationQuality(cg, kCGInterpolationNone);
+            CGContextDrawImage(cg, NSRectToCGRect([self bounds]), img);
+            CGImageRelease(img);
+        }
+        if (bm) CGContextRelease(bm);
+        CGColorSpaceRelease(cs);
+    }
 }
 - (BOOL)acceptsFirstResponder { return YES; }
 @end
@@ -61,11 +75,24 @@ int host_init(const char *title, int w, int h) {
         [NSApp finishLaunching];
         [NSApp activateIgnoringOtherApps:YES];
     }
-    host_frame(0, 0, 0);
+    host_present(NULL, 0, 0, 0, 0, 0);
     return win != nil;
 }
 
-void host_frame(uint8_t r, uint8_t g, uint8_t b) {
+void host_present(const uint16_t *vram, int x, int y, int w, int h, int rgb24) {
+    if (vram && w > 0 && h > 0) {
+        gpu_display_rgba(vram, x, y, w, h, rgb24, pixels);
+        pic_w = w;
+        pic_h = h;
+    } else {
+        pic_w = pic_h = 0;
+    }
+    @autoreleasepool {
+        if (win) [[win contentView] display];
+    }
+}
+
+void host_frame(void) {
     @autoreleasepool {
         NSEvent *e;
         while ((e = [NSApp nextEventMatchingMask:NSEventMaskAny untilDate:[NSDate distantPast]
@@ -78,8 +105,6 @@ void host_frame(uint8_t r, uint8_t g, uint8_t b) {
             }
             [NSApp sendEvent:e];
         }
-        clear_rgb[0] = r; clear_rgb[1] = g; clear_rgb[2] = b;
-        if (win) [[win contentView] display];
     }
 }
 

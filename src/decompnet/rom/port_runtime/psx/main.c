@@ -53,6 +53,10 @@ int main(int argc, char **argv) {
         signal(SIGALRM, on_stop);
         alarm((unsigned)atoi(getenv("PSX_TIMEOUT")));
     }
+    if (getenv("PSX_GPU_SELFTEST") && atoi(getenv("PSX_GPU_SELFTEST")) > 0) {
+        psx_gpu_selftest(atoi(getenv("PSX_GPU_SELFTEST")));
+        exit(0);
+    }
     top = game_stack(&bottom);
     if (!top) {
         fprintf(stderr, "psx: can't map the game's stack anywhere in the window\n");

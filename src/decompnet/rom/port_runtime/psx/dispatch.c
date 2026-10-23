@@ -176,6 +176,7 @@ void psx_exit_report(void) {
             "%zu Sony functions reached that are stubs\n", n_entered, n_distinct, n_unmatched, n_sdk);
     for (i = 0; i < n_unmatched; i++) psx_log("  unmatched %s\n", unmatched_hit[i]);
     for (i = 0; i < n_sdk; i++) psx_log("  sdk stub %s x%d\n", sdk_hit[i].name, *sdk_hit[i].calls);
+    psx_gpu_exit(); /* what was drawn; PSX_PORT_DUMP_VRAM=path writes the VRAM as a PNG */
 }
 
 /* ---- faults: a call into PS1 code is redirected; anything else is reported */

@@ -91,10 +91,18 @@ int psx_unmatched(const char *name);
 int psx_sdk_stub(const char *name, int *calls);
 int psx_soft(void);
 void psx_exit_report(void);
+void psx_gpu_exit(void); /* psx/sdk/libgpu.c: the GPU's counts, and PSX_PORT_DUMP_VRAM */
+void psx_gpu_selftest(int frames); /* PSX_GPU_SELFTEST=N: N frames drawn through libgpu before the game's main */
 
 /* host window and input (psx/host_*.c) */
 int host_init(const char *title, int w, int h);
-void host_frame(uint8_t r, uint8_t g, uint8_t b); /* pump events, clear, present */
+void host_frame(void); /* pump events */
+/* show the display area of VRAM (1024x512 halfwords; rgb24: 24-bit pixels packed across them), scaled to the window
+ * with nearest-neighbour; vram NULL: black (display off) */
+void host_present(const uint16_t *vram, int x, int y, int w, int h, int rgb24);
+/* the display area as 0xFFRRGGBB pixels (psx/gpu.c) */
+void gpu_display_rgba(const uint16_t *vram, int x, int y, int w, int h, int rgb24, uint32_t *out);
+int gpu_write_png(const char *path, const uint32_t *px, int w, int h);
 uint16_t host_pad(void);                         /* PS1 pad bits, 1 = pressed (PSY-Q PAD* order) */
 int host_quit(void);
 void host_shutdown(void);
