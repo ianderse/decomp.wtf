@@ -441,7 +441,8 @@ and continued with any tool or agent.
 project that compiles the matched C with clang for your computer against a PS1 runtime layer (PS1 memory in a 4 GB
 window of the host's, 32-bit pointers translated to it, a software GTE, stubs for what's still assembly and for
 Sony's libraries), links it, and runs the game's main until the first thing that isn't done yet, with `PORT.md`
-listing everything in the way. It doesn't draw or play sound yet: the window only clears. On a Mac it builds
+listing everything in the way. It draws through a software GPU (VRAM, the PS1's primitives, libgpu's ordering
+tables) into the window each VSync; no sound yet. On a Mac it builds
 natively for arm64 (docs/plans/port.md has how and the measurements).
 
 **C and C++.** GameCube, Wii and DS games are often C++, and decomp.wtf handles it there: code with C++ symbol

@@ -1265,6 +1265,13 @@ def summarize_run(text: str) -> dict:
         story += f"; ends with a {fault.group(1)}"
     elif timed:
         story += "; still running when the time was up"
+    gpu = re.search(r"^gpu: (\d+) packets, (\d+) primitives, (\d+) pixels, (\d+) fills, (\d+) loads; display (on|off)"
+                    r"(?: at (\S+) (\S+))?", text, re.M)
+    vsyncs = len(re.findall(r"^etc: first VSync", text, re.M))
+    if gpu:
+        story += (f"; the GPU drew {gpu.group(2)} primitives ({gpu.group(3)} pixels) in {gpu.group(1)} packets, "
+                  f"{gpu.group(4)} fills and {gpu.group(5)} VRAM loads, display {gpu.group(6)}"
+                  + ("" if vsyncs else ", no VSync reached"))
     keep = [ln for ln in text.splitlines() if not re.match(r"sdk: .* \(call ([2-9]|1\d|20)\)", ln)]
     return {"entered": entered, "unmatched_hit": unmatched, "sdk_hit": sdk, "fault": fault.group(1) if fault else None,
             "stopped_at": stopped.group(1) if stopped else None, "story": story, "log_head": "\n".join(keep[:70])}
