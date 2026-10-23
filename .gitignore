@@ -32,3 +32,4 @@ toolchain-builds/logs/
 
 # PS1 compiler builds in progress (the tarballs and logs are kept)
 toolchain-builds/build-*/
+.claude/
