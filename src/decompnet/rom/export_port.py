@@ -1192,8 +1192,9 @@ def hazards(headers: dict[str, str], sources: dict[str, str]) -> dict:
 #
 # The parser is a regex/bracket scanner over the export's one-function-per-file layout (top-level declarations and
 # definitions, calls in the bodies), not clang's AST: it's fast over 4,000 files and sees the C as written, before
-# the pointer rewrite. It doesn't see calls through casts (`((T (*)())f)(x)`), K&R definitions or declarations
-# made inside a body.
+# the pointer rewrite. Calls through a cast of a game function (`((T (*)())f)(x)`, or a local pointer that only
+# holds f) count, with the cast's type as their declaration; K&R definitions and declarations made inside a body
+# aren't seen (rom/passthrough.py's scanner does both).
 
 class CSig(dict):
     """A function's parameters as declared: n (None: `()`, unprototyped), variadic, text (the parameter list)."""
@@ -1353,6 +1354,96 @@ def table_calls(body: str) -> list[str]:
     return out
 
 
+_FN_TYPE = re.compile(r"\(\s*\*+\s*([A-Za-z_]\w*)?\s*\)\s*\(")
+
+
+def fn_type(s: str, a: int, b: int) -> dict | None:
+    """The function-pointer type written in s[a:b] (`void (*)(s32)`, `s32 (*cb)(void *)`): {"ret": (start, end) of
+    its return type, "params": (lp, rp) of its parameter list's parentheses, "n": its parameter count (None for
+    `()`), "variadic", "text"}. None when s[a:b] isn't one (a typedef name)."""
+    m = _FN_TYPE.search(s, a, b)
+    if not m:
+        return None
+    lp = m.end() - 1
+    rp = _close(s, lp)
+    if rp >= b:
+        return None
+    ws = a + len(s[a:m.start()]) - len(s[a:m.start()].lstrip())
+    sig = _parse_params(s[lp + 1:rp])
+    return {"ret": (ws, m.start()), "params": (lp, rp), "n": sig["n"], "variadic": sig["variadic"],
+            "text": re.sub(r"\s+", " ", s[a:b]).strip()}
+
+
+def cast_calls(body: str, functions: set[str]) -> list[dict]:
+    """Calls through a cast of a named function, in a body with comments and literals blanked (positions are
+    body's): `((T (*)(...)) func_X)(args)`, `(*(T (*)()) &func_X)()`, and a local function pointer that only ever
+    holds one game function (`T (*v)(...) = (T (*)(...)) func_X;` or `v = func_X;`, then `v(args)` / `(*v)(args)`).
+    Each: {"callee", "nargs", "lp", "rp" (the call's parentheses), "at" (where the call starts), "via" ("cast" or
+    the variable's name), "sigs": the function types written for it, as fn_type gives them (the cast's; for a
+    variable its declaration's and each cast assigned to it)}."""
+    out = []
+    for m in re.finditer(r"\)\s*&?\s*([A-Za-z_]\w*)\s*\)\s*\(", body):
+        name = m.group(1)
+        if name not in functions:
+            continue
+        close = body.rfind(")", m.start(), m.start(1))  # the cast's closing parenthesis
+        o = _open(body, close)
+        if o < 0:
+            continue
+        sig = fn_type(body, o + 1, close)
+        lp = m.end() - 1
+        rp = _close(body, lp)
+        args = body[lp + 1:rp].strip()
+        out.append({"callee": name, "nargs": 0 if not args else len(_split_commas(args)), "lp": lp, "rp": rp,
+                    "at": o, "via": "cast", "sigs": [sig] if sig else []})
+    # local function pointers
+    held: dict[str, set[str]] = {}
+    sigs: dict[str, list[dict]] = {}
+    decls: set[int] = set()
+    decl = re.compile(r"\(\s*\*\s*([A-Za-z_]\w*)\s*\)\s*\([^;{}=]*?\)\s*(?:=\s*([^;,]*))?[;,]")
+    for m in decl.finditer(body):
+        v = m.group(1)
+        start = max(body.rfind(c, 0, m.start()) for c in ";{}") + 1
+        if not re.match(r"\s*(?:register\s+|const\s+|static\s+)*[A-Za-z_]\w*", body[start:m.start()]) or \
+                re.search(r"\b(?:return|if|while)\b|[=(]\s*$", body[start:m.start()]):
+            continue  # a call through (*v)(...), not a declaration
+        decls.add(m.start())
+        rp = _close(body, body.index("(", m.end(1)))
+        sig = fn_type(body, start, rp + 1)
+        if sig:
+            sigs.setdefault(v, []).append(sig)
+        if m.group(2) is not None:
+            held.setdefault(v, set()).add(m.group(2).strip())
+    for v in list(sigs):
+        for m in re.finditer(rf"(?<![\w.>]){re.escape(v)}\s*=(?!=)\s*([^;]*);", body):
+            held.setdefault(v, set()).add(m.group(1).strip())
+    for v, values in held.items():
+        targets, casts = set(), []
+        for val in values:
+            t = re.fullmatch(r"(?:\((.*)\))?\s*&?\s*([A-Za-z_]\w*)", val, re.S)
+            if not t or t.group(2) not in functions:
+                targets.add(None)
+                continue
+            targets.add(t.group(2))
+            if t.group(1):
+                k = body.find(val)
+                sig = fn_type(body, k + 1, k + 1 + len(t.group(1)))
+                if sig:
+                    casts.append(sig)
+        if len(targets) != 1 or None in targets:
+            continue
+        name = targets.pop()
+        for m in re.finditer(rf"(?<![\w.>])(?:\(\s*\*\s*{re.escape(v)}\s*\)|{re.escape(v)})\s*\(", body):
+            if m.start() in decls or re.search(r"\(\s*\*\s*$", body[:m.start()]):
+                continue  # the declaration itself (or the inside of `(*v)(`, found as the whole)
+            lp = m.end() - 1
+            rp = _close(body, lp)
+            args = body[lp + 1:rp].strip()
+            out.append({"callee": name, "nargs": 0 if not args else len(_split_commas(args)), "lp": lp, "rp": rp,
+                        "at": m.start(), "via": v, "sigs": sigs.get(v, []) + casts})
+    return sorted(out, key=lambda c: c["lp"])
+
+
 def mips_arg_reads(words: list[int]) -> list[int]:
     """The argument registers ($a0-$a3, as 0-3) a MIPS function reads before it writes them, scanning its code in
     order up to `jr $ra` and its delay slot (a heuristic: branches aren't followed; after a call, $a0-$a3 count as
@@ -1438,15 +1529,127 @@ def mips_arg_reads(words: list[int]) -> list[int]:
     return sorted(read)
 
 
-def passes_through(words: list[int], callee_vram: int, args: int, params: int) -> str:
-    """What the dropped argument registers ($a<args>..$a<params-1>) hold at a caller's first call to the callee, by
-    its MIPS code in order: "pass-through" (nothing wrote them and no call came before: the caller's own arguments,
-    so the fix is to take them as parameters and hand them on), "leftover" (written or clobbered by an earlier call
-    first: what the callee gets is whatever was there), "?" (no jal/j to the callee found)."""
+def _mips_effect(w: int) -> tuple[set[int], set[int]]:
+    """The registers one MIPS instruction reads and writes (control flow apart)."""
+    op, rs, rt, rd, fn = w >> 26, (w >> 21) & 31, (w >> 16) & 31, (w >> 11) & 31, w & 63
+    if op == 0:
+        if fn in (0, 2, 3):
+            return {rt}, {rd}
+        if fn in (8, 9):
+            return {rs}, ({rd} if fn == 9 else set())
+        if fn in (12, 13):
+            return set(), set()
+        if fn in (16, 18):
+            return set(), {rd}
+        if fn in (17, 19):
+            return {rs}, set()
+        if 24 <= fn <= 27:
+            return {rs, rt}, set()
+        return {rs, rt}, {rd}
+    if op == 1 or op in (6, 7):
+        return {rs}, set()
+    if op in (4, 5):
+        return {rs, rt}, set()
+    if 8 <= op <= 14 or 0x20 <= op <= 0x26:
+        return {rs}, {rt}
+    if op == 15:
+        return set(), {rt}
+    if 0x28 <= op <= 0x2E:
+        return {rs, rt}, set()
+    if op in (0x10, 0x12):
+        return ({rt}, set()) if rs in (4, 6) else (set(), {rt}) if rs in (0, 2) else (set(), set())
+    if op in (0x32, 0x3A):
+        return {rs}, set()
+    return set(), set()
+
+
+def mips_arg_live(words: list[int], vram: int, reads_of=None) -> list[int]:
+    """The argument registers ($a0-$a3, as 0-3) a MIPS function can read before writing them on some path from its
+    entry: liveness over its control flow (branches and their delay slots followed, `jr $ra` the end, a jump table's
+    `jr` counted as reading every argument register). A call reads what reads_of(target vram) says it reads (None:
+    all four; default: all four) and leaves them written. A finer test than mips_arg_reads, which reads in a straight
+    line to the first return."""
+    n = len(words)
+    args = set(range(4, 8))
+
+    def call_reads(k: int) -> set[int]:
+        w = words[k]
+        if w >> 26 == 3 and reads_of is not None:
+            r = reads_of(((vram + 4 * k) & 0xF0000000) | ((w & 0x3FFFFFF) << 2))
+            if r is not None:
+                return {4 + x for x in r}
+        return set(args)
+
+    # per instruction: (uses, defs, successors), the delay slot carrying its branch's targets
+    nodes: list[tuple[set[int], set[int], list[int]]] = []
+    for k, w in enumerate(words):
+        u, d = _mips_effect(w)
+        nodes.append((u & args, d & args, [k + 1] if k + 1 < n else []))
+    for k, w in enumerate(words):
+        op, rs, rt, fn = w >> 26, (w >> 21) & 31, (w >> 16) & 31, w & 63
+        if k + 1 >= n:
+            break
+        u, d, _ = nodes[k + 1]
+        if op in (1, 4, 5, 6, 7):  # conditional (beq $zero, $zero: always)
+            t = k + 1 + ((w & 0xFFFF) ^ 0x8000) - 0x8000
+            always = op == 4 and rs == 0 and rt == 0
+            nodes[k + 1] = (u, d, [x for x in ([t] if always else [t, k + 2]) if 0 <= x < n])
+        elif op == 2:  # j: within the function, or a tail call
+            t = (((vram + 4 * k) & 0xF0000000) | ((w & 0x3FFFFFF) << 2)) - vram
+            if 0 <= t // 4 < n:
+                nodes[k + 1] = (u, d, [t // 4])
+            else:  # a tail call reads its callee's arguments
+                nodes[k + 1] = (u | (call_reads(k) - d), d, [])
+        elif op == 0 and fn == 8:  # jr: $ra returns; another register is a jump table
+            nodes[k + 1] = (u | (set() if rs == 31 else args) - d, d, [])
+        elif op == 3 or (op == 0 and fn == 9):  # a call after its delay slot: reads, then clobbers
+            reads = call_reads(k) if op == 3 else set(args)
+            nodes[k + 1] = (u | (reads - d), d | args, [k + 2] if k + 2 < n else [])
+    live_in = [set() for _ in range(n)]
+    changed = True
+    while changed:
+        changed = False
+        for k in range(n - 1, -1, -1):
+            u, d, succ = nodes[k]
+            out = set().union(*(live_in[s] for s in succ)) if succ else set()
+            new = u | (out - d)
+            if new != live_in[k]:
+                live_in[k] = new
+                changed = True
+    return sorted(r - 4 for r in live_in[0]) if n else []
+
+
+def mips_stack_arg_read(words: list[int], k: int) -> bool:
+    """Whether a MIPS function loads its stack argument k (the fifth parameter is k = 4: at 16($sp) on entry, F + 16
+    once its frame of F bytes is made) from $sp anywhere in its code."""
+    frame, out = 0, False
+    for w in words:
+        op, rs, rt, imm = w >> 26, (w >> 21) & 31, (w >> 16) & 31, ((w & 0xFFFF) ^ 0x8000) - 0x8000
+        if op == 9 and rs == 29 and rt == 29 and imm < 0 and not frame:
+            frame = -imm
+        elif 0x20 <= op <= 0x26 and rs == 29 and imm == frame + 4 * k:
+            out = True
+    return out
+
+
+def passes_through(words: list[int], callee_vram: int, args: int, params: int, nth: int = 0,
+                   vram: int | None = None) -> str:
+    """What the dropped argument registers ($a<args>..$a<params-1>) hold at a caller's first call to the callee (or
+    its nth, counting from 0, in the order of the code): "pass-through" (nothing wrote them and no call came before:
+    the caller's own arguments, so the fix is to take them as parameters and hand them on), "leftover" (written or
+    clobbered by an earlier call first: what the callee gets is whatever was there), "?" (no such jal/j to the
+    callee found). With the caller's vram, along its control flow (a write or a call on another branch doesn't
+    count: `if (x) { g(); return; } f();` passes $a0 through to f); without it, in a straight line."""
+    if vram is not None:
+        return _passes_through_flow(words, vram, callee_vram, args, params, nth)
     target = (callee_vram >> 2) & 0x3FFFFFF
-    written, called = set(), False
+    written, called, seen = set(), False, 0
     for k, w in enumerate(words):
         op, rs, rt, rd, fn = w >> 26, (w >> 21) & 31, (w >> 16) & 31, (w >> 11) & 31, w & 63
+        if op in (2, 3) and (w & 0x3FFFFFF) == target and seen < nth:
+            seen += 1
+            called = True
+            continue
         if op in (2, 3) and (w & 0x3FFFFFF) == target:
             if k + 1 < len(words):  # the delay slot runs first
                 d = words[k + 1]
@@ -1463,6 +1666,58 @@ def passes_through(words: list[int], callee_vram: int, args: int, params: int) -
     return "?"
 
 
+def _mips_flow(words: list[int], vram: int) -> list[tuple[list[int], str | None]]:
+    """Each instruction's successors and what follows it: a branch's or jump's delay slot carries its targets; the
+    delay slot of a call is marked "call" (the call happens after it), of `jr`/a jump out of the function "end"."""
+    n = len(words)
+    out: list[tuple[list[int], str | None]] = [([k + 1] if k + 1 < n else [], None) for k in range(n)]
+    for k, w in enumerate(words[:-1]):
+        op, rs, rt, fn = w >> 26, (w >> 21) & 31, (w >> 16) & 31, w & 63
+        if op in (1, 4, 5, 6, 7) and not (op == 1 and rt in (16, 17)):
+            t = k + 1 + ((w & 0xFFFF) ^ 0x8000) - 0x8000
+            always = op == 4 and rs == 0 and rt == 0
+            out[k + 1] = ([x for x in ([t] if always else [t, k + 2]) if 0 <= x < n], None)
+        elif op == 2:
+            t = ((((vram + 4 * k) & 0xF0000000) | ((w & 0x3FFFFFF) << 2)) - vram) // 4
+            out[k + 1] = ([t], None) if 0 <= t < n else ([], "end")
+        elif op == 0 and fn == 8:
+            out[k + 1] = ([], "end")
+        elif op == 3 or (op == 0 and fn == 9) or (op == 1 and rt in (16, 17)):
+            out[k + 1] = ([k + 2] if k + 2 < n else [], "call")
+    return out
+
+
+def _passes_through_flow(words: list[int], vram: int, callee_vram: int, args: int, params: int, nth: int) -> str:
+    """passes_through along the control flow: the registers that may have been written (or clobbered by a call)
+    on some path from the entry, at the nth jal/j to the callee."""
+    target = (callee_vram >> 2) & 0x3FFFFFF
+    sites = [k for k, w in enumerate(words) if w >> 26 in (2, 3) and (w & 0x3FFFFFF) == target]
+    if nth >= len(sites):
+        return "?"
+    site = sites[nth]
+    flow = _mips_flow(words, vram)
+    args_regs = set(range(4, 8))
+    state: list[set[int] | None] = [None] * len(words)  # None: not reached
+    state[0] = set()
+    work = [0]
+    while work:
+        k = work.pop()
+        _, d = _mips_effect(words[k])
+        succ, after = flow[k]
+        out = state[k] | (d & args_regs) | (args_regs if after == "call" else set())
+        for s in succ:
+            if state[s] is None or not out <= state[s]:
+                state[s] = out if state[s] is None else state[s] | out
+                work.append(s)
+    if site + 1 >= len(words):
+        return "?"
+    if state[site] is None:  # reached only through a jump table (`jr $reg`): in a straight line then
+        return passes_through(words, callee_vram, args, params, nth)
+    _, d = _mips_effect(words[site + 1])  # the delay slot runs first
+    at_call = state[site] | (d & args_regs)
+    return "leftover" if at_call & set(range(4 + args, 4 + params)) else "pass-through"
+
+
 def call_hazards(sources: dict[str, str], compiled: list[str], headers: dict[str, str], functions: set[str],
                  matched: dict[str, str], replaced: dict[str, str] | None = None,
                  runtime_sigs: dict[str, CSig] | None = None, asm_reads: dict[str, list[int]] | None = None) -> dict:
@@ -1476,7 +1731,8 @@ def call_hazards(sources: dict[str, str], compiled: list[str], headers: dict[str
 
     a. "dropped": a call passing fewer arguments than the callee's definition (matched C, or the runtime's prototype
        for a function it replaces) takes, with how the caller declared it: "(void)", "fewer" (a prototype with fewer
-       parameters), "()" (unprototyped) or "none" (only common.h's, or implicit).
+       parameters), "()" (unprototyped), "none" (only common.h's, or implicit) or "cast" (called through a cast of
+       it, cast_calls: the cast's type is the declaration).
     b. "table_calls": calls with no arguments through an unprototyped function pointer (`M2C_UNK (**)()`).
     c. "unmatched": calls with no arguments to a function still in assembly, which no definition checks; with
        common.h's prototype if it has one, else the argument registers its code reads ("reads $a0, $a1"), else
@@ -1495,6 +1751,7 @@ def call_hazards(sources: dict[str, str], compiled: list[str], headers: dict[str
         if d:
             defined[name] = d[0]
     dropped, tables, unmatched = [], [], []
+    n_casts, casts_checked = 0, []
     for path in compiled:
         top = parsed.get(path)
         if not top:
@@ -1503,13 +1760,22 @@ def call_hazards(sources: dict[str, str], compiled: list[str], headers: dict[str
             for expr in table_calls(body):
                 tables.append({"caller": caller, "file": path, "call": expr[:160]})
             seen = set()
-            for callee, nargs in body_calls(body, functions):
-                if (callee, nargs) in seen:
+            casts = cast_calls(body, functions)
+            n_casts += len(casts)
+            for c in casts:
+                if c["callee"] in defined:
+                    casts_checked.append(c)
+            direct = [(callee, nargs, None) for callee, nargs in body_calls(body, functions)]
+            for callee, nargs, cast in direct + [(c["callee"], c["nargs"], c) for c in casts]:
+                if (callee, nargs, cast is None) in seen:
                     continue
-                seen.add((callee, nargs))
+                seen.add((callee, nargs, cast is None))
                 local = top["prototypes"].get(callee)
                 decl = local or common.get(callee)
                 how = "none" if local is None else local["text"] if local["n"] in (None, 0) else "fewer"
+                if cast is not None:  # the cast's type is the declaration this call goes by
+                    how = "cast"
+                    decl = {"text": cast["sigs"][0]["text"]} if cast["sigs"] else {"text": "(a typedef)"}
                 if callee in replaced and replaced[callee] in runtime_sigs:
                     sig, where = runtime_sigs[replaced[callee]], f"the runtime's {replaced[callee]}"
                 elif callee in defined:
@@ -1543,6 +1809,8 @@ def call_hazards(sources: dict[str, str], compiled: list[str], headers: dict[str
         "counts": {"dropped": len(dropped), "dropped_callers": len({d["caller"] for d in dropped}),
                    "dropped_by_declaration": {k: sum(1 for d in dropped if d["declared"] == k)
                                               for k in sorted({d["declared"] for d in dropped})},
+                   "dropped_through_cast": sum(1 for d in dropped if d["declared"] == "cast"),
+                   "cast_calls": n_casts, "cast_calls_to_matched": len(casts_checked),
                    "table_calls": len(tables), "table_callers": len({t["caller"] for t in tables}),
                    "unmatched": len(unmatched), "unmatched_takes_args": len(unmatched_args),
                    "unmatched_no_args": sum(1 for u in unmatched if u["params"] == 0),
@@ -1574,7 +1842,7 @@ def port_call_hazards(build: dict, image: bytes, sources: dict[str, str], header
         if f and g and f.get("rom") is not None and d["caller"] in sizes:
             count = min(sizes[d["caller"]][1], 4096, (len(image) - f["rom"]) // 4)
             d["register"] = passes_through(list(struct.unpack_from(f"<{count}I", image, f["rom"])), g["vram"],
-                                           d["args"], d["params"])
+                                           d["args"], min(d["params"], 4), vram=f["vram"])
     out["counts"]["dropped_pass_through"] = sum(1 for d in out["dropped"] if d["register"] == "pass-through")
     for u in out["unmatched"]:
         u["sony"] = u["callee"] in sony
@@ -1998,7 +2266,8 @@ is the same. Found by {ch['method']}; the lists are in `hazards.json` too.
 - **a. Fewer arguments than the definition takes: {c['dropped']} calls in {c['dropped_callers']} functions** ({by};
   `none`: no prototype of the caller's own, only common.h's or an implicit declaration). In
   {c.get('dropped_pass_through', 0)} of them the registers are the caller's own arguments, untouched (pass-through:
-  the fix is mechanical).
+  the fix is mechanical). Calls through a cast of a game function (`((T (*)(...)) func_X)(...)`, `cast`) are
+  checked the same way: {c.get('cast_calls', 0)} of them, {c.get('dropped_through_cast', 0)} dropping arguments.
 - **b. Calls with no arguments through an unprototyped function pointer (`M2C_UNK (**)()`), in C the port compiles:
   {c['table_calls']}** (the libraries' ones the runtime replaces by their code, SONY_SHAPES, aren't counted).
 - **c. Calls with no arguments to a function still in assembly: {c['unmatched']}**, which no definition checks (the

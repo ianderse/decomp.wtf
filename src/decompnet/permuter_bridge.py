@@ -126,9 +126,6 @@ def export(net, slug: str, out: Path, max_miss: float = 0.05, limit: int = 400, 
     closest first. Returns how many were written."""
     proj = net._project(slug)
     cfg = json.loads(proj["config"])
-    tc = toolchains.get(toolchain_id(cfg["compiler"]["toolchain"]))
-    gcc_dir = toolchains.path(tc.id)
-    as_bin = toolchains.binary("binutils-mips").parent / "mips-ps2-decompals-as"
     rows = net.store.all(
         "SELECT * FROM functions WHERE project_id=? AND status='open' AND best_source IS NOT NULL AND best_score > 0 "
         "AND best_score <= n_insns * 100 * ? ORDER BY CAST(best_score AS REAL) / (n_insns * 100) LIMIT ?",
@@ -137,7 +134,6 @@ def export(net, slug: str, out: Path, max_miss: float = 0.05, limit: int = 400, 
     names = {r["name"] for r in net.store.all("SELECT name FROM functions WHERE project_id=?", proj["id"])}
     units = net._unit_contexts(proj["id"])
     from .rom.export import own_source
-    from .psx_gte import enabled as gte_enabled, header_path as gte_header
     out.mkdir(parents=True, exist_ok=True)
     written = 0
     for fn in rows:
@@ -149,48 +145,110 @@ def export(net, slug: str, out: Path, max_miss: float = 0.05, limit: int = 400, 
         fn = diagnosis.machine_source(net, fn)
         if fn is None:
             continue
-        d = out / fn["name"]
-        d.mkdir(exist_ok=True)
         header = net._context(proj["id"], net._effective_unit(fn, units))["header"]
         src = own_source(fn["best_source"], fn["name"], names)
-        own_tc = toolchains.get(toolchain_id(net.fn_toolchain(fn) or cfg["compiler"]["toolchain"]))
-        if not own_tc.line_comments:
-            header, src = block_comments(header), block_comments(src)
-        with tempfile.TemporaryDirectory() as t:
-            t = Path(t)
-            (t / "context.h").write_text(header, encoding="utf-8")
-            pre = '#include "psx_gte.h"\n' if gte_enabled(cfg) else ""
-            if pre:
-                (t / "psx_gte.h").write_text(gte_header().read_text(encoding="utf-8"), encoding="utf-8")
-            (t / "f.c").write_text(pre + '#include "context.h"\n' + src + "\n", encoding="utf-8")
-            pp = subprocess.run([str(gcc_dir / "gcc"), f"-B{gcc_dir}/", "-E", "-P", "-I", str(t), str(t / "f.c")],
-                                capture_output=True, text=True, errors="replace")
-            if pp.returncode != 0:
-                log(f"{fn['name']}: preprocessing failed, skipped")
-                shutil.rmtree(d, ignore_errors=True)  # a half-written directory stops decomp-permuter's whole run
-                continue
-            (d / "base.c").write_text(pp.stdout, encoding="utf-8")
-            (d / "target.s").write_text(PRELUDE + net._asm_text(fn, proj) + "\n", encoding="utf-8")
-            res = subprocess.run([str(as_bin), "-EL", "-march=r3000", "-mtune=r3000", "-no-pad-sections", "-G0",
-                                  "-o", str(d / "target.o"), str(d / "target.s")], capture_output=True, text=True)
-            if res.returncode != 0:
-                log(f"{fn['name']}: assembling the target failed, skipped: {res.stderr.strip()[:200]}")
-                shutil.rmtree(d, ignore_errors=True)  # (no compile.sh: decomp-permuter refuses the whole batch)
-                continue
-        (d / "compile.sh").write_text(_compile_sh(net, proj, fn), encoding="utf-8")
-        (d / "compile.sh").chmod(0o755)
-        (d / "settings.toml").write_text(f'func_name = "{fn["name"]}"\ncompiler_type = "gcc"\n'
-                                         f'objdump_command = "OBJDUMP"\n', encoding="utf-8")
-        (d / "decomp.json").write_text(json.dumps({"slug": slug, "function": fn["name"], "best_score": fn["best_score"],
-                                                   "n_insns": fn["n_insns"]}), encoding="utf-8")
-        ok, dropped = repair_base(d)
-        if not ok:
-            log(f"{fn['name']}: base.c does not compile with this app's compiler, skipped")
-            shutil.rmtree(d)
+        if _write_dir(net, proj, cfg, fn, src, header, out, {"slug": slug, "best_score": fn["best_score"]}, log):
+            written += 1
+    _setup_sh(out)
+    log(f"{written} near misses written to {out}")
+    return written
+
+
+def sources_from_dir(folder: Path) -> dict[str, str]:
+    """{function: source} from a folder of `<name>.c` files (a file whose stem has a dot in it, such as the
+    passthrough folder's `<name>.before.c`, is not one)."""
+    return {p.stem: p.read_text(encoding="utf-8") for p in sorted(Path(folder).glob("*.c")) if "." not in p.stem}
+
+
+def sources_from_passthrough(project_root: Path) -> dict[str, str]:
+    """The rewrites `decomp fix-passthrough` couldn't verify (<project>/passthrough/report.json's failed ones, each
+    `<name>.failed.c`): near misses whose only difference is usually register allocation or save order."""
+    folder = Path(project_root) / "passthrough"
+    report = json.loads((folder / "report.json").read_text(encoding="utf-8"))
+    out = {}
+    for r in report["functions"]:
+        f = folder / f"{r['name']}.failed.c"
+        if r.get("status") == "failed" and f.exists():
+            out[r["name"]] = f.read_text(encoding="utf-8")
+    return out
+
+
+def export_sources(net, slug: str, out: Path, sources: dict[str, str], note: str = "", log=print) -> int:
+    """One decomp-permuter directory per (function, source) given, matched or open: the source as it stands (the
+    function's own, as export.own_source makes one) against the function's header now. For a matched function
+    decomp.json says `replace` and keeps the note, and the source goes beside it (source.c): import_results takes a
+    byte-identical result through /api/replace (Network.replace_match) instead of as an attempt."""
+    proj = net._project(slug)
+    cfg = json.loads(proj["config"])
+    units = net._unit_contexts(proj["id"])
+    out.mkdir(parents=True, exist_ok=True)
+    written = 0
+    for name, src in sorted(sources.items()):
+        fn = net.store.one("SELECT * FROM functions WHERE project_id=? AND name=?", proj["id"], name)
+        if fn is None:
+            log(f"{name}: no such function, skipped")
             continue
-        if dropped:
-            log(f"{fn['name']}: dropped {dropped} declaration(s) of the attempt that conflict with the header")
-        written += 1
+        header = net._context(proj["id"], net._effective_unit(fn, units))["header"]
+        meta = {"slug": slug, "best_score": None, "replace": fn["status"] == "matched", "note": note}
+        if _write_dir(net, proj, cfg, fn, src, header, out, meta, log):
+            (out / name / "source.c").write_text(src, encoding="utf-8")
+            written += 1
+    _setup_sh(out)
+    log(f"{written} functions written to {out}")
+    return written
+
+
+def _write_dir(net, proj, cfg: dict, fn, src: str, header: str, out: Path, meta: dict, log=print) -> bool:
+    """One decomp-permuter directory for fn with this source (its own) against this header: base.c (preprocessed),
+    target.o (the original instructions, assembled), compile.sh, settings.toml and decomp.json (meta, the function's
+    name and size). False, and no directory, when one of them can't be made."""
+    tc = toolchains.get(toolchain_id(cfg["compiler"]["toolchain"]))
+    gcc_dir = toolchains.path(tc.id)
+    as_bin = toolchains.binary("binutils-mips").parent / "mips-ps2-decompals-as"
+    from .psx_gte import enabled as gte_enabled, header_path as gte_header
+    d = out / fn["name"]
+    d.mkdir(exist_ok=True)
+    own_tc = toolchains.get(toolchain_id(net.fn_toolchain(fn) or cfg["compiler"]["toolchain"]))
+    if not own_tc.line_comments:
+        header, src = block_comments(header), block_comments(src)
+    with tempfile.TemporaryDirectory() as t:
+        t = Path(t)
+        (t / "context.h").write_text(header, encoding="utf-8")
+        pre = '#include "psx_gte.h"\n' if gte_enabled(cfg) else ""
+        if pre:
+            (t / "psx_gte.h").write_text(gte_header().read_text(encoding="utf-8"), encoding="utf-8")
+        (t / "f.c").write_text(pre + '#include "context.h"\n' + src + "\n", encoding="utf-8")
+        pp = subprocess.run([str(gcc_dir / "gcc"), f"-B{gcc_dir}/", "-E", "-P", "-I", str(t), str(t / "f.c")],
+                            capture_output=True, text=True, errors="replace")
+        if pp.returncode != 0:
+            log(f"{fn['name']}: preprocessing failed, skipped")
+            shutil.rmtree(d, ignore_errors=True)  # a half-written directory stops decomp-permuter's whole run
+            return False
+        (d / "base.c").write_text(pp.stdout, encoding="utf-8")
+        (d / "target.s").write_text(PRELUDE + net._asm_text(fn, proj) + "\n", encoding="utf-8")
+        res = subprocess.run([str(as_bin), "-EL", "-march=r3000", "-mtune=r3000", "-no-pad-sections", "-G0",
+                              "-o", str(d / "target.o"), str(d / "target.s")], capture_output=True, text=True)
+        if res.returncode != 0:
+            log(f"{fn['name']}: assembling the target failed, skipped: {res.stderr.strip()[:200]}")
+            shutil.rmtree(d, ignore_errors=True)  # (no compile.sh: decomp-permuter refuses the whole batch)
+            return False
+    (d / "compile.sh").write_text(_compile_sh(net, proj, fn), encoding="utf-8")
+    (d / "compile.sh").chmod(0o755)
+    (d / "settings.toml").write_text(f'func_name = "{fn["name"]}"\ncompiler_type = "gcc"\n'
+                                     f'objdump_command = "OBJDUMP"\n', encoding="utf-8")
+    (d / "decomp.json").write_text(json.dumps({**meta, "function": fn["name"], "n_insns": fn["n_insns"]}),
+                                   encoding="utf-8")
+    ok, dropped = repair_base(d)
+    if not ok:
+        log(f"{fn['name']}: base.c does not compile with this app's compiler, skipped")
+        shutil.rmtree(d)
+        return False
+    if dropped:
+        log(f"{fn['name']}: dropped {dropped} declaration(s) of the attempt that conflict with the header")
+    return True
+
+
+def _setup_sh(out: Path) -> None:
     (out / "setup.sh").write_text(
         '#!/bin/sh\n# Run once on the permuter machine: points every directory at its MIPS objdump.\n'
         'OBJ="$HOME/Library/Application Support/decompnet/toolchains/binutils-mips/mips-ps2-decompals-objdump"\n'
@@ -200,13 +258,13 @@ def export(net, slug: str, out: Path, max_miss: float = 0.05, limit: int = 400, 
         'for s in */settings.toml; do sed -i "" "s|^objdump_command = .*|objdump_command = \\"\'$OBJ\' -drz\\"|" "$s"; done\n'
         'echo "ready: $(ls -d */ | wc -l | tr -d " ") functions"\n', encoding="utf-8")
     (out / "setup.sh").chmod(0o755)
-    log(f"{written} near misses written to {out}")
-    return written
 
 
-def import_results(net, slug: str, src: Path, log=print) -> dict:
+def import_results(net, slug: str, src: Path, log=print, post=None) -> dict:
     """decomp-permuter's best candidate per directory (output-<score>-<n>/source.c), the function's definition taken
-    out of it and judged by the app like any attempt (by the "permuter" agent)."""
+    out of it and judged by the app like any attempt (by the "permuter" agent). A matched function's directory
+    (export_sources) is a replacement instead: judged byte for byte and, through post(path, body), sent to
+    /api/replace (stats["replace"])."""
     from .forks import csource
     proj = net._project(slug)
     agent, _ = net.local_agent("permuter")
@@ -230,6 +288,10 @@ def import_results(net, slug: str, src: Path, log=print) -> dict:
             continue
         stats["candidates"] += 1
         fn = net.store.one("SELECT * FROM functions WHERE project_id=? AND name=?", proj["id"], meta["function"])
+        if meta.get("replace") and fn is not None and fn["status"] == "matched" and (d / "source.c").exists():
+            stats.setdefault("replace", []).append(_replace_one(net, proj, fn, d, meta, outs[0], span, text, post, log))
+            judged()
+            continue
         if fn is None or fn["status"] != "open" or not fn["best_source"]:
             judged()
             continue
@@ -247,3 +309,27 @@ def import_results(net, slug: str, src: Path, log=print) -> dict:
             stats["improved"] += 1
     log(f"permuter results: {stats}")
     return stats
+
+
+def _replace_one(net, proj, fn, d: Path, meta: dict, out: Path, span, text: str, post, log=print) -> dict:
+    """A matched function's permuted source (export_sources): its definition spliced into source.c, judged as the
+    judge does (rom.passthrough.verify), and when byte-identical posted to /api/replace with the note (when post is
+    given). What happened, with decomp-permuter's score of its best output."""
+    from .forks import csource
+    from .rom.passthrough import verify
+    name = meta["function"]
+    score = int(re.match(r"output-(\d+)", out.parent.name).group(1))
+    source = csource.replace((d / "source.c").read_text(encoding="utf-8"), name, text[span[0]:span[1]].strip())
+    header = net._context(proj["id"], net._effective_unit(fn, net._unit_contexts(proj["id"])))["header"]
+    exact, why = verify(net, proj, fn, source, header)
+    row = {"function": name, "permuter_score": score, "exact": exact, "why": why, "replaced": False}
+    if exact:
+        (d / "matched.c").write_text(source, encoding="utf-8")
+        if post is not None:
+            res = post("/api/replace", {"slug": meta["slug"], "name": name, "source": source,
+                                        "note": meta.get("note") or "permuted"})
+            row["replaced"] = bool(res.get("replaced"))
+            row["why"] = "" if row["replaced"] else (res.get("text") or res.get("error") or "")[:400]
+    log(f"  {name}: permuter score {score}, " + ("byte-identical" if exact else why[:200])
+        + (", replaced" if row["replaced"] else ""))
+    return row

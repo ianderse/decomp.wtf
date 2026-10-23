@@ -116,6 +116,40 @@ def test_rewrite_forms_and_the_header():
     assert pt.rewrite(p, fns["left"]) is None and pt.rewrite(p, fns["callee"]) is None
 
 
+def test_calls_through_a_cast_are_forwarded_and_the_cast_widened():
+    fns = _fns()
+    v = fns["callee"].vram
+    srcs = {
+        # a cast in the call, its parameter list one short
+        "c1": "void c1(void *arg0) {\n    ((void (*)(void *)) callee)(arg0);\n}\n",
+        # stored in a variable, then called (the declaration's type and the assigned cast both widened)
+        "c2": "void c2(void *arg0) {\n    void (*cb)(void *);\n    cb = (void (*)(void *)) callee;\n"
+              "    cb(arg0);\n}\n",
+        # another return type than the definition's, and unprototyped: only the arguments change
+        "c3": "s32 c3(void *arg0) {\n    return ((s32 (*)()) callee)(arg0);\n}\n",
+    }
+    for i, (n, src) in enumerate(srcs.items()):
+        fns[n] = pt.Fn(n, src, code(v), 0x80010600 + 0x100 * i)
+    p = pt.plan(fns)
+    fw = {x.caller: (x.nargs, x.upto, x.status, x.via) for x in p.forwards if x.caller in srcs}
+    assert fw == {"c1": (1, 2, "pass-through", "cast"), "c2": (1, 2, "pass-through", "cb"),
+                  "c3": (1, 2, "pass-through", "cast")}
+    assert p.casts == 3
+    c1 = pt.rewrite(p, fns["c1"]).source
+    assert "void c1(void *arg0, s32 a1) {" in c1 and "((void (*)(void *, s32)) callee)(arg0, a1);" in c1
+    c2 = pt.rewrite(p, fns["c2"]).source
+    assert "void (*cb)(void *, s32);" in c2 and "cb = (void (*)(void *, s32)) callee;" in c2 and "cb(arg0, a1);" in c2
+    c3 = pt.rewrite(p, fns["c3"]).source
+    assert "return ((s32 (*)()) callee)(arg0, a1);" in c3
+    # "real" gives a prototyped cast the callee's return type too; "caller-return" keeps the cast's
+    fns["c4"] = pt.Fn("c4", "s32 c4(void *arg0) {\n    return ((s32 (*)(void *)) callee)(arg0);\n}\n", code(v),
+                      0x80010A00)
+    p = pt.plan(fns)
+    assert "return ((void (*)(void *, s32)) callee)(arg0, a1);" in pt.rewrite(p, fns["c4"]).source
+    assert "return ((s32 (*)(void *, s32)) callee)(arg0, a1);" in pt.rewrite(p, fns["c4"], "caller-return").source
+    assert "return ((s32 (*)(void *, s32)) callee)(arg0, a1);" in pt.rewrite(p, fns["c4"], "generic").source
+
+
 def test_a_call_still_short_gets_an_unprototyped_declaration():
     fns = _fns()
     fns["two"] = pt.Fn("two", "M2C_UNK callee();\nvoid two(void) {\n    callee();\n    callee();\n}\n",

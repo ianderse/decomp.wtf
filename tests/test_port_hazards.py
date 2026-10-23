@@ -351,6 +351,33 @@ def test_what_the_dropped_register_holds_at_the_call():
     assert ep.passes_through([jal, _imm(0x09, 0, A1, 1)], callee, 0, 2) == "leftover"      # in the delay slot
     assert ep.passes_through([_imm(0x09, 0, A0, 1), jal, 0], callee, 1, 2) == "pass-through"  # a0 is passed; a1 kept
     assert ep.passes_through([other, 0], callee, 0, 1) == "?"
+    assert ep.passes_through([jal, _imm(0x09, 0, A0, 1), jal, 0], callee, 0, 1, nth=1) == "leftover"  # the 2nd
+
+
+def test_what_the_dropped_register_holds_along_the_control_flow():
+    vram, callee = 0x80010000, 0x800F5120
+    jal, other, jr_ra = (3 << 26) | (callee >> 2 & 0x3FFFFFF), (3 << 26) | 0x40000, _r(RA, 0, 0, 8)
+    # if (x) { g(); return; } f();  -- the call to g is on the other branch
+    words = [_imm(5, 3, V0, 5), 0, other, 0, jr_ra, 0, jal, 0, jr_ra, 0]
+    assert ep.passes_through(words, callee, 0, 1) == "leftover"  # in a straight line, g came first
+    assert ep.passes_through(words, callee, 0, 1, vram=vram) == "pass-through"
+    # do { f(); } while (v0): the second time round $a0 is what f left
+    loop = [jal, 0, _imm(5, V0, 0, -3), 0, jr_ra, 0]
+    assert ep.passes_through(loop, callee, 0, 1, vram=vram) == "leftover"
+    assert ep.passes_through([jal, _imm(0x09, 0, A1, 1), jr_ra, 0], callee, 0, 2, vram=vram) == "leftover"
+    assert ep.passes_through([other, 0, jr_ra, 0], callee, 0, 1, vram=vram) == "?"
+
+
+def test_argument_registers_live_at_entry():
+    jr_ra = _r(RA, 0, 0, 8)
+    # if (a0 == 0) return; ... reads a1 after the first return
+    words = [_imm(4, A0, 0, 3), 0, jr_ra, 0, _r(A1, 0, V0, 0x21), jr_ra, 0]
+    assert ep.mips_arg_reads(words) == [0] and ep.mips_arg_live(words, 0x80010000) == [0, 1]
+    # a call: what its callee reads (reads_of), then the registers are its
+    g = 0x80020000
+    call = [(3 << 26) | (g >> 2 & 0x3FFFFFF), 0, _r(A2, 0, V0, 0x21), jr_ra, 0]
+    assert ep.mips_arg_live(call, 0x80010000, lambda v: [1] if v == g else None) == [1]
+    assert ep.mips_arg_live(call, 0x80010000) == [0, 1, 2, 3]  # an unknown callee may read all four
 
 
 def test_port_md_lists_the_hazards():
@@ -362,3 +389,58 @@ def test_port_md_lists_the_hazards():
     assert "none (common.h `(void)`)" in md and "`caller`: `M2C_FIELD(D_801A1480, M2C_UNK (**)(), 0x2C)()`" in md
     assert "`caller` -> `func_Y` (declared `(void)`): reads $a0" in md and "`caller` -> `func_Q` (unknown)" in md
     assert ep.call_hazards_md(None) == ""
+
+
+# ---- calls through a cast of a game function
+
+CAST_FILES = {
+    "src/main/func_A.c": "void func_A(void *arg0) {\n}\n",
+    "src/main/func_B.c": "s32 func_B(s32 a, s32 b) {\n    return a + b;\n}\n",
+    "src/main/func_R.c": "void func_R(s32 a) {\n}\n",
+    "src/main/caller.c": """typedef int s32;
+typedef s32 (*Fn)();
+
+void caller(void *arg0) {
+    void (*cb)(void);
+    s32 (*full)(s32, s32) = func_B;
+    ((void (*)()) func_A)();
+    ((void (*)(void *)) func_A)(arg0);
+    (*(s32 (*)(s32)) &func_B)(1);
+    ((Fn) func_B)(1, 2);
+    cb = (void (*)(void)) func_A;
+    cb();
+    full(1, 2);
+    if (((s32 (*)(void)) func_R)() == 0) {
+        (*cb)();
+    }
+}
+""",
+}
+
+
+def test_cast_calls_found_with_their_types():
+    body = ep.c_toplevel(CAST_FILES["src/main/caller.c"])["definitions"]["caller"][1]
+    calls = ep.cast_calls(body, {"func_A", "func_B", "func_R"})
+    got = [(c["callee"], c["nargs"], c["via"], [g["text"] for g in c["sigs"]]) for c in calls]
+    assert got == [
+        ("func_A", 0, "cast", ["void (*)()"]),
+        ("func_A", 1, "cast", ["void (*)(void *)"]),
+        ("func_B", 1, "cast", ["s32 (*)(s32)"]),
+        ("func_B", 2, "cast", []),  # a typedef: no type written here to rewrite
+        ("func_A", 0, "cb", ["void (*cb)(void)", "void (*)(void)"]),  # stored in a variable, then called
+        ("func_B", 2, "full", ["s32 (*full)(s32, s32)"]),
+        ("func_R", 0, "cast", ["s32 (*)(void)"]),  # a cast with another return type than the definition's
+        ("func_A", 0, "cb", ["void (*cb)(void)", "void (*)(void)"]),
+    ]
+    g = calls[2]["sigs"][0]
+    assert body[g["params"][0]:g["params"][1] + 1] == "(s32)" and body[g["ret"][0]:g["ret"][1]].strip() == "s32"
+
+
+def test_cast_calls_dropping_arguments_are_hazards():
+    matched = {n: f"src/main/{n}.c" for n in ("func_A", "func_B", "func_R", "caller")}
+    h = ep.call_hazards(CAST_FILES, ["src/main/caller.c"], {}, set(matched), matched)
+    got = sorted((d["callee"], d["args"], d["params"], d["declared"], d["declaration"]) for d in h["dropped"])
+    assert got == [("func_A", 0, 1, "cast", "void (*)()"), ("func_B", 1, 2, "cast", "s32 (*)(s32)"),
+                   ("func_R", 0, 1, "cast", "s32 (*)(void)")]  # (func_A with 0 through cb: the same as the first)
+    assert h["counts"]["cast_calls"] == 8 and h["counts"]["dropped_through_cast"] == 3
+    assert "8 of them, 3 dropping arguments" in ep.call_hazards_md(h)

@@ -422,6 +422,33 @@ def shortcut(args) -> int:
     return 0
 
 
+def _app_post(flag: str):
+    """post(path, body) -> dict through the running app's API (its cookie and header from server.json), for a
+    command whose `flag` submits through it."""
+    try:
+        info = json.loads((home_dir() / ".decomp" / "server.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        raise SystemExit(f"decomp.wtf isn't running: {flag} submits through it") from None
+    if not _alive(info.get("port", 0)):
+        raise SystemExit(f"decomp.wtf isn't running: {flag} submits through it")
+
+    def post(path: str, body: dict) -> dict:
+        req = urllib.request.Request(f"http://127.0.0.1:{info['port']}{path}", method="POST",
+                                     data=json.dumps(body).encode(),
+                                     headers={"Cookie": f"decomp_live={info['secret']}", "X-Decomp": "1",
+                                              "Host": f"127.0.0.1:{info['port']}",
+                                              "Content-Type": "application/json"})
+        try:  # a header edit judges every matched function again: minutes
+            with urllib.request.urlopen(req, timeout=1800) as r:
+                return json.loads(r.read())
+        except urllib.error.HTTPError as e:
+            try:
+                return {"replaced": False, "error": json.loads(e.read() or b"{}").get("error") or str(e)}
+            except ValueError:
+                return {"replaced": False, "error": str(e)}
+    return post
+
+
 def fix_passthrough(args) -> int:
     """decomp fix-passthrough: rom/passthrough.fix over the database (read only), then with --apply each verified
     rewrite through the running app's /api/replace."""
@@ -433,29 +460,7 @@ def fix_passthrough(args) -> int:
     if net.cfg(proj).get("platform") != "psx":
         print("fix-passthrough reads MIPS code: PS1 projects only")
         return 1
-    post = None
-    if args.apply:
-        try:
-            info = json.loads((home_dir() / ".decomp" / "server.json").read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            raise SystemExit("decomp.wtf isn't running: --apply submits through it") from None
-        if not _alive(info.get("port", 0)):
-            raise SystemExit("decomp.wtf isn't running: --apply submits through it")
-
-        def post(path: str, body: dict) -> dict:
-            req = urllib.request.Request(f"http://127.0.0.1:{info['port']}{path}", method="POST",
-                                         data=json.dumps(body).encode(),
-                                         headers={"Cookie": f"decomp_live={info['secret']}", "X-Decomp": "1",
-                                                  "Host": f"127.0.0.1:{info['port']}",
-                                                  "Content-Type": "application/json"})
-            try:  # a header edit judges every matched function again: minutes
-                with urllib.request.urlopen(req, timeout=1800) as r:
-                    return json.loads(r.read())
-            except urllib.error.HTTPError as e:
-                try:
-                    return {"replaced": False, "error": json.loads(e.read() or b"{}").get("error") or str(e)}
-                except ValueError:
-                    return {"replaced": False, "error": str(e)}
+    post = _app_post("--apply") if args.apply else None
     out = Path(proj["root"]) / "passthrough"
     res = passthrough.fix(net, args.project, out_dir=out, limit=args.limit, apply=args.apply, post=post)
     print(f"{res['dropped_calls']} calls drop arguments ({', '.join(f'{v} {k}' for k, v in res['dropped_by_status'].items())}); "
@@ -517,6 +522,13 @@ def main(argv: list[str] | None = None) -> int:
     pm.add_argument("folder", help="export: where to write the directories; import: the folder with the results")
     pm.add_argument("--max-miss", type=float, default=0.05, help="export: how far off at most (0.05: 5%%)")
     pm.add_argument("--limit", type=int, default=400, help="export: how many functions at most")
+    pm.add_argument("--from-dir", help="export: these sources instead of the near misses, one <name>.c per "
+                                       "function (matched ones come back through /api/replace)")
+    pm.add_argument("--passthrough", action="store_true", help="export: the rewrites fix-passthrough couldn't "
+                                                               "verify (<project>/passthrough/report.json)")
+    pm.add_argument("--note", default="", help="export with --from-dir/--passthrough: the note a replacement gets")
+    pm.add_argument("--replace", action="store_true", help="import: post byte-identical results for matched "
+                                                           "functions to the running app (POST /api/replace)")
     su = sub.add_parser("survey", help="PS1: which compiler setups match the open functions' best attempts")
     su.add_argument("project", help="the project's name (its slug, e.g. slus-01252)")
     su.add_argument("--all", action="store_true", help="every open function with a best attempt (default: the app's sample)")
@@ -594,12 +606,22 @@ def main(argv: list[str] | None = None) -> int:
         from .. import permuter_bridge
         net = RomNetwork(home_dir() / ".decomp" / "decomp.db", home_dir())
         folder = Path(args.folder).expanduser()
-        if args.action == "export":
+        if args.action == "export" and (args.from_dir or args.passthrough):
+            if args.passthrough:
+                srcs = permuter_bridge.sources_from_passthrough(Path(net.project_row(args.project)["root"]))
+                note = args.note or "pass-through argument made explicit (permuted)"
+            else:
+                srcs, note = permuter_bridge.sources_from_dir(Path(args.from_dir).expanduser()), args.note
+            n = permuter_bridge.export_sources(net, args.project, folder, srcs, note)
+            print(f"next, on the permuter machine: sh {folder.name}/setup.sh, then decomp-permuter's "
+                  f"./permuter.py {folder.name}/*/ -j <cores> --best-only --stack-diffs" if n else "")
+        elif args.action == "export":
             n = permuter_bridge.export(net, args.project, folder, args.max_miss, args.limit)
             print(f"next, on the permuter machine: sh {folder.name}/setup.sh, then decomp-permuter's "
                   f"./permuter.py {folder.name}/*/ -j <cores> (see docs/plans/permuter-on-m5.md)" if n else "")
         else:
-            permuter_bridge.import_results(net, args.project, folder)
+            permuter_bridge.import_results(net, args.project, folder,
+                                           post=_app_post("--replace") if args.replace else None)
         return 0
     return {"setup": setup, "stop": stop, "shortcut": shortcut, "connect": connect_agents, "share": share,
             "host": host, "join": join, "service": service_cmd, "url": url_cmd, "update": update_cmd,

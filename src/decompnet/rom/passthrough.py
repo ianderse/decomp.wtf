@@ -18,7 +18,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 
-from .export_port import _close, _split_commas, passes_through
+from .export_port import _close, _split_commas, cast_calls as _cast_calls, passes_through
 
 NOTE = "pass-through argument made explicit: {regs} {verb} {callee} unchanged (port hazard (a))"
 
@@ -285,6 +285,8 @@ class Call:
     lp: int
     rp: int
     nargs: int
+    via: str = ""  # "" a direct call; "cast" through a cast of the callee; else the local pointer holding it
+    sigs: list = field(default_factory=list)  # the function types written for a call through a cast (fn_type)
 
 
 def body_calls(s: str, d: Definition, names: set[str]) -> list[Call]:
@@ -308,9 +310,21 @@ def body_calls(s: str, d: Definition, names: set[str]) -> list[Call]:
     return out
 
 
-def cast_calls(s: str, names: set[str]) -> int:
-    """Calls through a cast of a game function (`((T (*)()) func_X)(...)`): seen, not rewritten."""
-    return sum(1 for m in re.finditer(r"\)\s*&?\s*([A-Za-z_]\w*)\s*\)\s*\(", s) if m.group(1) in names)
+def cast_calls(s: str, d: Definition, names: set[str]) -> list[Call]:
+    """Calls of the named functions through a cast of them (export_port.cast_calls: `((T (*)(...)) func_X)(...)`,
+    a local pointer that only holds func_X), positions in the file."""
+    out = []
+    for c in _cast_calls(s[d.brace:d.end], names):
+        sigs = [{**g, "ret": (g["ret"][0] + d.brace, g["ret"][1] + d.brace),
+                 "params": (g["params"][0] + d.brace, g["params"][1] + d.brace)} for g in c["sigs"]]
+        out.append(Call(c["callee"], d.brace + c["at"], d.brace + c["lp"], d.brace + c["rp"], c["nargs"], c["via"],
+                        sigs))
+    return out
+
+
+def all_calls(s: str, d: Definition, names: set[str]) -> list[Call]:
+    """Direct calls and calls through a cast, in the order they're written."""
+    return sorted(body_calls(s, d, names) + cast_calls(s, d, names), key=lambda c: c.lp)
 
 
 # ------------------------------------------------------------------------------------------------- the plan
@@ -331,6 +345,7 @@ class Forward:
     upto: int  # positions nargs..upto-1 are now passed through
     need: int  # what the callee takes (after its own rewrite)
     status: str  # "pass-through", or why positions upto..need-1 stay a hazard ("leftover", "?", "stack argument")
+    via: str = ""  # through a cast ("cast", or the local pointer's name): Call.via
 
 
 @dataclass
@@ -361,20 +376,27 @@ def plan(fns: dict[str, Fn], all_names: set[str] | None = None) -> Plan:
         else:
             defs[n] = d
     names = set(defs)
-    calls = {n: body_calls(masked[n], d, names) for n, d in defs.items()}
-    casts = sum(cast_calls(masked[n], all_names or names) for n in defs)
+    calls = {n: all_calls(masked[n], d, names) for n, d in defs.items()}
+    casts = sum(len(cast_calls(masked[n], d, all_names or names)) for n, d in defs.items())
     final = {n: list(d.params) for n, d in defs.items()}
     forwards: dict[tuple[str, str, int], Forward] = {}
     for _ in range(64):
         changed = False
         for caller in sorted(defs):
             f = fns[caller]
+            first: set[tuple] = set()
             for c in calls[caller]:
                 g = defs[c.callee]
                 need = len(final[c.callee])
                 if g.variadic or c.nargs >= need:
                     continue
                 key = (caller, c.callee, c.nargs)
+                if key in first:  # judged at its first call (the later ones: rewrite passes them on too, or not)
+                    continue
+                first.add(key)
+                # which jal to the callee this is, in the order written: a call after one that passed the argument
+                # (func_X(a); ... func_X();) is judged at its own jal, after which the registers are the callee's
+                nth = sum(1 for e in calls[caller] if e.callee == c.callee and e.lp < c.lp)
                 top = min(need, 4)
                 upto = c.nargs
                 status = "pass-through"
@@ -382,14 +404,15 @@ def plan(fns: dict[str, Fn], all_names: set[str] | None = None) -> Plan:
                     status = "?"
                 else:
                     while upto < top:
-                        st = passes_through(f.words, fns[c.callee].vram, upto, upto + 1)
+                        st = passes_through(f.words, fns[c.callee].vram, upto, upto + 1, nth, vram=f.vram)
                         if st != "pass-through":
                             status = st
                             break
                         upto += 1
                 if status == "pass-through" and upto < need:
                     status = "stack argument"
-                forwards[key] = Forward(caller, c.callee, c.nargs, upto, need, status)
+                via = c.via or (forwards[key].via if key in forwards else "")
+                forwards[key] = Forward(caller, c.callee, c.nargs, upto, need, status, via)
                 for i in range(len(final[caller]), upto):
                     tmpl = final[c.callee][i].template if i >= c.nargs else "s32 \0"
                     final[caller].append(Param(tmpl, f"a{i}"))
@@ -478,13 +501,14 @@ def rewrite(p: Plan, fn: Fn, variant: str = "real", header: str = "") -> Rewrite
     callees = sorted({x.callee for x in fws.values()})
     short: set[str] = set()  # callees some call of which still passes fewer than they take
     seen: set[tuple[str, int]] = set()
-    for c in body_calls(s, d, set(p.defs)):
+    sig_edits: dict[tuple[int, int], str] = {}  # a cast's type, rewritten once however many calls go through it
+    for c in all_calls(s, d, set(p.defs)):
         x = fws.get((c.callee, c.nargs))
         if x is not None and first_only and (c.callee, c.nargs) in seen:
             x = None
         seen.add((c.callee, c.nargs))
         takes = len(p.params.get(c.callee, p.defs[c.callee].params))
-        if c.callee != name and not p.defs[c.callee].variadic and (x.upto if x else c.nargs) < takes:
+        if c.callee != name and not p.defs[c.callee].variadic and (x.upto if x else c.nargs) < takes and not c.via:
             short.add(c.callee)
         if x is None:
             continue
@@ -494,6 +518,19 @@ def rewrite(p: Plan, fn: Fn, variant: str = "real", header: str = "") -> Rewrite
         else:
             edits.append((c.rp, c.rp, ", " + args))
         regs += [f"$a{i}" for i in range(x.nargs, x.upto)]
+        for g in c.sigs:  # the cast's own parameter list: the callee's real one (types only), or as wide as passed
+            if g["n"] is None or g["n"] >= x.upto:
+                continue
+            gp = p.params.get(c.callee, p.defs[c.callee].params)
+            have = [t.strip() for t in _split_commas(text[g["params"][0] + 1:g["params"][1]])] if g["n"] else []
+            if kind == "real":
+                types = [q.type for q in gp[:x.upto]]
+                ret = re.sub(r"\b(?:static|inline|__inline__|__inline|extern)\b\s*", "", p.defs[c.callee].ret).strip()
+                sig_edits[g["ret"]] = ret + " "
+            else:
+                types = have + [(generic(q) if kind == "generic" else q).type for q in gp[len(have):x.upto]]
+            sig_edits[(g["params"][0] + 1, g["params"][1])] = ", ".join(types) or "void"
+    edits += [(a, b, t) for (a, b), t in sig_edits.items()]
     regs = sorted(set(regs))
     _, protos = toplevel(text, s)
     protos += body_prototypes(text, s, d)
@@ -599,6 +636,17 @@ def load(net, slug: str) -> tuple:
     return proj, matched, fns, names
 
 
+def all_code(net, proj) -> dict[str, Fn]:
+    """Every function with its target code (matched or not), as Fn with no source: what callee_reads follows."""
+    import struct
+    out = {}
+    for r in net.store.all("SELECT name, vram, target FROM functions WHERE project_id=?", proj["id"]):
+        t = bytes(r["target"] or b"")
+        if len(t) >= 4:
+            out[r["name"]] = Fn(r["name"], "", list(struct.unpack(f"<{len(t) // 4}I", t[:len(t) // 4 * 4])), r["vram"])
+    return out
+
+
 def verify(net, proj, row, source: str, header: str) -> tuple[bool, str]:
     """Compile and judge a source as the judge judges a match (net._compile with the function's own compiler, then
     net._evaluate: linked at its address): (exact, what went wrong)."""
@@ -623,6 +671,39 @@ def verify(net, proj, row, source: str, header: str) -> tuple[bool, str]:
 
 
 VARIANTS = ("real", "caller-return", "generic", "real+first-call", "caller-return+first-call", "generic+first-call")
+
+
+def callee_reads(fns: dict[str, Fn], x: Forward, _memo: dict | None = None) -> dict:
+    # fns: every function whose code is known (matched or not: a call to one still in assembly reads what its code
+    # reads), each with its vram
+    """For a call that still drops arguments: which of them the callee's code can read ({"reads": ["$a1", "stack
+    4"]}; [] when it reads none of them, so what the caller leaves there doesn't matter on MIPS), by liveness at its
+    entry (export_port.mips_arg_live, a call to another matched function reading what that one reads) and its loads
+    of the stack arguments. {} when the callee's code isn't known."""
+    from .export_port import mips_arg_live, mips_stack_arg_read
+    g = fns.get(x.callee)
+    if g is None or g.words is None:
+        return {}
+    by_vram: dict[int, list[Fn]] = {}
+    for f in fns.values():
+        by_vram.setdefault(f.vram, []).append(f)
+    memo = {} if _memo is None else _memo
+    busy: set[int] = set()
+
+    def reads_of(v: int):
+        if v in memo:
+            return memo[v]
+        fs = by_vram.get(v) or []
+        if len(fs) != 1 or fs[0].words is None or v in busy:  # unknown, an overlay's address, or recursion
+            return None
+        busy.add(v)
+        memo[v] = mips_arg_live(fs[0].words, v, reads_of)
+        busy.discard(v)
+        return memo[v]
+    live = mips_arg_live(g.words, g.vram, reads_of)
+    regs = [f"$a{i}" for i in range(x.upto, min(x.need, 4)) if i in live]
+    stack = [f"stack {k}" for k in range(max(4, x.upto), x.need) if mips_stack_arg_read(g.words, k)]
+    return {"reads": regs + stack}
 
 
 def fix(net, slug: str, out_dir=None, limit: int | None = None, apply: bool = False, post=None, log=print) -> dict:
@@ -656,7 +737,7 @@ def fix(net, slug: str, out_dir=None, limit: int | None = None, apply: bool = Fa
             results.append(entry)
             log(f"  {n}: skipped ({entry['why']})")
             continue
-        why, done = [], None
+        why, done, closest = [], None, None  # closest: (score, variant, source) of the nearest miss
         for variant in VARIANTS:
             rw = rewrite(p, fns[n], variant, headers[unit])
             if rw is None:
@@ -676,9 +757,16 @@ def fix(net, slug: str, out_dir=None, limit: int | None = None, apply: bool = Fa
                 headers[unit] = header
                 break
             why.append(f"{variant}: {msg}")
+            m = re.match(r"score (\d+)", msg)
+            if m and (closest is None or int(m.group(1)) < closest[0]):
+                closest = (int(m.group(1)), variant, rw.source)
         if done is None:
+            # the nearest miss is the one to finish (by hand or decomp-permuter: `decomp permuter export
+            # --passthrough`); "real" when none compiled
             rw0 = rewrite(p, fns[n], "real", headers[unit])
-            entry.update(status="failed", why=why, source=rw0.source if rw0 else None)
+            entry.update(status="failed", why=why, source=closest[2] if closest else rw0.source if rw0 else None)
+            if closest:
+                entry.update(closest={"score": closest[0], "variant": closest[1]})
             status[n] = "failed"
         else:
             entry.update(status="verified", variant=done.variant, regs=done.regs, callees=done.callees,
@@ -693,8 +781,11 @@ def fix(net, slug: str, out_dir=None, limit: int | None = None, apply: bool = Fa
         results.append(entry)
         log(f"  {n}: {entry['status']}" + (f" ({entry['variant']})" if entry["status"] == "verified"
                                            else f": {entry['why'][0][:200]}"))
+    code, memo = all_code(net, proj), {}
     summary = {
         "matched": len(fns), "unparsed": p.unparsed, "knr": p.knr, "casts_seen": p.casts, "cycles": p.cycles,
+        "dropped_through_cast": sum(1 for x in p.forwards if x.via),
+        "forwarded_through_cast": sum(1 for x in p.forwards if x.via and x.upto > x.nargs),
         "dropped_calls": len(p.forwards),
         "dropped_by_status": {k: sum(1 for x in p.forwards if x.status == k) for k in sorted({x.status for x in p.forwards})},
         "forwarded_calls": sum(1 for x in p.forwards if x.upto > x.nargs),
@@ -707,8 +798,10 @@ def fix(net, slug: str, out_dir=None, limit: int | None = None, apply: bool = Fa
         "header_edits": [{"name": r["name"], **r["header"], "callers": r.get("header_callers", [])}
                          for r in results if r.get("header")],
         "residual": [{"caller": x.caller, "callee": x.callee, "args": x.nargs, "takes": x.need, "from": x.upto,
-                      "why": x.status} for x in p.forwards if x.upto < x.need],
+                      "why": x.status, **({"via": x.via} if x.via else {}), **callee_reads(code, x, memo)}
+                     for x in p.forwards if x.upto < x.need],
     }
+    summary["residual_callee_ignores"] = sum(1 for r in summary["residual"] if r.get("reads") == [])
     if out_dir is not None:
         out = Path(out_dir)
         out.mkdir(parents=True, exist_ok=True)
