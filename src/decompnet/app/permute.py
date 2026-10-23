@@ -18,7 +18,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 
-from .. import experiments, scoring
+from .. import diagnosis, experiments, scoring
 from ..network import NetworkError
 from ..permuter import mutate
 
@@ -75,12 +75,23 @@ class Permuter:
             st.stop.set()
 
     def candidates(self, proj, limit: int = 20) -> list:
-        return [r for r in self.net.store.all(
+        rows = [r for r in self.net.store.all(
             "SELECT * FROM functions WHERE project_id=? AND status='open' AND best_source IS NOT NULL "
             "AND best_score > 0 AND best_score <= n_insns * 100 * ? AND n_insns <= 400 "
             "AND id NOT IN (SELECT function_id FROM claims) ORDER BY CAST(best_score AS REAL) / (n_insns * 100) LIMIT ?",
             proj["id"], NEAR, limit * 4) if self._turns.get(r["id"], 0) < MAX_TURNS
-            and experiments.arm(self.net.store, proj["id"], r["id"], "permuter") != "off"][:limit]
+            and experiments.arm(self.net.store, proj["id"], r["id"], "permuter") != "off"]
+        selected = []
+        for row in rows:
+            if not diagnosis.eligible(self.net, row):
+                continue
+            lane = diagnosis.latest(self.net, row)
+            if lane and lane["basis"] == diagnosis.basis(self.net, row) and lane["category"] in ("stack", "linking", "library"):
+                continue
+            candidate = diagnosis.machine_source(self.net, row)
+            if candidate is not None:
+                selected.append(candidate)
+        return selected[:limit]
 
     def _loop(self, slug: str, st: State) -> None:
         agent, _ = self.net.local_agent("permuter")

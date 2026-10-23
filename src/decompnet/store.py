@@ -62,6 +62,23 @@ CREATE TABLE IF NOT EXISTS experiment_units(
   experiment_id INTEGER NOT NULL, function_id INTEGER NOT NULL, arm TEXT NOT NULL, first_claim REAL,
   claims INTEGER NOT NULL DEFAULT 0, usd REAL NOT NULL DEFAULT 0, tokens INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY(experiment_id, function_id));
+CREATE TABLE IF NOT EXISTS function_diagnoses(
+  id INTEGER PRIMARY KEY, function_id INTEGER NOT NULL REFERENCES functions(id) ON DELETE CASCADE,
+  agent_id INTEGER, category TEXT NOT NULL, evidence TEXT NOT NULL, next_hypothesis TEXT NOT NULL,
+  exhausted INTEGER NOT NULL DEFAULT 0, basis TEXT NOT NULL, environment TEXT NOT NULL,
+  details TEXT NOT NULL, created_at REAL NOT NULL);
+CREATE INDEX IF NOT EXISTS idx_diagnoses_fn ON function_diagnoses(function_id,id);
+CREATE TABLE IF NOT EXISTS candidate_reviews(
+  id INTEGER PRIMARY KEY, function_id INTEGER NOT NULL REFERENCES functions(id) ON DELETE CASCADE,
+  attempt_id INTEGER NOT NULL REFERENCES attempts(id) ON DELETE CASCADE, source_hash TEXT NOT NULL,
+  agent_id INTEGER, verdict TEXT NOT NULL, evidence TEXT NOT NULL, environment TEXT NOT NULL, measured_score INTEGER, created_at REAL NOT NULL);
+CREATE INDEX IF NOT EXISTS idx_reviews_fn ON candidate_reviews(function_id,id);
+CREATE TABLE IF NOT EXISTS hypothesis_trials(
+  id INTEGER PRIMARY KEY, function_id INTEGER NOT NULL REFERENCES functions(id) ON DELETE CASCADE,
+  agent_id INTEGER, environment TEXT NOT NULL, source_hash TEXT NOT NULL, hypothesis TEXT NOT NULL,
+  details TEXT NOT NULL, source TEXT, state TEXT NOT NULL, score INTEGER, attempt_id INTEGER, result TEXT,
+  duplicates INTEGER NOT NULL DEFAULT 0, created_at REAL NOT NULL, finished_at REAL,
+  UNIQUE(function_id,environment,source_hash));
 CREATE TABLE IF NOT EXISTS twin_misses(
   function_id INTEGER NOT NULL, source_hash TEXT NOT NULL, project_id INTEGER, at REAL, why TEXT,
   PRIMARY KEY(function_id, source_hash));
@@ -69,6 +86,8 @@ CREATE TABLE IF NOT EXISTS twin_misses(
 
 # Columns added after the first release; applied in place to existing databases.
 MIGRATIONS = [
+    ("hypothesis_trials", "source", "TEXT"),
+    ("candidate_reviews", "measured_score", "INTEGER"),
     ("agents", "trusted", "INTEGER NOT NULL DEFAULT 0"),      # operator-vetted (CLI) vs. self-registered
     ("agents", "origin", "TEXT"),                              # cli | web
     ("agents", "terms_accepted_at", "REAL"),                   # evidence of accepting the terms

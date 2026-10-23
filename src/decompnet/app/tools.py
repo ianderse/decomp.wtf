@@ -81,6 +81,11 @@ Use only the decomp tools. Repeat for up to {count} claims (a batch is one), the
    function has no return of its own (it runs into the next). Only code no C can produce (plain data, a BIOS
    stub): flag_for_review.
 
+For repeatedly stalled ROM functions use test_hypothesis, then record_diagnosis with measured evidence and
+a new hypothesis. With no new hypothesis, mark exhausted=true before release; do not rotate endlessly.
+Use review_candidate for source plausibility problems; a low diff score does not establish correct behavior.
+Historical attempts never consume the current claim's budget. Diagnosis lanes select work by mismatch type.
+
 The assembly in the brief is the exact target, read from the game: trust it over any note. Before each
 compile, name the one difference you're fixing (from the diff) and change that; several changes at once hide
 which one helped. Write plausible original code, pure C (no inline asm). Be brief in your messages: work,
@@ -195,7 +200,20 @@ def _compile(net: RomNetwork, agent: Agent, slug: str, function: str, source: st
     return net.attempt_many(agent, [net.resolve_function(agent, slug, n) for n in names], source, slug)
 
 
+from .. import diagnosis
+
+
 HANDLERS: dict[str, Callable[..., str]] = {
+    "test_alternatives": lambda net, agent, slug, function, attempt_id, old, replacements, hypothesis:
+        diagnosis.alternatives(net, agent, function, attempt_id, old, replacements, hypothesis, slug),
+    "inspect_candidate": lambda net, agent, slug, function, attempt_id=0:
+        diagnosis.inspect_candidate(net, function, attempt_id, slug),
+    "record_diagnosis": lambda net, agent, slug, function, category, evidence, next_hypothesis, exhausted=False:
+        diagnosis.record(net, agent, function, category, evidence, next_hypothesis, exhausted, slug),
+    "review_candidate": lambda net, agent, slug, function, attempt_id, verdict, evidence:
+        diagnosis.review(net, agent, function, attempt_id, verdict, evidence, slug),
+    "test_hypothesis": lambda net, agent, slug, function, source, hypothesis:
+        diagnosis.trial(net, agent, function, source, hypothesis, slug),
     "project_info": lambda net, agent, slug: project_info(net, slug),
     "claim_function": lambda net, agent, slug, function="", strategy="", count=1:
         _claim(net, agent, slug, function, strategy, count),
@@ -227,7 +245,7 @@ HANDLERS: dict[str, Callable[..., str]] = {
         net.forks.split_file(agent, _fork(net, slug, "split_file"), path, at, new_name, data),
 }
 
-ROM_ONLY = {"get_context", "edit_context", "rename_symbol", "split_function", "merge_functions", "flag_for_review"}
+ROM_ONLY = {"test_alternatives", "inspect_candidate", "record_diagnosis", "review_candidate", "test_hypothesis", "get_context", "edit_context", "rename_symbol", "split_function", "merge_functions", "flag_for_review"}
 FORK_ONLY = {"read_file", "search_code", "edit_file", "file_status", "split_file"}
 
 
@@ -292,7 +310,8 @@ def build_mcp(net: RomNetwork, agent_of: Callable[[Context], tuple[Agent, str]])
         Args:
             function: optional name or address (0x80001234) of a specific function
             strategy: finish (forks' default: the files closest to being linked first), easiest (fewest
-                instructions; ROM projects' default), closest (nearly matched already), hardest, random
+                instructions; ROM projects' default), closest (nearly matched already), hardest, random;
+                ROM diagnosis lanes: stack, allocation, structural, library, linking
             count: up to 6: small functions come as a batch (neighbours in one file) to write together and
                 judge in one compile_and_diff; a big one comes alone
         """
@@ -314,6 +333,44 @@ def build_mcp(net: RomNetwork, agent_of: Callable[[Context], tuple[Agent, str]])
         built with the project's build system and diffed with objdiff. Several functions ("a, b, c"): send all
         their definitions in one source; each is judged on its own."""
         return await run(ctx, "compile_and_diff", function=function, source=source)
+
+    @mcp.tool(meta=ALWAYS_LOAD)
+    async def test_alternatives(ctx: Context, function: str, attempt_id: int, old: str,
+                                replacements: list[str], hypothesis: str) -> str:
+        """Test 1-8 explicit alternatives for one unique source region of an existing attempt.
+        All variants start from that same attempt; duplicate inputs reuse previous measurements.
+        Stops at an exact match. Use for targeted lifetime/scheduling or structural experiments."""
+        return await run(ctx, "test_alternatives", function=function, attempt_id=attempt_id, old=old,
+                         replacements=replacements, hypothesis=hypothesis)
+
+    @mcp.tool(meta=ALWAYS_LOAD)
+    async def inspect_candidate(ctx: Context, function: str, attempt_id: int = 0) -> str:
+        """List the last 20 attempt IDs and scores, or read one attempt's full source for review."""
+        return await run(ctx, "inspect_candidate", function=function, attempt_id=attempt_id)
+
+    @mcp.tool(meta=ALWAYS_LOAD)
+    async def record_diagnosis(ctx: Context, function: str, category: str, evidence: str,
+                               next_hypothesis: str, exhausted: bool = False) -> str:
+        """Save a measured work plan. category: stack, allocation, structural, library, linking.
+        Evidence describes observed differences, not guesses. exhausted pauses automatic claims until
+        compiler/header/target/best-source inputs change. A named claim still permits new investigation."""
+        return await run(ctx, "record_diagnosis", function=function, category=category, evidence=evidence,
+                         next_hypothesis=next_hypothesis, exhausted=exhausted)
+
+    @mcp.tool(meta=ALWAYS_LOAD)
+    async def review_candidate(ctx: Context, function: str, attempt_id: int, verdict: str, evidence: str) -> str:
+        """Record a source review of an existing compiled attempt: plausible or suspect, with evidence.
+        Plausible candidates become a separate starting point; lowest-diff history is preserved.
+        A review does not certify semantic equivalence or an exact match."""
+        return await run(ctx, "review_candidate", function=function, attempt_id=attempt_id,
+                         verdict=verdict, evidence=evidence)
+
+    @mcp.tool(meta=ALWAYS_LOAD)
+    async def test_hypothesis(ctx: Context, function: str, source: str, hypothesis: str) -> str:
+        """Compile one targeted candidate on a claimed function, retaining the hypothesis and result.
+        Exact duplicate source under identical inputs reuses the result instead of recompiling.
+        Use for hard-tail investigations; historical attempts are not the current claim's budget."""
+        return await run(ctx, "test_hypothesis", function=function, source=source, hypothesis=hypothesis)
 
     @mcp.tool(meta=ALWAYS_LOAD)
     async def release_function(ctx: Context, function: str, notes: str) -> str:

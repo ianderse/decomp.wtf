@@ -1911,7 +1911,7 @@ async function refreshFn(first) {
       } catch (e) { toast(esc(e.message), "err"); }
     };
     $("fnAsm").innerHTML = highlightAsm(d.asm);
-    const kinds = { matched: "Matching C", best: "Best attempt so far", latest: S.ov.kind === "fork" ? "In the source now" : "Latest attempt", draft: "Machine draft (m2c)" };
+    const kinds = { reviewed: "Reviewed plausible C (not yet matched)", suspect: "Suspect lowest-diff candidate", matched: "Matching C", best: "Best attempt so far", latest: S.ov.kind === "fork" ? "In the source now" : "Latest attempt", draft: "Machine draft (m2c)" };
     $("fnSrcKind").textContent = kinds[d.source_kind] || "No C yet";
     if (!S.editDirty || first) setEditor(d.source || "", d);
     $("copySrc").onclick = () => navigator.clipboard.writeText($("fnEdit").value).then(() => toast("Copied."));
@@ -1924,7 +1924,9 @@ async function refreshFn(first) {
     $("fnXref").innerHTML = xr.join("");
     $("fnXref").querySelectorAll(".fn").forEach((x) => { x.onclick = () => openFn(x.dataset.fn.split("+")[0]); });
     const aside = d.set_aside ? `<div class="note"><small>set aside, not for agents</small>${esc(d.set_aside)} <button class="ghost small-btn" id="fnGiveBack" type="button">Give back to agents</button></div>` : "";
-    $("fnNotes").innerHTML = aside + (d.notes.length ? `<p class="col-title">Notes from agents</p>` + d.notes.map((n) => `<div class="note"><small>${esc(n.agent)} · ${clock(n.created_at)}</small>${esc(n.text)}</div>`).join("") : "");
+    const diagnosis = d.diagnosis ? `<div class="note"><small>Diagnosis · ${esc(d.diagnosis.category)}${d.diagnosis.stale ? " · inputs changed" : d.diagnosis.exhausted ? " · waiting for evidence" : ""}</small>${esc(d.diagnosis.evidence)}<br>Next: ${esc(d.diagnosis.next_hypothesis)}</div>` : "";
+    const review = d.review ? `<div class="note"><small>Source review · attempt ${Number(d.review.attempt_id)}</small>${esc(d.review.evidence)}<br>A plausible source review is not proof of equivalence.${d.suspect_best ? " The lowest-diff source remains preserved but is marked suspect." : ""}</div>` : "";
+    $("fnNotes").innerHTML = aside + diagnosis + review + (d.notes.length ? `<p class="col-title">Notes from agents</p>` + d.notes.map((n) => `<div class="note"><small>${esc(n.agent)} · ${clock(n.created_at)}</small>${esc(n.text)}</div>`).join("") : "");
     if ($("fnGiveBack")) $("fnGiveBack").onclick = () => api("/api/reopen", { method: "POST", body: { slug: S.slug, name: d.name } })
       .then(() => { toast("Given back: agents can claim it again."); refreshFn(false); }).catch((e) => toast(esc(e.message), "err"));
     const tab = S.ftab || (d.status === "matched" || !d.scores.length ? "code" : "diff");

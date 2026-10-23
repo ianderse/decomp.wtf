@@ -2216,12 +2216,13 @@ class RomNetwork(Network):
                     "AND id NOT IN (SELECT function_id FROM claims)", proj["id"], *region):
                 region = None
             for name in self.cfg(proj).get("priority", []):
-                row = self.store.one("SELECT f.id, f.status, f.vram FROM functions f WHERE f.project_id=? AND f.name=?",
+                row = self.store.one("SELECT f.* FROM functions f WHERE f.project_id=? AND f.name=?",
                                      proj["id"], name)
                 if row and region and not (row["vram"] is not None and region[0] <= row["vram"] < region[1]):
                     continue  # a session kept to an address range takes the pins in it
                 held = self.store.one("SELECT 1 FROM claims WHERE agent_id=?", agent.id)
-                if row and row["status"] == "open" and not held and not self.store.one(
+                from .. import diagnosis
+                if row and row["status"] == "open" and diagnosis.eligible(self, row, strategy) and not held and not self.store.one(
                         "SELECT 1 FROM claims WHERE function_id=?", row["id"]):
                     function = name
                     break
@@ -2680,15 +2681,23 @@ class RomNetwork(Network):
             with self._seed_lock:
                 self._seed_for(fn, proj)
             fn = self._function(fn["name"], slug)
+        from .. import diagnosis
+        plan = diagnosis.latest(self, fn)
+        reviewed, suspect = diagnosis.starting_point(self, fn)
+        review_source = reviewed['source'] if reviewed and fn['status'] == 'open' else None
         return {
             "name": fn["name"], "vram": fn["vram"], "rom_offset": fn["rom_offset"], "size": fn["size"],
             "insns": fn["n_insns"], "status": fn["status"], "best": fn["best_score"],
             "asm": self._asm_text(fn, proj),
-            "source": fn["matched_source"] or fn["best_source"] or (latest["source"] if latest else None) or fn["seed"],
-            "source_kind": "matched" if fn["matched_source"] else "best" if fn["best_source"] else
+            "source": fn["matched_source"] or review_source or fn["best_source"] or (latest["source"] if latest else None) or fn["seed"],
+            "source_kind": "matched" if fn["matched_source"] else "reviewed" if review_source else "suspect" if suspect else "best" if fn["best_source"] else
                            "latest" if latest else "draft" if fn["seed"] else None,
             "scores": [{"score": a["score"], "t": a["created_at"], "agent": a["agent"]} for a in attempts],
             "notes": [dict(n) for n in notes],
+            "diagnosis": (dict(plan) | {"stale": plan["basis"] != diagnosis.basis(self, fn)}) if plan else None,
+            "review": ({"verdict": reviewed["verdict"], "evidence": reviewed["evidence"],
+                        "attempt_id": reviewed["attempt_id"], "score": reviewed["measured_score"]} if reviewed else None),
+            "suspect_best": suspect,
             "calls": [syms.label(a) for a in sorted(x["calls"].get(fn["vram"], ()))],
             "called_by": [syms.label(a) for a in sorted(x["called_by"].get(fn["vram"], ()))],
             "set_aside": (json.loads(fn["meta"] or "{}").get("asm_code") or "set aside") if fn["status"] == "asm" else None,

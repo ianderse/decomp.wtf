@@ -18,7 +18,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import experiments, policy, scoring, toolchains
+from . import diagnosis, experiments, policy, scoring, toolchains
 from .compiler import CompileResult, compile_source
 from .elfobj import FunctionObj, Reloc, extract_function
 from .project import compiler_config, toolchain_id, with_toolchain
@@ -79,6 +79,8 @@ STRATEGIES = {
     "biggest": "f.n_insns < 150, f.abandons > 2, COALESCE(json_extract(f.meta, '$.alike_sim'), 0) < 0.7, "
                "COALESCE(CAST(f.best_score AS REAL) / (f.n_insns * 100), 0.5) ASC, f.n_insns DESC",
 }
+
+STRATEGIES.update({lane: STRATEGIES['closest'] for lane in diagnosis.LANES})
 
 
 
@@ -546,7 +548,7 @@ class Network:
         fn = self.claim_row(agent, project, function, strategy)
         if fn is None:
             proj = self._project(project)
-            return f"Nothing left to claim in {proj['slug']} — every open function is matched or claimed. 🎉"
+            return f"No eligible function in {proj['slug']}: open work may be claimed, cooling down, or waiting for new evidence."
         return self.region_note(agent, fn, function) + self._brief(fn, agent, header="CLAIMED")
 
     def region_note(self, agent: Agent, fn, function: str | None = None) -> str:
@@ -589,8 +591,8 @@ class Network:
                 # a session kept to an address range claims in it; with nothing left there, the rest of the game
                 region = self.agent_region.get(agent.id)
                 for bounds in ([region] if region else []) + [None]:
-                    fn = db.execute(
-                        f"""SELECT f.* FROM functions f WHERE f.project_id=? AND f.status='open'
+                    candidates = db.execute(
+                        f"""SELECT f.id FROM functions f WHERE f.project_id=? AND f.status='open'
                             {"AND f.vram >= ? AND f.vram < ?" if bounds else ""}
                             AND f.id NOT IN (SELECT function_id FROM claims)
                             AND f.name NOT IN (SELECT detail FROM events WHERE project_id=? AND agent_id=?
@@ -598,10 +600,19 @@ class Network:
                             ORDER BY f.name IN (SELECT detail FROM events WHERE project_id=? AND agent_id=?
                                                 AND kind='release'),
                                      f.name IN (SELECT detail FROM events WHERE project_id=? AND kind='release'
-                                                AND created_at > ?), {STRATEGIES[strategy]} LIMIT 1""",
+                                                AND created_at > ?), {STRATEGIES[strategy]}""",
                         (proj["id"], *(bounds or ()), proj["id"], agent.id, now - OWN_RELEASE_WINDOW, proj["id"],
                          agent.id, proj["id"], now - RELEASE_COOLDOWN),
-                    ).fetchone()
+                    )
+                    fn = None
+                    try:
+                        for candidate in candidates:
+                            row = db.execute("SELECT * FROM functions WHERE id=?", (candidate['id'],)).fetchone()
+                            if diagnosis.eligible(self, row, strategy):
+                                fn = row
+                                break
+                    finally:
+                        candidates.close()
                     if fn is not None:
                         break
                 if fn is None:
@@ -654,14 +665,23 @@ class Network:
                           "```c", *decls, "```"]
         lines += self._extra_brief(fn, proj)
         if fn["status"] != "matched":
+            lines += diagnosis.brief(self, fn)
+            reviewed, suspect = diagnosis.starting_point(self, fn)
+            if reviewed:
+                lines += ["", f"### Reviewed plausible starting point: attempt {reviewed['attempt_id']}",
+                          f"Reviewer evidence: {reviewed['evidence']}",
+                          f"Historical score {reviewed['score']} at context v{reviewed['context_version']}; "
+                          f"Review-time score {reviewed['measured_score']}; recompile if inputs changed. Review is not proof of equivalence.",
+                          "```c", reviewed['source'].strip(), "```"]
             if fn["best_source"]:
                 lines += ["", f"### Best attempt so far: score {fn['best_score']} by "
-                              f"{self._agent_name(fn['best_agent_id'])} ({fn['attempts']} attempts total) — "
-                              f"start from this", "```c", fn["best_source"].strip(), "```"]
+                              f"{self._agent_name(fn['best_agent_id'])} ({fn['attempts']} attempts total)",
+                          ("SUSPECT: retained for diff evidence; do not use as the starting point." if suspect else
+                           "Lowest measured diff; semantic plausibility is not established by its score."),
+                          "```c", fn["best_source"].strip(), "```"]
             elif fn["seed"]:
-                lines += ["", "### Machine-generated starting point (m2c: expect wrong types and names; "
-                              "the context header helps)", "```c",
-                          fn["seed"].strip(), "```"]
+                lines += ["", "### Machine-generated starting point (check types and names)",
+                          "```c", fn["seed"].strip(), "```"]
         # each note with its author's record: a note by an agent that matched nothing is a guess (a small local model
         # once reported the brief's assembly as "wrong", and the agents after it believed it)
         wins = "(SELECT COUNT(*) FROM functions m WHERE m.matched_agent_id=n.agent_id AND m.status='matched') AS wins"
@@ -701,6 +721,7 @@ class Network:
         self._require_budget(agent)
         fn = self._function(function, project)
         proj = self.store.one("SELECT * FROM projects WHERE id=?", fn["project_id"])
+        diagnosis.require_hypothesis(self, fn, agent, source)
         now = time.time()
 
         # Claim bookkeeping first: you can't score (or get credit) on someone else's function.
@@ -749,6 +770,8 @@ class Network:
             d = scoring.DiffResult(0, d.max_score, d.rows, True)
         matched_now = d.bytes_match and not scratch
         self._record(fn, agent, d.score, source, ctx["version"], matched=matched_now)
+        if not scratch and not matched_now:
+            diagnosis.observe(self, fn, agent, d, problems)
         if matched_now:
             self._remember_match(proj, fn, agent, source)
 

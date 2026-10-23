@@ -218,7 +218,11 @@ def tier_for(state: dict, kind: str = "claude") -> tuple[str, str, str]:
     score: a near miss that outlasted every agent isn't an easy one."""
     table = TIER_TABLES.get(kind, TIERS)
     best = state.get("best_score")
-    if int(state.get("n_insns") or 0) >= BIG_INSNS:
+    worked_over = (int(state.get("abandons") or 0) >= ESCALATE_ABANDONS or
+                   int(state.get("attempts") or 0) >= ESCALATE_ATTEMPTS)
+    if state.get("diagnosis_lane") or (best is None and worked_over):
+        tier = "escalated"
+    elif int(state.get("n_insns") or 0) >= BIG_INSNS:
         tier = "big"
     elif best is None:
         tier = "fresh"
@@ -234,7 +238,7 @@ def tier_for(state: dict, kind: str = "claude") -> tuple[str, str, str]:
 def next_function(net, slug: str, agent_id: int = 0):
     """The function a helper would most likely get from claim_function next (read-only), or None: a claim it holds,
     then the project's ★ pins, then its claim order (the routing's, see Manager._route, or the default)."""
-    from .. import network as netmod
+    from .. import network as netmod, diagnosis
 
     if agent_id:
         held = net.store.one("SELECT f.* FROM claims c JOIN functions f ON f.id=c.function_id WHERE c.agent_id=?", agent_id)
@@ -251,18 +255,24 @@ def next_function(net, slug: str, agent_id: int = 0):
             row = net.store.one("SELECT f.* FROM functions f WHERE f.project_id=? AND f.name=? AND f.status='open' "
                                 f"{inside} AND f.id NOT IN (SELECT function_id FROM claims)", proj["id"], name,
                                 *(bounds or ()))
-            if row is not None:
+            if row is not None and (fork or diagnosis.eligible(net, row, strategy)):
                 return row
-        row = net.store.one(
-            f"""SELECT f.* FROM functions f WHERE f.project_id=? AND f.status='open' {inside}
+        rows = net.store.all(
+            f"""SELECT f.id FROM functions f WHERE f.project_id=? AND f.status='open' {inside}
                 AND f.id NOT IN (SELECT function_id FROM claims)
                 AND f.name NOT IN (SELECT detail FROM events WHERE project_id=? AND agent_id=? AND kind='release'
                                    AND created_at > ?)
                 ORDER BY f.name IN (SELECT detail FROM events WHERE project_id=? AND agent_id=? AND kind='release'),
                          f.name IN (SELECT detail FROM events WHERE project_id=? AND kind='release'
-                                    AND created_at > ?), {netmod.STRATEGIES[strategy]} LIMIT 1""",
+                                    AND created_at > ?), {netmod.STRATEGIES[strategy]}""",
             proj["id"], *(bounds or ()), proj["id"], agent_id, time.time() - netmod.OWN_RELEASE_WINDOW, proj["id"],
             agent_id, proj["id"], time.time() - netmod.RELEASE_COOLDOWN)
+        row = None
+        for candidate in rows:
+            full = net.store.one("SELECT * FROM functions WHERE id=?", candidate['id'])
+            if full is not None and (fork or diagnosis.eligible(net, full, strategy)):
+                row = full
+                break
         if row is not None:
             return row
     return None
@@ -949,6 +959,9 @@ class Manager:
         if fn is not None:
             state, name = {"best_score": fn["best_score"], "n_insns": fn["n_insns"], "attempts": fn["attempts"],
                            "abandons": fn["abandons"]}, fn["name"]
+            from .. import diagnosis
+            if diagnosis.latest(self.net, fn) and (fn["attempts"] >= ESCALATE_ATTEMPTS or fn["abandons"] >= ESCALATE_ABANDONS):
+                state["diagnosis_lane"] = diagnosis.latest(self.net, fn)["category"]
         model, effort, tier = tier_for(state, s.kind)
         if fn is not None:  # a tier experiment: the strongest tier's model, or the cheapest's, instead
             forced = {"strong": "escalated", "cheap": "near_miss"}.get(
@@ -1314,6 +1327,22 @@ def api_tool_schemas(fork: bool = False) -> list[dict]:
     st = lambda desc, req=False: {"type": "string", "description": desc, "req": req}
     it = lambda desc: {"type": "integer", "description": desc}
     defs = {
+        "inspect_candidate": ("List attempt IDs or read one attempt's full source.",
+                              s(function=st("function", True), attempt_id=it("attempt ID; omit to list"))),
+        "record_diagnosis": ("Save measured diagnosis; exhausted pauses automatic rotation until inputs change.",
+                             s(function=st("function", True), category=st("stack | allocation | structural | library | linking", True),
+                               evidence=st("measured evidence", True), next_hypothesis=st("next test or resume condition", True),
+                               exhausted={"type": "boolean"})),
+        "review_candidate": ("Review an existing compiled source as plausible or suspect; does not certify equivalence.",
+                             s(function=st("function", True), attempt_id={"type":"integer", "req":True},
+                               verdict=st("plausible | suspect", True), evidence=st("review evidence", True))),
+        "test_hypothesis": ("Test one candidate; identical source and inputs reuse prior results.",
+                            s(function=st("function", True), source=st("complete C source", True),
+                              hypothesis=st("one measured difference being tested", True))),
+        "test_alternatives": ("Test 1-8 replacements for one unique source region, all from one saved attempt.",
+                              s(function=st("function", True), attempt_id={"type":"integer", "req":True},
+                                old=st("exact unique region", True), replacements={"type":"array", "items":{"type":"string"}, "req":True},
+                                hypothesis=st("what the alternatives test", True))),
         "project_info": ("Which game, compiler and progress.", s()),
         "claim_function": ("Claim the next function (or one by name/address). Returns assembly, data, best attempt, "
                            "notes and a draft. count > 1: a batch of small functions to judge together.",
