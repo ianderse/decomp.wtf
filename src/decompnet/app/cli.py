@@ -481,6 +481,8 @@ def main(argv: list[str] | None = None) -> int:
     po.add_argument("--main", help="the game's main function (default: found from the start-up code)")
     po.add_argument("--no-check", action="store_true", help="don't compile each matched file first to leave out "
                                                             "the ones that fail")
+    po.add_argument("--disc", help="the game's disc image (.bin/.cue/.iso), read in place by the port's CD (saved in "
+                                   "port.json; PSX_DISC overrides it at run time)")
     m = sub.add_parser("mcp", help="serve decomp.wtf to the AI agent you talk to (stdio MCP; starts the app if needed)")
     m.add_argument("--name", default=os.environ.get("DECOMP_AGENT_NAME") or "chat",
                    help="how this agent shows up in the app (e.g. claude-code; or set DECOMP_AGENT_NAME)")
@@ -514,7 +516,8 @@ def main(argv: list[str] | None = None) -> int:
         from ..rom.export_port import PortError, export_port
         net = RomNetwork(home_dir() / ".decomp" / "decomp.db", home_dir())
         try:
-            res = export_port(net, args.project, build=args.build, main=args.main, check=not args.no_check)
+            res = export_port(net, args.project, build=args.build, main=args.main, check=not args.no_check,
+                              disc=args.disc)
         except PortError as e:
             print(f"port: {e}")
             return 1

@@ -6,9 +6,12 @@ On SLUS-01252 it compiles 3,997 of the 4,000 matched files to an arm64 Mach-O, l
 runs the game's main (func_800C27B8) through 16 game functions to func_80176270, still in assembly (libgpu's
 ClearImage by its shape: it calls the GPU table at D_801A1480 with the rect, 8 and the colour). InitGeom's
 handwritten body (func_80178F28, where the first pass stopped) is replayed on the software GTE, and the event and
-critical-section calls answer. With `PSX_PORT_SOFT=1` it goes on through 70 distinct game functions, 5 functions
-still in assembly and 15 Sony stubs before a null pointer from a stub ends it (a null PS1 pointer + 6, in
-func_800FD5BC).
+critical-section calls answer. With `PSX_PORT_SOFT=1` it went on through 70 distinct game functions, 5 functions
+still in assembly and 15 Sony stubs before a null pointer ended it (a null PS1 pointer + 6, in func_800FD5BC: the
+game reads a camera pointer before the camera exists, RAM at 6 on the PS1). With RAM's mirrors mapped and libcd
+over the disc image (`--disc`, below) it goes on through 121: the main loop runs frames, and the game reads
+COMM.IMG, COMM.SND and COMM.DAT from the disc (224, 161 and 33 sectors) before a function whose matched C drops an
+argument hands its callee a host address (func_80104228, under the trace instrumentation; see the next pass).
 No rendering or audio.
 
 ## The design
@@ -111,6 +114,60 @@ No rendering or audio.
 - Homebrew's SDL2 on Apple silicon is arm64 only: the native build's window is SDL2 (sdl2-config); an x86_64 build
   falls back to AppKit (psx/host_cocoa.m), headless otherwise.
 
+## The CD: libcd over the disc image (2026-10-23)
+
+`decomp port <slug> --disc PATH` saves the game's disc image (.bin/.cue/.iso) in port.json and gen/psx_config.c;
+`PSX_DISC` overrides it at run time; the image is read in place, never copied.
+
+- **psx/cd.c** (335 lines, plain C, no runtime dependency): the sector size from the volume descriptor's "CD001" at
+  sector 16 (2048, 2352 Mode 2 or Mode 1, 2448 with subchannel data, as decompnet/rom/psx.py's reader does), a .cue's
+  FILE line, a .chd refused with the chdman command to convert it; whole raw sectors through a 64-sector cache (a
+  2048-byte image's get a made-up Mode 2 Form 1 header), user data per sector mode and form (16/2048, 24/2048,
+  24/2324); ISO 9660 lookup by path (`\` or `/`, `cdrom:` and `;1` optional, any case, directories longer than a
+  sector, nested ones), every file indexed by LBA so the logs name the file a read is in, SYSTEM.CNF's BOOT.
+- **psx/sdk/libcd.c** (661 lines) and **libcd.h** (178): a drive that is deterministic per frame. A command's result
+  is written back at once and its completion (and the sync callback) comes at the next CD event point: a VSync
+  (libetc's frame calls `psx_cd_vblank`) or a CdSync/CdReady/CdReadSync poll. Reads move 2.5 sectors a frame at
+  double speed, 1.25 at single, one per poll, to the end in a blocking wait (`PSX_CD_FAST=1`: a CdRead at once).
+  CdRead writes 2048/2340/2328 bytes a sector straight into the game's buffer and fires the read callback at the end;
+  ReadN/ReadS without a CdRead make a current sector (CdReady reports CdlDataReady, the ready callback fires,
+  CdGetSector copies from it and goes on where it stopped, then the data callback); CdlModeRT routes Form 2 audio
+  sectors through the channel filter to `psx_cd_xa_sector(raw2352)` (a weak no-op until the SPU defines it); CdRead2
+  with CdlModeStream fills the St ring (StSetRing's ring_size x 2016 bytes of frame data, then the 32-byte STR
+  headers; StGetNext/StFreeRing hand frames out oldest first; a frame that doesn't fit is dropped). Commands: Nop,
+  Setloc, Play (logged, CD-DA not played), ReadN/ReadS, Standby/Stop/Pause, Init/Reset, Mute/Demute, Setfilter,
+  Setmode, Getparam, GetlocL/GetlocP, GetTN/GetTD, SeekL/SeekP, Test, GetID. CdSearchFile, CdIntToPos/CdPosToInt,
+  CdMix (kept in `psx_cd_mix` for the SPU), CdReadFile, CdDataSync, CdDiskReady. Callbacks are called through
+  psx_host_fn with their result bytes in a runtime buffer in the window (`psx_runtime_alloc`, 0x7F000000).
+- **Which functions are libcd.** SLUS-01252's libcd is half matched C: CdSync, CdReady, CdControl/F/B, the callback
+  setters are matched wrappers over the drive's internals (CD_cw, CD_sync, getintr: hardware, still assembly), and
+  CdControl's core, CdRead and CdRead2 are assembly; the database names 30 of its functions, not the wrappers. The
+  generator (`libcd_aliases`) takes a libcd function by name, by the library's own name for a second copy (SJ00's
+  CdDataCallback at 0x8006DAD0), and the unnamed ones by their offset from a named one in the same object (CdRead,
+  StClearRing) checked against their code with immediates and jump targets masked (LIBCD_LAYOUT: a different libcd
+  version doesn't match and keeps its stubs). Each becomes the runtime's: a thunk under the game's name in
+  gen/psx_sdk_stubs.c, the matched copy left out of the build (16 files here), the dispatch table pointing at it.
+- **Overlays.** SLUS-01252's eight overlays (SDIC/SMITH/YEND/YGUILD/YPROP/YSEG/YSHOP.BIN at 0x80026000, SJ00.STG at
+  0x8006D800) are byte for byte the export's segments. A finished CdRead logs the overlay it brought in;
+  `PSX_CD_LOAD=SMITH.BIN@0x80026000,SJ00.STG@0x8006D800,YSHOP.BIN@0x80026000,SDIC.BIN@0x80026000` gives 107 of 107,
+  66 of 66, 58 of 58 and 28 of 28 functions resolving to the right overlay through psx_function_at. The game
+  itself reads no overlay before the run ends.
+- **SYSTEM.CNF** boots SLUS_012.52 (LBA 25, 921,600 bytes), whose first 4 KB are the export's baserom.exe.
+- **RAM's mirrors** are mapped now (ram.c, mach_vm_remap of the same pages at KUSEG 0x00000000 and KSEG1
+  0xA0000000): func_800FD5BC's null read is the PS1's behaviour, and libcd's _96_init writes the BIOS's tables at
+  0xA00003E0. `PSX_NULL_FAULT=1` leaves KUSEG unmapped to find null pointers.
+- **From PsyCross** (github.com/OpenDriver2/PsyCross, MIT, at e56e4cd; LICENSE as psx/sdk/LICENSE.PsyCross): 93 of
+  libcd.h's 178 lines are its include/psx/libcd.h (of 262): the CdlMode/CdlStat bits, command numbers, interrupt
+  codes, CdlLOC/CdlFILTER/CdlATV/CdlFILE/StHEADER and the St constants, with u_long made 32-bit; CdIntToPos and
+  CdPosToInt (12 lines of its 1,032-line LIBCD.C); and the shape of the model: CdRead queues and CdReadSync drains
+  (mode 1 returning the sectors left), and its spooler's per-sector order (ready callback with CdlDataReady,
+  CdGetSector from the current sector, then the data callback). Not taken: its image reader (a fixed 2352-byte Mode
+  2 sector; CdSearchFile reads one sector of the root directory at LBA 22, so a deeper or longer directory isn't
+  found), the cue parser (asserts MODE2/2352), the SDL thread that streams ReadS, CdControl/CdControlB/CdControlF
+  (Setloc, ReadS, Pause and Setfilter/Setmode as no-ops; the rest "Unhandled"), CdSync (asserts on mode 0),
+  CdReadCallback/CdSyncCallback/CdComstr (unimplemented), and its St functions, which are prototypes only. CD-XA is
+  on its TODO list; here it is the hook.
+
 ## What the next pass needs
 
 1. **The rest of the CPU side:** ClearImage (func_80176270, unlabelled: the next strict stop), the unlabelled
@@ -123,11 +180,17 @@ No rendering or audio.
    window rule.
 3. **SPU.** libsnd/libspu as stubs today; the SPU's 512 KB, ADPCM voices and the sequencer, through SDL audio or
    CoreAudio.
-4. **CD from the disc image.** CdInit/CdSearchFile/CdRead against the user's .bin/.cue (the project already reads
-   discs for overlays), so the game loads its own overlays and data; overlay code is already compiled in, and
-   psx_function_at picks the one in RAM.
-5. **The window's edges.** RAM's mirrors (KUSEG 0x00000000, KSEG1 0xA0000000) aren't mapped; a game function
-   compared with an int through an 8-byte pointer (2 files, `extern M2C_UNK func_X`) compares with the host address;
-   Linux is untested (nothing there needs the executable in the window any more).
-6. **Checking.** The GTE against hardware traces or a reference, and the matched C against the original by replaying
+4. **Arguments the matched C drops.** An m2c draft that calls `func_800F5120()` from a `void` function matches on
+   the PS1 because `$a0` passes through; on the host it does only while nothing touches x0. `-finstrument-functions`
+   (the trace) loads x0 with the function's own address for `__cyg_profile_func_enter`, so func_80104228 hands
+   func_800F5120 a host code address and the soft run ends there (121 functions). Built without the instrumentation
+   the same tree runs on for 15 s (about 900 frames) in its frame loop and stops advancing at func_800DB780, a state
+   handler still in assembly. A trace hook that keeps the argument registers (`-finstrument-function-entry-bare`
+   with an assembly hook that saves x0-x7 and identifies the function by its return address) would keep both.
+5. **The window's edges.** A game function compared with an int through an 8-byte pointer (2 files, `extern
+   M2C_UNK func_X`) compares with the host address; Linux is untested and maps no mirrors (mach_vm_remap is
+   macOS's; memfd_create would do it there).
+6. **The CD's rest.** CD-DA (CdlPlay) isn't played; XA goes to the SPU's `psx_cd_xa_sector`; the St ring has no
+   MDEC behind it (libpress is stubs); the BIOS's own file calls (B0 open/read on "cdrom:") are stubs.
+7. **Checking.** The GTE against hardware traces or a reference, and the matched C against the original by replaying
    inputs (psx-spx is a reference, not a test).
