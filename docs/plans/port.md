@@ -7,16 +7,20 @@ runs the game's main (func_800C27B8) through 16 game functions to func_80176270,
 ClearImage by its shape: it calls the GPU table at D_801A1480 with the rect, 8 and the colour). InitGeom's
 handwritten body (func_80178F28, where the first pass stopped) is replayed on the software GTE, and the event and
 critical-section calls answer. With `PSX_PORT_SOFT=1` it goes on through 70 distinct game functions, 5 functions
-still in assembly and 15 Sony stubs before a null pointer from a stub ends it (PS1 address 6, in func_800FD5BC).
+still in assembly and 15 Sony stubs before a null pointer from a stub ends it (a null PS1 pointer + 6, in
+func_800FD5BC).
 No rendering or audio.
 
 ## The design
 
 - **PS1 memory in a window of the host's.** PS1 address A is host address PSX_HOST_BASE + A, PSX_HOST_BASE =
-  0x1_0000_0000 (one constant: psx/psx_runtime.h, export_port.py, tools/cc_ptr32.py). RAM is 2 MB at 0x1_8000_0000,
-  the scratchpad at 0x1_1F80_0000, the game's stack 8 MB at 0x1_6000_0000 (the game sees sp as 0x6000xxxx); the
-  low 32 bits of a host pointer into the window are the PS1 address again. The EXE's image is copied to its load
-  address (host 0x1_800C_1400) and bss cleared with the range read from crt0 (constant tracking up to the first
+  0x4_0000_0000 (one constant: psx/psx_runtime.h, export_port.py, tools/cc_ptr32.py; a test checks they agree). RAM
+  is 2 MB at 0x4_8000_0000, the scratchpad at 0x4_1F80_0000, the game's stack 8 MB at 0x4_6000_0000 (the game sees
+  sp as 0x6000xxxx), the game's string literals at 0x4_7000_0000; the low 32 bits of a host pointer into the window
+  are the PS1 address again. The window is clear of everything macOS maps (the executable at 0x1_0000_0000 plus a
+  slide, the dyld shared cache from 0x1_8000_0000 to about 0x2_2B00_0000), and its base is never mapped, so a null
+  PS1 pointer reads 0x4_0000_0000 + offset and faults every time (reported as "a null PS1 pointer + 0xN"). The EXE's
+  image is copied to its load address (host 0x4_800C_1400) and bss cleared with the range read from crt0 (constant tracking up to the first
   backward loop). The runtime goes through `psx_host(uint32_t)` and `psx_ps1(const void *)`.
 - **Data symbols as absolute symbols** (gen/psx_symbols.S, `SYM(D_x) = PSX(0x801A18E0)`): every identifier the C and
   headers use that has an address (symbol_addrs.txt, build.json's symbols, undefined_syms_auto.txt, or the hex in an
@@ -28,16 +32,23 @@ No rendering or audio.
 - **The translation.** tools/cc_ptr32.py is the compiler launcher for those files: C to LLVM IR (-O0, optnone off),
   a text transform, then IR to the object at -O1. On IR where the game's pointers are `ptr addrspace(271)`:
   (1) every load/store/cmpxchg/atomicrmw and llvm.memcpy/memmove/memset through one goes through
-  `inttoptr(ptrtoint(p to i64) | 0x100000000)` (ptrtoint to a wider integer zero-extends), in the p0 form;
-  (2) `addrspacecast` from 271 to an ordinary pointer: the same; (3) `addrspacecast` to 271: the low 32 bits
-  (`ptrtoint to i32`); (4) a game function's address as a 32-bit pointer or integer: its PS1 address, from
+  `inttoptr(ptrtoint(p to i64) | 0x400000000)` (ptrtoint to a wider integer zero-extends; the base has no low
+  bits), in the p0 form; (2) `addrspacecast` from 271 to an ordinary pointer: the same; (3) `addrspacecast` to 271:
+  the low 32 bits (`ptrtoint to i32`), right for the window only, so a string literal of the game's file whose
+  address goes 32-bit is moved there first: renamed to an absolute symbol `__psx_lit_<sha1 of its bytes>`, its bytes
+  left in build/literals; at link time `cc_ptr32.py --collect-literals` lays them out from PS1 0x70000000
+  (build/psx_literals.S: the symbols and the bytes) and the runtime copies them in at start-up. Not in PS1 RAM:
+  SLUS-01252's bss ends at 0x801FFA20, 0x5D0 bytes below the top, and where the game puts its heap is only known at
+  run time. Any other data of a game file whose address goes 32-bit fails the compile (none: across the 3,997
+  files' IR only the 2 string literals are host data the game points at); (4) a game function's address as a 32-bit pointer or integer: its PS1 address, from
   gen/psx_function_addrs.txt; (5) a call through a 32-bit pointer: `psx_host_fn(i32)`, then the call through the
   host pointer it returns; (6) ptrtoint/inttoptr between 271 and i32 stay (PS1 address arithmetic). Constants (raw
   addresses, a symbol's address) are folded as constant expressions; an i32 made into an ordinary pointer is a PS1
   address too. A check after the transform fails the compile if any access through addrspace(271) is left.
 - **Calls through PS1 addresses.** psx_host_fn looks the address up in gen/psx_functions.c (every function with its
-  PS1 address and first two instructions, which tell overlays at one address apart); a host function's truncated
-  address (the executable is in the window) comes back as itself. The SIGSEGV handler that moved a jump into RAM to
+  PS1 address and first two instructions, which tell overlays at one address apart); any other address ends the
+  run with the PS1 address in the message. No host function is ever handed to the game as a pointer (the runtime
+  registers no callbacks yet; one that does needs a PS1 identity of its own in the table). The SIGSEGV handler that moved a jump into RAM to
   the host function stays as a safety net for jumps not made through a 32-bit pointer.
 - **Stubs.** Each function still in assembly: logs and stops (or returns 0 with PSX_PORT_SOFT=1); a handwritten one
   that only sets GTE control registers from constants (mfc0/mtc0 $12, li, ctc2, jr $ra: InitGeom's body) is
@@ -53,22 +64,27 @@ No rendering or audio.
 ## What was measured (Apple clang 21, Homebrew LLVM 22, ld64, macOS 26, M-series)
 
 - **arm64 with the window (2026-10-23).** A 10-line test: `mmap(0x1_8000_0000, 2 MB, MAP_FIXED|MAP_ANON)` succeeds,
-  so does an 8 MB stack at 0x1_6000_0000, and `_D_801A18E0 = 0x1801A18E0` as an absolute symbol in an asm file
+  so does an 8 MB stack at 0x1_6000_0000, and so do 2 MB at 0x4_8000_0000 and 8 MB at 0x4_6000_0000 (the window's
+  base now); `_D_801A18E0 = 0x1801A18E0` as an absolute symbol in an asm file
   links into an arm64 PIE and reads/writes that memory. clang's AArch64 backend takes `__ptr32 __uptr` (address
   space 271; its datalayout has `p271:32:32` like x86's) for loads, stores and GEP, lowered as `mov w8, w0; ldr w8,
   [x8]` (below 4 GB: the zero-extension that must not be used), and fails only on calls through one ("Cannot
   select: AArch64ISD::CALL"), as x86 did; the frontend's IR is the same as x86's. After the transform all 3,997
   files' IR compiles for arm64 (Homebrew clang 22 over the whole tree, then Apple clang 21 in the build).
-- **The shared region.** 0x1_8000_0000 is where macOS's shared region starts; the dyld shared cache is slid into it
-  at boot, and the space before it is a no-access reservation (`mach_vm_region_recurse`: 0x1_8000_0000-0x1_8795_8000
+- **The shared region, and why the base moved to 0x4_0000_0000.** The window was first at 0x1_0000_0000, which put
+  RAM at 0x1_8000_0000, where macOS's shared region starts; the dyld shared cache is slid into it at boot (vmmap: it
+  ended near 0x2_2B00_0000 this boot), and the space before it is a no-access reservation (`mach_vm_region_recurse`: 0x1_8000_0000-0x1_8795_8000
   at protection 0, the cache's first text at 0x1_879E_0000, printf at 0x1_87D1_1964, this boot). A hinted mmap
   there is refused (the kernel won't place it inside the region) but MAP_FIXED works; ram.c uses MAP_FIXED only when
-  every region it would cover is unmapped or no-access, so a boot that slides the cache under RAM is an error, not a
-  clobbered cache. The executable loads at 0x1_0000_0000 plus a small slide (0x1_0049_4460, 0x1_0471_0460,
-  0x1_00FE_C000 across runs) and the host's main stack near 0x1_6758_C000-0x1_6B58_C000: the game's stack tries
-  0x1_6000_0000 first, then lower in the window.
+  every region it would cover is unmapped or no-access (kept as a guard; it shouldn't trigger at 0x4_xxxx_xxxx). RAM
+  fitted only because of the boot's slide. That window also held the executable (0x1_0000_0000 plus a small slide:
+  0x1_0049_4460, 0x1_0471_0460, 0x1_00FE_C000 across runs) and the host's main stack (near 0x1_6758_C000), which let
+  the game's string literals round-trip through 32 bits by luck and put the game's stack next to the host's. At
+  0x4_0000_0000 none of that is near.
 - **SLUS-01252 on arm64:** strict 16 game functions (to func_80176270, libgpu's ClearImage by its shape), soft 70
-  (5 functions in assembly, 15 Sony stubs, then PS1 address 6 in func_800FD5BC). The first pass's x86_64 build got 10
+  (5 functions in assembly, 15 Sony stubs, then a null PS1 pointer + 6 in func_800FD5BC: host 0x4_0000_0006,
+  unmapped), the same at both bases. Its 2 string literals the game points at ("POLYF4", "read retry\n") land at
+  0x4_7000_0000 and 0x4_7000_0008. The first pass's x86_64 build got 10
   (to InitGeom) and 70. The same tree still builds for x86_64 (`-DCMAKE_OSX_ARCHITECTURES=x86_64`, Rosetta 2) at no
   extra cost and runs the same 16 and 70.
 - **History: x86_64 with RAM at 0x80000000 (the first pass).** An arm64 executable linked with `-Wl,-pagezero_size`
@@ -112,6 +128,6 @@ No rendering or audio.
    psx_function_at picks the one in RAM.
 5. **The window's edges.** RAM's mirrors (KUSEG 0x00000000, KSEG1 0xA0000000) aren't mapped; a game function
    compared with an int through an 8-byte pointer (2 files, `extern M2C_UNK func_X`) compares with the host address;
-   on Linux the executable must be linked into the window (`-Ttext-segment=0x100400000`, untested).
+   Linux is untested (nothing there needs the executable in the window any more).
 6. **Checking.** The GTE against hardware traces or a reference, and the matched C against the original by replaying
    inputs (psx-spx is a reference, not a test).

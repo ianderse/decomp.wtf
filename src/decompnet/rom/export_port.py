@@ -4,8 +4,9 @@ against a PS1 runtime layer, links, and runs until the first thing the runtime d
 It builds on the rebuildable tree (export.py): the matched C is used from ../source/src as it is, so a re-export is
 picked up. What it adds, in <project>/port/:
 
-- PS1 memory in a 4 GB window of the host's address space: PS1 address A at PSX_HOST_BASE + A (0x1_0000_0000 + A),
-  so RAM is 2 MB at 0x1_8000_0000, the game's stack is mapped in the window too, and the low 32 bits of a host
+- PS1 memory in a 4 GB window of the host's address space: PS1 address A at PSX_HOST_BASE + A (0x4_0000_0000 + A,
+  clear of the executable and the dyld shared cache), so RAM is 2 MB at 0x4_8000_0000, the game's stack and its
+  string literals are mapped in the window too, and the low 32 bits of a host
   pointer into it are the PS1 address. The executable's image is copied in and its bss cleared, so raw addresses,
   32-bit pointers in the game's data and overlay images all work once the game's accesses are translated: the game's
   files are compiled to LLVM IR and every access through a 32-bit pointer becomes one through zext(p) + PSX_HOST_BASE
@@ -37,7 +38,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 RUNTIME = Path(__file__).with_name("port_runtime")
-PSX_HOST_BASE = 0x100000000  # PS1 address A lives at host PSX_HOST_BASE + A (psx/psx_runtime.h, tools/cc_ptr32.py)
+PSX_HOST_BASE = 0x400000000  # PS1 address A lives at host PSX_HOST_BASE + A (psx/psx_runtime.h, tools/cc_ptr32.py agree)
 RAM_BASE, RAM_SIZE = 0x80000000, 0x200000
 SCRATCH_BASE, SCRATCH_SIZE = 0x1F800000, 0x400
 
@@ -502,6 +503,12 @@ def unmatched_c(unmatched: list[tuple[str, str | None]], renames: dict[str, str]
     return "\n".join(out) + "\n"
 
 
+def _hx(v: int) -> str:
+    """0x4_8000_0000: a host address, grouped as the docs write them."""
+    h = f"{v:X}"
+    return "0x" + (h[:-8] + "_" + h[-8:-4] + "_" + h[-4:] if len(h) > 8 else h)
+
+
 def _c_int(v: int) -> str:
     v &= 0xFFFFFFFF
     return f"(int)0x{v:X}u" if v >= 0x80000000 else f"0x{v:X}"
@@ -621,7 +628,7 @@ def cmakelists(slug: str) -> str:
 cmake_minimum_required(VERSION 3.20)
 
 # Native, for the host's architecture (arm64 on Apple silicon). PS1 memory lives in a 4 GB window of the host's
-# address space (PS1 address A at 0x1_0000_0000 + A, RAM at 0x1_8000_0000), the game's files translated to it by
+# address space (PS1 address A at {_hx(PSX_HOST_BASE)} + A, RAM at {_hx(PSX_HOST_BASE + RAM_BASE)}), the game's files translated to it by
 # tools/cc_ptr32.py; -DCMAKE_OSX_ARCHITECTURES=x86_64 builds the same thing for Rosetta 2. See PORT.md.
 project({re.sub(r'[^A-Za-z0-9_]', '_', slug)}_port C ASM)
 
@@ -665,7 +672,7 @@ endif()
 add_library(game_code OBJECT ${{GAME_COMPILE}})
 if(PSX_PTR32)  # every use of a __ptr32 pointer translated to the window (tools/cc_ptr32.py): IR, patched, compiled
   set_target_properties(game_code PROPERTIES
-                        C_COMPILER_LAUNCHER "${{Python3_EXECUTABLE}};${{CMAKE_CURRENT_SOURCE_DIR}}/tools/cc_ptr32.py;--functions;${{CMAKE_CURRENT_SOURCE_DIR}}/gen/psx_function_addrs.txt")
+                        C_COMPILER_LAUNCHER "${{Python3_EXECUTABLE}};${{CMAKE_CURRENT_SOURCE_DIR}}/tools/cc_ptr32.py;--functions;${{CMAKE_CURRENT_SOURCE_DIR}}/gen/psx_function_addrs.txt;--literals;${{CMAKE_BINARY_DIR}}/literals")
   set_property(SOURCE ${{GAME_COMPILE}} APPEND PROPERTY OBJECT_DEPENDS
                ${{CMAKE_CURRENT_SOURCE_DIR}}/tools/cc_ptr32.py ${{CMAKE_CURRENT_SOURCE_DIR}}/gen/psx_function_addrs.txt)
 endif()
@@ -678,6 +685,16 @@ file(GLOB PSX_RUNTIME ${{CMAKE_CURRENT_SOURCE_DIR}}/psx/*.c ${{CMAKE_CURRENT_SOU
      ${{CMAKE_CURRENT_SOURCE_DIR}}/psx/sdk/*.c)
 list(FILTER PSX_RUNTIME EXCLUDE REGEX "/host_[a-z]+\\\\.(c|m)$")
 file(GLOB PSX_GEN ${{CMAKE_CURRENT_SOURCE_DIR}}/gen/*.c ${{CMAKE_CURRENT_SOURCE_DIR}}/gen/*.S)
+# the game's string literals it holds as 32-bit pointers: tools/cc_ptr32.py moves each to an absolute symbol in the
+# window and leaves its bytes in build/literals; this lays them out (and the runtime copies them in at start-up)
+find_package(Python3 COMPONENTS Interpreter REQUIRED)
+add_custom_command(
+  OUTPUT ${{CMAKE_BINARY_DIR}}/psx_literals.S
+  COMMAND ${{Python3_EXECUTABLE}} ${{CMAKE_CURRENT_SOURCE_DIR}}/tools/cc_ptr32.py --collect-literals
+          ${{CMAKE_BINARY_DIR}}/literals ${{CMAKE_BINARY_DIR}}/psx_literals.S
+  DEPENDS game_code $<TARGET_OBJECTS:game_code> ${{CMAKE_CURRENT_SOURCE_DIR}}/tools/cc_ptr32.py
+  COMMENT "the game's string literals, into the window")
+list(APPEND PSX_GEN ${{CMAKE_BINARY_DIR}}/psx_literals.S)
 
 # the window: SDL2 when it links for this architecture (Homebrew's sdl2-config on Apple silicon: arm64), else AppKit
 if(PSX_HOST STREQUAL "auto")
@@ -738,11 +755,6 @@ if(PSX_HOST STREQUAL "sdl")
   target_link_options(game PRIVATE ${{SDL2_LDFLAGS}})
 elseif(PSX_HOST STREQUAL "cocoa")
   target_link_options(game PRIVATE "SHELL:-framework Cocoa")
-endif()
-if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
-  # the executable in the window too (macOS puts it at 0x1_0000_0000 by itself): the game's string literals and
-  # globals are host memory it holds as 32-bit pointers
-  target_link_options(game PRIVATE -no-pie -Wl,-Ttext-segment=0x100400000)
 endif()
 target_link_libraries(game PRIVATE m)
 """
@@ -1017,7 +1029,10 @@ def build_and_run(port: Path, log=print, seconds: int = 5) -> dict:
     res["configure_log"] = (r.stdout + r.stderr)[-3000:]
     if r.returncode != 0:
         log(res["configure_log"])
-        return res
+        from .export import commit_tree
+    commit_tree(port, f"Port: {report['compiled']} matched files, {report['unmatched']} unmatched stubs, "
+                      f"{len(report['sdk_implemented'])} Sony functions implemented", log)
+    return res
     res["configured"] = True
     res["host"] = (re.search(r"PS1 port: window through (\w+)", r.stdout) or [None, "?"])[1]
     log("cmake: building")
@@ -1169,17 +1184,20 @@ generated from this game). `port.json` has these numbers.
 
 ## How it works, and what was measured (2026-10-23, Apple clang 21, ld64, macOS 26 on Apple silicon)
 
-- **Native arm64, PS1 memory in a window.** PS1 address A lives at host address 0x1_0000_0000 + A
-  (`PSX_HOST_BASE`, `psx_host()`/`psx_ps1()` in `psx/psx_runtime.h`): RAM is 2 MB at 0x1_8000_0000, the scratchpad
-  at 0x1_1F80_0000, the game's stack 8 MB at 0x1_6000_0000 (the game sees sp as 0x6000xxxx), and the low 32 bits of a
-  host pointer into the window are the PS1 address again. The executable's image is copied to 0x{e['load']:08X}
-  (host 0x1_{e['load']:08X}) and bss cleared as crt0 does. The first pass mapped RAM at 0x80000000 itself, which
-  needs a __PAGEZERO under 4 GB: arm64 macOS kills such executables at exec, so that build was x86_64 under
-  Rosetta 2. 0x1_8000_0000 is the start of macOS's shared region, but the dyld shared cache is slid into it at boot
-  and the part before it is a no-access reservation (0x1_8000_0000-0x1_8795_8000 here): RAM is mapped with
-  MAP_FIXED only after checking every region it covers is unmapped or no-access, so a boot whose slide puts the cache
-  under RAM gets an error, never a clobbered cache.
-- **Data symbols are absolute symbols** at 0x1_0000_0000 + their PS1 address (`.globl _D_801A18E0` /
+- **Native arm64, PS1 memory in a window.** PS1 address A lives at host address {_hx(PSX_HOST_BASE)} + A
+  (`PSX_HOST_BASE`, `psx_host()`/`psx_ps1()` in `psx/psx_runtime.h`): RAM is 2 MB at {_hx(PSX_HOST_BASE + RAM_BASE)}, the
+  scratchpad at {_hx(PSX_HOST_BASE + SCRATCH_BASE)}, the game's stack 8 MB at {_hx(PSX_HOST_BASE + 0x60000000)} (the game sees sp as
+  0x6000xxxx), and the low 32 bits of a host pointer into the window are the PS1 address again. The executable's
+  image is copied to 0x{e['load']:08X} (host {_hx(PSX_HOST_BASE + e['load'])}) and bss cleared as crt0 does. The window is clear of
+  everything macOS maps: the executable (0x1_0000_0000 plus a slide) and the dyld shared cache (slid into
+  0x1_8000_0000 and up at boot, ending near 0x2_2B00_0000). An earlier convention put the window at 0x1_0000_0000,
+  inside the shared region (RAM fitted in the no-access space before the cache only because of the boot's slide);
+  ram.c still maps with MAP_FIXED only after checking every region it covers is unmapped or no-access, as a guard.
+  The first pass mapped RAM at 0x80000000 itself, which needs a __PAGEZERO under 4 GB: arm64 macOS kills such
+  executables at exec, so that build was x86_64 under Rosetta 2.
+- **Null pointers fault.** Nothing is mapped at the window's base, so a null PS1 pointer reads
+  {_hx(PSX_HOST_BASE)} + offset and faults every time; the fault handler reports it as "a null PS1 pointer + 0xN".
+- **Data symbols are absolute symbols** at {_hx(PSX_HOST_BASE)} + their PS1 address (`.globl _D_801A18E0` /
   `_D_801A18E0 = PSX(0x801A18E0)`), so each file's own `extern` lands in that RAM. ld accepts them in an arm64 PIE
   and reaches them through the GOT; a tentative definition (`s32 D_801A1A40;`, the way common.h declares small
   globals) with `-fcommon` is overridden by the absolute symbol (ld warns "tentative definition ... replaced by real
@@ -1191,11 +1209,13 @@ generated from this game). `port.json` has these numbers.
   same 32-bit address space 271 as x86), `long` becomes `int`.
 - **The translation (`tools/cc_ptr32.py`).** clang lowers an access through a `__ptr32` pointer with a plain
   zero-extension, below 4 GB, and can't call through one at all. So each game file goes to LLVM IR first and every
-  use of a 32-bit pointer is rewritten: loads, stores and memcpy/memset through one go to `zext(p) | 0x1_0000_0000`
-  (two instructions on arm64: `mov w8, w0; orr x8, x8, #0x100000000`); a host pointer given to the game (a local's
-  address) is its low 32 bits; a game function's address taken in the C is its PS1 address (`gen/psx_function_addrs.txt`),
+  use of a 32-bit pointer is rewritten: loads, stores and memcpy/memset through one go to `zext(p) | {_hx(PSX_HOST_BASE)}`
+  (two instructions on arm64: `mov w8, w0; orr x8, x8, #0x{PSX_HOST_BASE:x}`); a host pointer given to the game (a local's
+  address) is its low 32 bits; a string literal of the game's whose address it takes is moved into the window (an
+  absolute symbol `__psx_lit_<sha1>` at 0x70000000 and up, its bytes copied in at start-up: `build/psx_literals.S`); a game function's address taken in the C is its PS1 address (`gen/psx_function_addrs.txt`),
   so function pointers in RAM are MIPS addresses and compare equal to the game's data; a call through a 32-bit
-  pointer asks the runtime (`psx_host_fn`: the function table, overlays told apart by their code in RAM). 32-bit
+  pointer asks the runtime (`psx_host_fn`: the function table, overlays told apart by their code in RAM; any other
+  address ends the run with it). 32-bit
   address arithmetic stays as it is. All 4000 files' IR goes through it; the same 3 fail as before (their C).
 - **The runtime's side**: a pointer the game passes is a PS1 address (`PSX_PTR`/`psx_host`), and a pointer the
   runtime hands the game must be in the window: RAM, the game's stack, or the PS1 heap (`InitHeap`/`malloc`, in RAM).
@@ -1214,9 +1234,9 @@ generated from this game). `port.json` has these numbers.
   declared as pointers; {sum(hz['pointer_members'].values())} pointer members in {len(ptr)} structs of common.h: {ptr_lines or 'none'};
   members declared `long`: {longs or 'none'}. The rewrite is token-level: a macro that takes a type as a parameter
   (`CAST(T, x)`) keeps 8-byte pointers in its casts (harmless in a cast, wrong in a declaration).
-- **Host memory the game holds**: string literals and globals defined in the game's own files (2 string literals,
-  and common globals no symbol covers) are host memory; they round-trip through 32 bits only because macOS loads the
-  executable at 0x1_0000_0000 plus a small slide, inside the window (the run warns if not). An `int` compared with a
+- **Host memory the game could hold**: only the string literals whose address the game takes are moved into the
+  window (2 in SLUS-01252); any other data defined in a game file whose address goes 32-bit fails the compile
+  (none here: every other global is a tentative definition an absolute symbol replaces). An `int` compared with a
   game function's address in an 8-byte-pointer context (`func_X` declared as data in 2 files) still compares with the
   host address.
 - **Mirrors**: KUSEG (0x00000000) and KSEG1 (0xA0000000) views of RAM aren't mapped; a game that uses them faults.

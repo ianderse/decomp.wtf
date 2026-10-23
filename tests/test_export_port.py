@@ -108,7 +108,7 @@ def test_symbols_at_their_ps1_addresses():
     assert "func_800C27B8" not in s and "VSync" not in s
     asm = ep.symbols_asm(s, p["renames"])
     assert ".globl SYM(D_801AC5B8)\nSYM(D_801AC5B8) = PSX(0x801AC5B8)" in asm
-    assert "#define PSX_HOST_BASE 0x100000000" in asm  # PS1 address A at host 0x1_0000_0000 + A
+    assert f"#define PSX_HOST_BASE 0x{ep.PSX_HOST_BASE:X}" in asm  # PS1 address A at host PSX_HOST_BASE + A
     assert "#define SYM(x) _##x" in asm
 
 
@@ -234,7 +234,7 @@ def test_cmakelists_no_longer_requires_x86_64():
 
 # ---- the IR transform (tools/cc_ptr32.py): the six cases, on hand-written IR like clang's -O0 output
 
-BASE = 4294967296  # PSX_HOST_BASE
+BASE = ep.PSX_HOST_BASE
 FNS = {"func_8017C5F4": 0x8017C5F4}
 
 
@@ -318,6 +318,47 @@ def test_ir_calls_through_a_32_bit_pointer_ask_the_runtime():
     assert "%4 = call i32 @g(i32 noundef 1)" in out  # a direct call written through a cast
     assert "%__p32_3 = call ptr @psx_host_fn(i32 -2145926668)" in out and "call void %__p32_3()" in out
     assert out.count("declare ptr @psx_host_fn(i32)") == 1
+
+
+def test_the_window_base_is_one_constant():
+    import re
+    cc = _tool("cc_ptr32")
+    header = (ep.RUNTIME / "psx" / "psx_runtime.h").read_text()
+    assert cc.PSX_HOST_BASE == ep.PSX_HOST_BASE
+    assert int(re.search(r"#define PSX_HOST_BASE (0x[0-9A-Fa-f]+)ull", header).group(1), 16) == ep.PSX_HOST_BASE
+    assert int(re.search(r"#define PSX_LITERAL_BASE (0x[0-9A-Fa-f]+)u", header).group(1), 16) == cc.PSX_LITERAL_BASE
+    assert ep.PSX_HOST_BASE & 0xFFFFFFFF == 0 and ep.PSX_HOST_BASE >= 0x300000000  # zext | base; past dyld's cache
+
+
+def test_ir_string_literals_the_game_points_at_move_into_the_window(tmp_path):
+    cc = _tool("cc_ptr32")
+    ir = '@.str = private unnamed_addr constant [7 x i8] c"POLYF4\\00", align 1\n' \
+         '@.str.1 = private unnamed_addr constant [3 x i8] c"ok\\00", align 1\n' + \
+         _fn("call void @CdInit_Print(ptr addrspace(271) noundef addrspacecast (ptr @.str to ptr addrspace(271)))",
+             "call void @puts(ptr @.str.1)")
+    lits = {}
+    out = cc.patch(ir, FNS, lits)
+    (sym, data), = lits.items()
+    assert data == b"POLYF4\0" and sym.startswith("__psx_lit_")
+    assert f"@{sym} = external global [7 x i8], align 1" in out and "@.str =" not in out
+    # an absolute symbol in the window, so the 32-bit pointer is its low half
+    assert f"inttoptr (i32 ptrtoint (ptr @{sym} to i32) to ptr addrspace(271))" in out
+    assert "@.str.1 = private" in out and "call void @puts(ptr @.str.1)" in out  # host-only use: stays
+    (tmp_path / f"{sym}.bin").write_bytes(data)
+    (tmp_path / "__psx_lit_0000.bin").write_bytes(b"ab")
+    asm = cc.collect_literals(str(tmp_path))
+    assert f"SYM(__psx_lit_0000) = PSX(0x{cc.PSX_LITERAL_BASE:08X})" in asm
+    assert f"SYM({sym}) = PSX(0x{cc.PSX_LITERAL_BASE + 8:08X})" in asm  # 8-aligned
+    assert "SYM(psx_literal_size): .long 15" in asm and f"#define PSX(a) (0x{BASE:X} + a)" in asm
+    assert "SYM(psx_literal_size): .long 0" in cc.collect_literals(str(tmp_path / "none"))
+    # other data of the file whose address goes 32-bit would be host memory: refused
+    bad = "@tab = internal global [4 x i32] zeroinitializer, align 4\n" + \
+        _fn("store ptr addrspace(271) addrspacecast (ptr @tab to ptr addrspace(271)), ptr %1, align 4")
+    try:
+        cc.patch(bad, FNS)
+        raise AssertionError("expected an IRError")
+    except cc.IRError as e:
+        assert "@tab" in str(e)
 
 
 def test_ir_32_bit_address_arithmetic_stays():

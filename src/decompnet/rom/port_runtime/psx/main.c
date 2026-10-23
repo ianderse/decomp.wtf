@@ -9,9 +9,9 @@
 #include "psx_runtime.h"
 
 /* the game's stack in the window, so its locals' addresses are PS1 addresses (sp 0x6000xxxx): PSX_STACK_TOP, or
- * lower if something else is there (the host's own main stack sits near 0x1_6xxx_xxxx too) */
+ * lower if something else is there (nothing should be) */
 static void *game_stack(uint32_t *bottom) {
-    static const uint32_t tops[] = {PSX_STACK_TOP, 0x50800000u, 0x40800000u, 0x70800000u, 0x30800000u};
+    static const uint32_t tops[] = {PSX_STACK_TOP, 0x50800000u, 0x40800000u, 0x30800000u}; /* not 0x7xxxxxxx: literals */
     size_t i;
     for (i = 0; i < sizeof tops / sizeof tops[0]; i++) {
         void *p = psx_map(tops[i] - PSX_STACK_SIZE, PSX_STACK_SIZE);
@@ -53,12 +53,6 @@ int main(int argc, char **argv) {
         signal(SIGALRM, on_stop);
         alarm((unsigned)atoi(getenv("PSX_TIMEOUT")));
     }
-    /* string literals and globals of the game's files are host memory the game holds as 32-bit pointers: right only
-     * if the executable is in the window too (macOS loads it at 0x1_0000_0000 plus a small slide) */
-    if (!psx_in_window((void *)main) || (uintptr_t)(void *)main >= PSX_HOST_BASE + PSX_SCRATCH_BASE)
-        psx_log("psx: warning: the executable is at %p, outside the window below the scratchpad (0x1_0000_0000-"
-                "0x1_1F80_0000): the game's own string literals and globals won't round-trip through 32 bits\n",
-                (void *)main);
     top = game_stack(&bottom);
     if (!top) {
         fprintf(stderr, "psx: can't map the game's stack anywhere in the window\n");

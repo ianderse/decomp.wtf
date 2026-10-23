@@ -91,8 +91,6 @@ static void log_call(uint32_t addr, const PsxFunction *f) {
 
 NO_TRACE void *psx_host_fn(uint32_t addr) {
     const PsxFunction *f = psx_function_at(addr);
-    Dl_info info;
-    void *host;
     if (f && f->fn) {
         log_call(addr, f);
         return (void *)f->fn;
@@ -103,10 +101,7 @@ NO_TRACE void *psx_host_fn(uint32_t addr) {
                || (addr >= PSX_SCRATCH_BASE && addr < PSX_SCRATCH_BASE + PSX_SCRATCH_SIZE)) {
         psx_log("psx: call into PS1 code at 0x%08X, where no function is known\n", addr);
     } else {
-        /* a host function's address the game kept in 32 bits (the executable is in the window) */
-        host = psx_host(addr);
-        if (dladdr(host, &info) && info.dli_saddr == host) return host;
-        psx_log("psx: call through 0x%08X, which is neither a game function nor a host one\n", addr);
+        psx_log("psx: call through PS1 address 0x%08X, which is no game function\n", addr);
     }
     report_recent();
     psx_exit_report();
@@ -240,11 +235,12 @@ static void on_fault(int sig, siginfo_t *info, void *ctx) {
         ps1_addr = window_addr((uintptr_t)info->si_addr, &in_addr);
         psx_log("psx: %s at address %p (pc %p, in %s)\n", sig == SIGBUS ? "bus error" : "segmentation fault",
                 info->si_addr, (void *)pc, where ? where : "?");
-        if (in_addr)
-            psx_log("psx: that is PS1 address 0x%08X%s\n", ps1_addr,
-                    ps1_addr < 0x10000 ? " (a null pointer's field, in the game's terms)" : "");
-        else if ((uintptr_t)info->si_addr < PSX_HOST_BASE && (uintptr_t)info->si_addr >= 0x10000)
-            psx_log("psx: below the window: a PS1 address used as a host pointer without the translation\n");
+        if (in_addr && ps1_addr < 0x10000)
+            psx_log("psx: that is a null PS1 pointer + 0x%X (the window's base is never mapped)\n", ps1_addr);
+        else if (in_addr)
+            psx_log("psx: that is PS1 address 0x%08X\n", ps1_addr);
+        else if ((uintptr_t)info->si_addr < 0x100000000ull && (uintptr_t)info->si_addr >= 0x10000)
+            psx_log("psx: below 4 GB: a PS1 address used as a host pointer without the translation\n");
     }
     report_recent();
     psx_exit_report();

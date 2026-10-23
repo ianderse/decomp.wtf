@@ -4,41 +4,50 @@ IR, every use of a 32-bit pointer (`ptr addrspace(271)`, a PS1 address) is trans
 convention, and the IR is then compiled to the object.
 
 The convention (psx/psx_runtime.h): PS1 address A lives at host address PSX_HOST_BASE + A (zero-extended), so PS1
-RAM (0x80000000) is at 0x1_8000_0000, the game's stack is mapped in the same 4 GB window, and the low 32 bits of a
-host pointer into the window are the PS1 address again. clang's backends lower an addrspace(271) access with a plain
-zero-extension (below 4 GB, which arm64 macOS can't map) and can't call through one at all ("Cannot select:
-AArch64ISD::CALL" / "X86ISD::CALL"), so nothing in addrspace(271) reaches them except values and arithmetic:
+RAM (0x80000000) is at 0x4_8000_0000, the game's stack is mapped in the same 4 GB window, and the low 32 bits of a
+host pointer into the window are the PS1 address again. The window is clear of everything macOS maps (the
+executable at 0x1_0000_0000, the dyld shared cache from 0x1_8000_0000 to about 0x2_2B00_0000). clang's backends
+lower an addrspace(271) access with a plain zero-extension (below 4 GB, which arm64 macOS can't map) and can't call
+through one at all ("Cannot select: AArch64ISD::CALL" / "X86ISD::CALL"), so nothing in addrspace(271) reaches them
+except values and arithmetic:
 
   1. load/store/cmpxchg/atomicrmw and llvm.memcpy/memmove/memset through an addrspace(271) pointer: the pointer
      becomes inttoptr(ptrtoint(p to i64) | PSX_HOST_BASE) (ptrtoint to a wider integer zero-extends), the access
      the ordinary-pointer form (memcpy.p0.p0 ...);
   2. addrspacecast addrspace(271) -> ptr (the game handing a pointer to code that uses ordinary pointers): the same;
   3. addrspacecast ptr -> addrspace(271) (a host pointer into the game, a local's address): its low 32 bits
-     (ptrtoint to i32 truncates), right for anything in the window, the only memory the runtime may give the game;
+     (ptrtoint to i32 truncates), right for anything in the window, the only memory the runtime may give the game.
+     The game's own string literals whose address it takes this way are host data, outside the window: each moves
+     to a content-addressed absolute symbol (__psx_lit_<sha1>) in the literal region (PSX_LITERAL_BASE), its bytes
+     left in --literals DIR; `cc_ptr32.py --collect-literals DIR OUT.S` lays them out there at link time and the
+     runtime copies them in at start-up;
   4. a game function's address taken as a 32-bit pointer or integer (addrspacecast (ptr @f ...), ptrtoint (ptr @f to
      i32)): the function's PS1 address (from --functions), so function pointers stored in RAM are MIPS addresses,
      round-trip, and compare equal to the ones in the game's data;
-  5. a call through an addrspace(271) pointer: psx_host_fn(i32 address) (the runtime's lookup in the function table;
-     a host function's truncated address comes back as itself) and the call through the host pointer it returns;
+  5. a call through an addrspace(271) pointer: psx_host_fn(i32 address) (the runtime's lookup in the function table)
+     and the call through the host pointer it returns;
   6. ptrtoint/inttoptr between addrspace(271) and i32 stay as they are: PS1 address arithmetic.
 
 A constant (a raw address, a data symbol's address) is translated as a constant expression; a 32-bit integer turned
 into an ordinary pointer (`(T *)0x8002B590` through a macro that kept a plain `*`) is a PS1 address too.
 
 CMake runs it as the C compiler launcher:
-  cc_ptr32.py [--functions FILE] <compiler> <args...> -o <out.o> -c <in.c>
+  cc_ptr32.py [--functions FILE] [--literals DIR] <compiler> <args...> -o <out.o> -c <in.c>
 FILE has one `name 0xADDRESS` line per game function (gen/psx_function_addrs.txt). PSX_KEEP_IR=1 keeps the patched
 .ll next to the object. Standard library only.
 """
 
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 import subprocess
 import sys
 
-PSX_HOST_BASE = 0x100000000
+PSX_HOST_BASE = 0x400000000     # PS1 address A at host PSX_HOST_BASE + A: the one constant (psx/psx_runtime.h agrees)
+PSX_LITERAL_BASE = 0x70000000   # PS1 address of the game's string literals moved into the window
+PSX_LITERAL_SIZE = 0x100000
 AS = "ptr addrspace(271)"
 _NAME = r"[%@](?:[-\w.$]+|\"[^\"]*\")"
 _DEF = re.compile(r"^(\s*)(%[-\w.$]+)\s*=\s*(.*)$")
@@ -330,8 +339,84 @@ class Transform:
         return head + rest[:start] + h + rest[end:]
 
 
-def patch(ir: str, functions: dict[str, int] | None = None) -> str:
-    """The IR of one game file, translated (see the module docstring). functions: {name: PS1 address}."""
+_LIT_DEF = re.compile(r'^(@[-\w.$]+) = (?:private|internal) (?:unnamed_addr )?constant \[(\d+) x i8\] c"((?:[^"\\]|\\[0-9A-Fa-f]{2})*)"(.*)$')
+
+
+def _cstring(body: str) -> bytes:
+    """An LLVM c"..." body as bytes."""
+    out, i = bytearray(), 0
+    while i < len(body):
+        if body[i] == "\\":
+            out.append(int(body[i + 1:i + 3], 16))
+            i += 3
+        else:
+            out += body[i].encode("latin-1")
+            i += 1
+    return bytes(out)
+
+
+def move_literals(ir: str, literals: dict[str, bytes] | None = None) -> str:
+    """Module-local string constants whose address the game takes as a 32-bit pointer or integer: renamed to an
+    external absolute symbol __psx_lit_<sha1 of the bytes> (the literal region, laid out by collect_literals); their
+    bytes go to literals {symbol: bytes}. Any other module-local data whose address goes 32-bit is an error: it would
+    be host memory, outside the window."""
+    escaping = set(re.findall(r"(?:addrspacecast \(?ptr|ptrtoint \(?ptr) (@[-\w.$]+) to (?:ptr addrspace\(271\)|i32)", ir))
+    if not escaping:
+        return ir
+    lines = ir.split("\n")
+    rename: dict[str, str] = {}
+    for k, line in enumerate(lines):
+        m = _LIT_DEF.match(line)
+        if m and m.group(1) in escaping:
+            data = _cstring(m.group(3))
+            if len(data) != int(m.group(2)):
+                raise IRError(f"a string constant this doesn't read: {line[:120]}")
+            sym = "__psx_lit_" + hashlib.sha1(data).hexdigest()[:16]
+            rename[m.group(1)] = sym
+            if literals is not None:
+                literals[sym] = data
+            lines[k] = f"@{sym} = external global [{m.group(2)} x i8], align 1"
+    for name in sorted(escaping - set(rename)):
+        if re.search(rf"^{re.escape(name)} = (?:private|internal) ", ir, re.M):
+            raise IRError(f"{name} is data of this file whose address goes into a 32-bit pointer; only string "
+                          "literals are moved into the window")
+    text = "\n".join(lines)
+    for old, new in rename.items():
+        text = re.sub(re.escape(old) + r"(?![-\w.$])", "@" + new, text)
+    return text
+
+
+def collect_literals(directory: str) -> str:
+    """The literal region as an assembly file: an absolute symbol per literal at PSX_HOST_BASE + its PS1 address in
+    the region, and the region's bytes (psx_literal_image, psx_literal_size) for the runtime to copy in."""
+    names = sorted(n[:-4] for n in os.listdir(directory) if n.endswith(".bin")) if os.path.isdir(directory) else []
+    image, syms = bytearray(), []
+    for n in names:
+        with open(os.path.join(directory, n + ".bin"), "rb") as fh:
+            data = fh.read()
+        image += b"\0" * (-len(image) % 8)
+        syms.append((n, PSX_LITERAL_BASE + len(image)))
+        image += data
+    if len(image) > PSX_LITERAL_SIZE:
+        raise IRError(f"the game's literals take 0x{len(image):X} bytes, more than the region's 0x{PSX_LITERAL_SIZE:X}")
+    out = ["/* the game's string literals that it holds as 32-bit pointers, moved into the window (generated by",
+           " * tools/cc_ptr32.py --collect-literals) */",
+           "#if defined(__APPLE__)", "#define SYM(x) _##x", "#else", "#define SYM(x) x", "#endif",
+           f"#define PSX(a) (0x{PSX_HOST_BASE:X} + a)"]
+    for n, addr in syms:
+        out += [f".globl SYM({n})", f"SYM({n}) = PSX(0x{addr:08X})"]
+    out += [".data", ".p2align 3", ".globl SYM(psx_literal_image)", "SYM(psx_literal_image):"]
+    data = bytes(image) or b"\0"
+    for i in range(0, len(data), 16):
+        out.append("    .byte " + ", ".join(str(b) for b in data[i:i + 16]))
+    out += [".p2align 2", ".globl SYM(psx_literal_size)", f"SYM(psx_literal_size): .long {len(image)}"]
+    return "\n".join(out) + "\n"
+
+
+def patch(ir: str, functions: dict[str, int] | None = None, literals: dict[str, bytes] | None = None) -> str:
+    """The IR of one game file, translated (see the module docstring). functions: {name: PS1 address}; literals
+    receives the string literals moved into the window ({symbol: bytes})."""
+    ir = move_literals(ir, literals)
     t = Transform(functions)
     out = []
     in_fn = False
@@ -393,10 +478,36 @@ def read_functions(path: str | None) -> dict[str, int]:
     return out
 
 
+def _write_literals(directory: str, literals: dict[str, bytes]) -> None:
+    os.makedirs(directory, exist_ok=True)
+    for sym, data in literals.items():
+        path = os.path.join(directory, sym + ".bin")
+        if not os.path.exists(path):  # content-addressed: the same name is the same bytes
+            tmp = f"{path}.{os.getpid()}"
+            with open(tmp, "wb") as fh:
+                fh.write(data)
+            os.replace(tmp, path)
+
+
 def main(argv: list[str]) -> int:
-    functions_file = None
-    if argv[:1] == ["--functions"]:
-        functions_file, argv = argv[1], argv[2:]
+    if argv[:1] == ["--collect-literals"]:
+        text = collect_literals(argv[1])
+        try:
+            with open(argv[2], encoding="utf-8") as fh:
+                if fh.read() == text:
+                    return 0
+        except OSError:
+            pass
+        with open(argv[2], "w", encoding="utf-8") as fh:
+            fh.write(text)
+        return 0
+    functions_file = literals_dir = None
+    while argv[:1] in (["--functions"], ["--literals"]):
+        if argv[0] == "--functions":
+            functions_file = argv[1]
+        else:
+            literals_dir = argv[1]
+        argv = argv[2:]
     cc, args = argv[0], argv[1:]
     if "-c" not in args or "-o" not in args or not any(a.endswith(".c") for a in args):
         return subprocess.call([cc, *args])
@@ -410,8 +521,11 @@ def main(argv: list[str]) -> int:
         return r
     with open(ll, encoding="utf-8") as fh:
         ir = fh.read()
+    literals: dict[str, bytes] = {}
     try:
-        patched = patch(ir, read_functions(functions_file))
+        patched = patch(ir, read_functions(functions_file), literals)
+        if literals_dir and literals:
+            _write_literals(literals_dir, literals)
     except IRError as e:
         print(f"cc_ptr32: {e}", file=sys.stderr)
         return 1

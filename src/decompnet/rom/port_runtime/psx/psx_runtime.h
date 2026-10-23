@@ -32,9 +32,12 @@ const PsxFunction *psx_function_at(uint32_t vram);
 const char *psx_host_name(const void *fn);
 
 /* ---- the memory convention: PS1 address A lives at host address PSX_HOST_BASE + A.
- * PS1 RAM (0x80000000) is mapped at 0x1_8000_0000, the scratchpad (0x1F800000) at 0x1_1F80_0000, the game's stack
- * in the same 4 GB window (0x1_6000_0000: the game sees sp as 0x6000xxxx), and every data symbol is the absolute
- * symbol PSX_HOST_BASE + its PS1 address (gen/psx_symbols.S). The game's own code is translated to this by
+ * PS1 RAM (0x80000000) is mapped at 0x4_8000_0000, the scratchpad (0x1F800000) at 0x4_1F80_0000, the game's stack
+ * in the same 4 GB window (0x4_6000_0000: the game sees sp as 0x6000xxxx), the game's string literals that it holds
+ * as pointers at 0x4_7000_0000 (PSX_LITERAL_BASE), and every data symbol is the absolute symbol PSX_HOST_BASE + its
+ * PS1 address (gen/psx_symbols.S). The window is clear of everything macOS maps: the executable (0x1_0000_0000 plus
+ * a slide), the dyld shared cache (0x1_8000_0000 up to about 0x2_2B00_0000), the host's stacks and heap. Nothing at
+ * the window's base is mapped, so a null PS1 pointer faults. The game's own code is translated to this by
  * tools/cc_ptr32.py: every access through a 32-bit pointer goes to zext(pointer) + PSX_HOST_BASE, and a host
  * pointer handed to the game is its low 32 bits.
  *
@@ -42,14 +45,20 @@ const char *psx_host_name(const void *fn);
  * upper half the ABI leaves undefined): turn it into a host pointer with psx_host() (or PSX_PTR() on a pointer-typed
  * parameter). A pointer you give the game (a return value, a field you fill in) must point into the window: RAM,
  * the game's stack, or psx_malloc's heap in RAM; never host memory from malloc or a host global. A function
- * pointer the game gives you is a PS1 address too: call it through psx_host_fn(). */
-#define PSX_HOST_BASE 0x100000000ull
+ * pointer the game gives you is a PS1 address too: call it through psx_host_fn(). A host function is never handed
+ * to the game as a pointer: one that must be (a callback the runtime registers) needs an entry of its own in
+ * psx_functions with a PS1 address. PSX_HOST_BASE must agree with tools/cc_ptr32.py and export_port.py. */
+#define PSX_HOST_BASE 0x400000000ull
 #define PSX_RAM_BASE 0x80000000u     /* PS1 addresses */
 #define PSX_RAM_SIZE 0x00200000u
 #define PSX_SCRATCH_BASE 0x1F800000u
 #define PSX_SCRATCH_SIZE 0x00010000u /* scratchpad and the I/O ports after it, as plain memory */
 #define PSX_STACK_TOP 0x60800000u    /* the game's stack: 8 MB below this (a fallback lower in the window if taken) */
 #define PSX_STACK_SIZE 0x00800000u
+#define PSX_LITERAL_BASE 0x70000000u /* the game's string literals (tools/cc_ptr32.py --collect-literals) */
+#define PSX_LITERAL_SIZE 0x00100000u
+extern const unsigned char psx_literal_image[];
+extern const uint32_t psx_literal_size;
 
 /* PS1 address -> host pointer (0 stays NULL, so the runtime's null checks still work) */
 static inline void *psx_host(uint32_t addr) {
@@ -65,8 +74,8 @@ static inline int psx_in_window(const void *p) {
 }
 
 /* a PS1 function address (a function pointer from the game's data or code) -> the host function to call: the
- * table's function at that address (overlays told apart by their code in RAM), or a host function whose address
- * was truncated to 32 bits. Calls through the game's function pointers go here (tools/cc_ptr32.py). */
+ * table's function at that address (overlays told apart by their code in RAM); anything else ends the run with the
+ * PS1 address. Calls through the game's function pointers go here (tools/cc_ptr32.py). */
 void *psx_host_fn(uint32_t addr);
 
 /* the PS1 heap in RAM (InitHeap's region, as the BIOS's malloc): memory the runtime may hand the game */

@@ -1,5 +1,5 @@
-/* PS1 RAM in the window: PS1 address A at host PSX_HOST_BASE + A (psx_runtime.h), so 2 MB at 0x1_8000_0000 and the
- * scratchpad at 0x1_1F80_0000. Raw addresses, 32-bit pointers stored in the game's data and overlay images then work
+/* PS1 RAM in the window: PS1 address A at host PSX_HOST_BASE + A (psx_runtime.h), so 2 MB at 0x4_8000_0000 and the
+ * scratchpad at 0x4_1F80_0000; the game's string literals in their region. Raw addresses, 32-bit pointers stored in the game's data and overlay images then work
  * unchanged once tools/cc_ptr32.py has translated the game's accesses. Also the PS1 heap (InitHeap's region). */
 #include <errno.h>
 #include <stdio.h>
@@ -12,9 +12,9 @@
 #if defined(__APPLE__)
 #include <mach/mach.h>
 #include <mach/mach_vm.h>
-/* is everything in [lo, hi) unmapped or a no-access reservation? macOS reserves the shared region from 0x1_8000_0000
- * and slides the dyld shared cache into it at every boot; the part before the cache is such a reservation (measured
- * 2026-10-23: 0x1_8000_0000-0x1_8795_8000 at protection 0, the cache's text from 0x1_879E_0000) */
+/* is everything in [lo, hi) unmapped or a no-access reservation? A guard: the window (0x4_0000_0000 up) is clear of
+ * what macOS maps (the dyld shared cache, slid into 0x1_8000_0000 and up at every boot, ended near 0x2_2B00_0000 on
+ * 2026-10-23), so this should never find anything there. */
 static int only_reserved(uint64_t lo, uint64_t hi) {
     mach_vm_address_t at = lo;
     while (at < hi) {
@@ -60,7 +60,7 @@ static void map_required(uint32_t addr, uint32_t size, const char *what) {
     errno = 0;
     if (!psx_map(addr, size)) {
         fprintf(stderr, "psx: can't map %s at host 0x%llX (PS1 0x%08X, 0x%X bytes): something live is there (%s). "
-                        "The dyld shared cache moves at every boot and the executable at every launch.\n",
+                        "The window is meant to be clear of everything macOS maps.\n",
                 what, (unsigned long long)(PSX_HOST_BASE + addr), addr, size, errno ? strerror(errno) : "in use");
         exit(70);
     }
@@ -107,6 +107,12 @@ void psx_ram_init(void) {
         exit(65);
     }
     memcpy(psx_host(load), exe + off, len);
+    /* the game's string literals it holds as 32-bit pointers (gen'd at link time into psx_literals.S) */
+    if (psx_literal_size) {
+        uint32_t n = (psx_literal_size + 0x3FFFu) & ~0x3FFFu;
+        map_required(PSX_LITERAL_BASE, n, "the game's literals");
+        memcpy(psx_host(PSX_LITERAL_BASE), psx_literal_image, psx_literal_size);
+    }
     free(exe);
     /* as the start-up code does: clear bss */
     memset(psx_host(psx_config.bss_start), 0, psx_config.bss_end - psx_config.bss_start);
