@@ -475,12 +475,16 @@ def main(argv: list[str] | None = None) -> int:
     su.add_argument("--workers", type=int, default=max(2, (os.cpu_count() or 4) - 2), help="compiles at once")
     su.add_argument("--json", help="write the summary (with each function's matching setups) to this file")
     po = sub.add_parser("port", help="PS1: a CMake project that builds the matched C for this computer and runs it "
-                                     "(from the export; no rendering or audio yet)")
+                                     "(from the export; sound through a software SPU, no rendering yet)")
     po.add_argument("project", help="the project's name (its slug, e.g. slus-01252)")
     po.add_argument("--build", action="store_true", help="configure, build and run it (5 s strict, then 5 s with PSX_PORT_SOFT=1)")
     po.add_argument("--main", help="the game's main function (default: found from the start-up code)")
     po.add_argument("--no-check", action="store_true", help="don't compile each matched file first to leave out "
                                                             "the ones that fail")
+    po.add_argument("--sdk-range", action="append", metavar="FROM-TO",
+                    help="an address range (hex, e.g. 8016A000-80172000) whose every function is the SDK's, replaced by "
+                         "the runtime's (repeatable; default: the project's compiler regions that hold Sony functions; "
+                         "'none' for none)")
     m = sub.add_parser("mcp", help="serve decomp.wtf to the AI agent you talk to (stdio MCP; starts the app if needed)")
     m.add_argument("--name", default=os.environ.get("DECOMP_AGENT_NAME") or "chat",
                    help="how this agent shows up in the app (e.g. claude-code; or set DECOMP_AGENT_NAME)")
@@ -514,7 +518,8 @@ def main(argv: list[str] | None = None) -> int:
         from ..rom.export_port import PortError, export_port
         net = RomNetwork(home_dir() / ".decomp" / "decomp.db", home_dir())
         try:
-            res = export_port(net, args.project, build=args.build, main=args.main, check=not args.no_check)
+            res = export_port(net, args.project, build=args.build, main=args.main, check=not args.no_check,
+                              sdk_range=args.sdk_range)
         except PortError as e:
             print(f"port: {e}")
             return 1

@@ -121,13 +121,13 @@ def test_unmatched_and_sdk_stubs():
     assert 'int func_800C2838(void) { return psx_unmatched("func_800C2838"); }' in c
     assert "its C is excluded: expected ';'" in c
     by = {s["name"]: s for s in p["sdk"]}
-    assert by["VSync"]["kind"] == "implemented" and by["SsSeqPlay"]["kind"] == "stub"
+    assert by["VSync"]["kind"] == "implemented" and by["SsSeqPlay"]["kind"] == "implemented"
     assert by["func_8017CF60"]["kind"] == "bios" and all(s["called"] for s in p["sdk"])
     sdk = ep.sdk_stubs_c(p["sdk"], p["renames"])
     assert "VSync" not in sdk                                       # the runtime's own
-    assert 'int SsSeqPlay(void) { return psx_sdk_stub("SsSeqPlay", &calls_SsSeqPlay); }' in sdk
+    assert "SsSeqPlay" not in sdk                                   # libsnd.c's
     assert "void * func_8017CF60(void *a, const void *b, int n) { return psx_bios_memcpy(PSX_PTR(a), PSX_PTR(b), n); }" in sdk
-    assert "/* ---- libsnd */" in sdk
+    assert "/* ---- libapi */" in sdk
 
 
 def test_c_library_names_are_renamed_and_the_dispatch_table():

@@ -61,6 +61,59 @@ IMPLEMENTED = {
     "OpenEvent": "libapi", "CloseEvent": "libapi", "EnableEvent": "libapi", "DisableEvent": "libapi",
     "EnterCriticalSection": "libapi", "ExitCriticalSection": "libapi",
 }
+
+
+def _weak_sdk(path: Path) -> list[str]:
+    """The Sony functions a runtime file defines (`PSX_SDK_WEAK <type> Name(`): libspu.c and libsnd.c."""
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return []
+    return re.findall(r"^PSX_SDK_WEAK\s+[\w\s\*]*?\b(\w+)\s*\(", text, re.M)
+
+
+# the sound stack (psx/sdk/libspu.c over the software SPU in psx/spu.c, psx/sdk/libsnd.c's sequencer): every Sony
+# function those files define
+for _lib in ("libspu", "libsnd"):
+    for _n in _weak_sdk(Path(__file__).with_name("port_runtime") / "psx" / "sdk" / f"{_lib}.c"):
+        IMPLEMENTED.setdefault(_n, _lib)
+
+# Functions of a game's SDK that the database doesn't name, identified from their code (per project slug): the port
+# treats each as the named Sony function (forwarding to the runtime's when it has one, a labelled stub otherwise).
+# SLUS-01252's libsnd range (8016A000-80172000) is Sony's libsnd decompiled as if it were the game's (34 of its 125
+# functions matched); its unnamed entry points the game calls, by their bodies and neighbours:
+SDK_IDENTIFIED = {
+    "slus-01252": {
+        "func_8016A860": ("SsInit", "matched C: `_SsInit(0)`, SSINIT.OBJ's SsInit; the game's sound set-up calls it"),
+        "func_8016A880": ("SsInitHot", "matched C: `_SsInit(1)`"),
+        "func_8016ADB8": ("SsStart", "matched C: `_SsStart(1)` (the tick on the root counter's interrupt)"),
+        "func_8016ADD8": ("SsStart2", "matched C: `_SsStart(0)`; the game's sound set-up calls it after "
+                                      "SsSetTickMode(1)"),
+        "func_8016ADF8": ("SsEnd", "matched C: disables and closes the tick's event unless no tick was started"),
+        "func_8016AE60": ("SsQuit", "matched C: `SpuQuit()`"),
+        "func_8016A10C": ("SsSetSerialAttr", "matched C: (s_num, attr, mode) with 0/1 tests on the first two, one "
+                                             "common-attribute call; between SCSRVOL.OBJ's SsSetRVol and SCSSVOL.OBJ's "
+                                             "SsSetSerialVol, where SCSSATTR.OBJ sorts; the game calls it (0, 0, 1): "
+                                             "CD audio mixed in"),
+        "func_8016A5E4": ("SsSeqClose", "open: clears the score record's 0x3C-0xA4 fields and the sequence's bit in "
+                                        "the open mask D_801A19F0; the game calls it after SsSeqStop"),
+        "func_80171200": ("SsVabClose", "SpuFree(the VAB's SPU address, D_801FF990[vab]), clears its slot in "
+                                        "D_801F4CE8; load_vab_bank calls it before opening the slot again"),
+        "func_801712D8": ("SsVabOpenHead", "matched C: `_SsVabOpenHeadWithMode(addr, vabid, 0, 0)` "
+                                           "(func_80171308); load_vab_bank's first call, failing below 0"),
+        "func_8017170C": ("SsVabTransBody", "load_vab_bank's second call (addr, vabid), compared with vabid"),
+        "func_801717D0": ("SsVabTransCompleted", "matched C: `return SpuIsTransferCompleted(flag)`"),
+        "func_801711DC": ("SsSetMono", "matched C: D_801A1928 = 1, the flag the key-on paths (func_8016E650, "
+                                       "func_8016EFF0) read"),
+        "func_801711F0": ("SsSetStereo", "matched C: D_801A1928 = 0; the game's sound set-up calls it"),
+        "func_80171C1C": ("SsUtReverbOn", "matched C: `SpuSetReverb(1)`"),
+        "func_80171C3C": ("SsUtReverbOff", "matched C: `SpuSetReverb(0)`"),
+        # libspu's, outside the range: in assembly, set aside as library code, not in the database's Sony set
+        "func_8017295C": ("_spu_t", "libspu's transfer/ioctl dispatcher: the SPU registers through D_801A144C, its "
+                                    "strings \"SPU:T/O [%s]\" and \"wait (ioctl/IRQ)\""),
+        "func_8017233C": ("_spu_FsetRXX", "libspu: a read-modify-write of SPUCNT through D_801A144C (26 insns)"),
+    },
+}
 # the BIOS's C library calls (A0 table slot -> wrapper signature) the runtime implements behind the game's stub names
 BIOS_LIBC = {
     "A0_2A": ("void *", "void *a, const void *b, int n", "psx_bios_memcpy(PSX_PTR(a), PSX_PTR(b), n)"),
@@ -184,6 +237,34 @@ def parse_symbol_addrs(text: str) -> list[tuple[str, int, str]]:
     out = []
     for m in re.finditer(r"^\s*(\w+)\s*=\s*(0x[0-9A-Fa-f]+)\s*;[ \t]*(?://(.*))?$", text, re.M):
         out.append((m.group(1), int(m.group(2), 16), (m.group(3) or "").strip()))
+    return out
+
+
+def parse_sdk_range(text: str) -> tuple[int, int]:
+    """"8016A000-80172000" (hex, 0x optional) as (from, to)."""
+    m = re.fullmatch(r"\s*(?:0x)?([0-9A-Fa-f]{1,8})\s*-\s*(?:0x)?([0-9A-Fa-f]{1,8})\s*", text)
+    if not m or int(m.group(1), 16) >= int(m.group(2), 16):
+        raise PortError(f"an SDK range is FROM-TO in hex (8016A000-80172000), not {text!r}")
+    return int(m.group(1), 16), int(m.group(2), 16)
+
+
+def sdk_ranges(regions: list[dict], sony: dict[str, dict]) -> list[tuple[int, int]]:
+    """The address ranges whose every function is the SDK's: the project's compiler regions (an owner sets one where
+    a library was compiled differently from the game, SLUS-01252's libsnd), merged where they touch, each kept only
+    if it holds Sony functions the database names, and starting at the first of them (the owner's round start
+    address can take in the game's own code before the library: SLUS-01252's 0x8016A028 calls CdRead)."""
+    spans = sorted((int(r["from"]), int(r["to"])) for r in regions or [] if r.get("from") is not None and r.get("to"))
+    merged: list[list[int]] = []
+    for lo, hi in spans:
+        if merged and lo <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], hi)
+        else:
+            merged.append([lo, hi])
+    out = []
+    for lo, hi in merged:
+        inside = [s["vram"] for s in sony.values() if s.get("vram") is not None and lo <= s["vram"] < hi]
+        if inside:
+            out.append((min(inside), hi))
     return out
 
 
@@ -391,7 +472,7 @@ def plan(build: dict, sources: dict[str, str], headers: dict[str, str], sony: di
     excluded = excluded or {}
     handwritten = {k: v for k, v in (handwritten or {}).items() if k not in sony}
     fns = build["functions"]
-    compiled = [f for f in fns if f.get("c") and f["c"] not in excluded]
+    compiled = [f for f in fns if f.get("c") and f["c"] not in excluded and not sony.get(f["name"], {}).get("sdk_range")]
     host_c = {f["name"] for f in compiled}
     texts = {p: t for p, t in sources.items() if p not in excluded}
     idents: set[str] = set()
@@ -426,9 +507,13 @@ def plan(build: dict, sources: dict[str, str], headers: dict[str, str], sony: di
     for n in stubbed:
         if n in sony:
             s = sony[n]
-            kind = "implemented" if n in IMPLEMENTED else ("bios" if s.get("bios") in BIOS_LIBC else "stub")
-            sdk.append({"name": n, "lib": IMPLEMENTED.get(n, s["lib"]), "bios": s.get("bios"), "label": s["label"],
-                        "kind": kind, "called": n in calls})
+            # an unnamed Sony function identified as one the runtime implements forwards to it
+            alias = s["label"] if n not in IMPLEMENTED and s["label"] != n and s["label"] in IMPLEMENTED else None
+            kind = ("implemented" if n in IMPLEMENTED else "alias" if alias else
+                    "bios" if s.get("bios") in BIOS_LIBC else "stub")
+            sdk.append({"name": n, "lib": IMPLEMENTED.get(n) or IMPLEMENTED.get(alias) or s["lib"],
+                        "bios": s.get("bios"), "label": s["label"], "kind": kind, "called": n in calls,
+                        "alias": alias, "why": s.get("why")})
     host_fn = host_c | {n for n, _ in unmatched} | {s["name"] for s in sdk} | set(replayed)
 
     explicit: dict[str, int] = {}
@@ -452,12 +537,14 @@ def plan(build: dict, sources: dict[str, str], headers: dict[str, str], sony: di
         if name in by_name or re.match(r"func_[0-9A-F]{8}", name):
             unresolved.append(name)
 
+    aliased = {s["name"] for s in sdk if s["kind"] == "alias"}
     dispatch = []
     for f in fns:
         n = f["name"]
         if n not in host_fn:
             continue
-        kind = 0 if n in host_c else 3 if n in replayed else 1 if n not in sony else (3 if n in IMPLEMENTED else 2)
+        kind = (0 if n in host_c else 3 if n in replayed else 1 if n not in sony else
+                3 if n in IMPLEMENTED or n in aliased else 2)
         dispatch.append({"vram": f["vram"], "rom": f.get("rom"), "name": n, "seg": f["seg"], "kind": kind})
     dispatch.sort(key=lambda d: (d["vram"], d["seg"]))
     renames = {n: f"psx_game_{n}" for n in sorted(host_fn | set(symbols)) if n in RESERVED}
@@ -533,6 +620,7 @@ def _c_string(s: str) -> str:
 
 def sdk_stubs_c(sdk: list[dict], renames: dict[str, str] | None = None) -> str:
     renames = renames or {}
+    declared: set[str] = set()
     out = ["/* Sony's library functions and BIOS call stubs: a logging stub each (the first 20 calls of each), or the",
            " * runtime's implementation of the BIOS's C library calls. The implemented ones (psx/sdk) are not here. */",
            '#include "psx_runtime.h"', '#include "libapi.h"', ""]
@@ -547,6 +635,15 @@ def sdk_stubs_c(sdk: list[dict], renames: dict[str, str] | None = None) -> str:
             if s["kind"] == "bios":
                 ret, params, call = BIOS_LIBC[s["bios"]]
                 out.append(f"{ret} {c}({params}) {{ return {call}; }}{note}")
+            elif s["kind"] == "alias":  # the runtime's function by its Sony name, with whatever the game passed
+                t = s["alias"]
+                if t not in declared:
+                    declared.add(t)
+                    out.append(f"extern int {t}();")
+                args = ", ".join(f"long a{i}" for i in range(8))
+                fwd = ", ".join(f"a{i}" for i in range(8))
+                out.append(f"int {c}({args}) {{ return ((int (*)({', '.join(['long'] * 8)})){t})({fwd}); }}"
+                           f" /* {t}{': ' + _c_string(s['why']) if s.get('why') else ''} */")
             else:
                 out.append(f"static int calls_{s['name']};")
                 label = s["name"] if s["label"] == s["name"] else f"{s['name']} ({s['label']})"
@@ -750,6 +847,7 @@ target_include_directories(game PRIVATE ${{CMAKE_CURRENT_SOURCE_DIR}}/psx ${{CMA
 target_compile_definitions(game PRIVATE PSX_SOURCE_DIR_DEFAULT="${{PSX_SOURCE_DIR}}" SDL_MAIN_HANDLED)
 set_source_files_properties(${{PSX_RUNTIME}} ${{PSX_GEN}} PROPERTIES COMPILE_OPTIONS "-std=gnu11;-O1;-g")
 if(PSX_HOST STREQUAL "sdl")
+  target_compile_definitions(game PRIVATE PSX_AUDIO_SDL=1)  # psx/audio.c: the SPU's mix to SDL2's audio device
   target_compile_options(game PRIVATE ${{SDL2_CFLAGS}} ${{SDL2_CFLAGS_OTHER}})
   target_include_directories(game PRIVATE ${{SDL2_INCLUDE_DIRS}})
   target_link_options(game PRIVATE ${{SDL2_LDFLAGS}})
@@ -901,7 +999,7 @@ def write_runtime(port: Path) -> None:
 
 
 def export_port(net, slug: str, out: Path | None = None, log=print, build: bool = False, main: str | None = None,
-                check: bool = True, run_seconds: int = 5) -> dict:
+                check: bool = True, run_seconds: int = 5, sdk_range: list[str] | None = None) -> dict:
     """Write <project root>/port/ from the project's export (source/), optionally build and run it; returns the
     counts PORT.md reports."""
     proj = net._project(slug)
@@ -916,8 +1014,15 @@ def export_port(net, slug: str, out: Path | None = None, log=print, build: bool 
     port = out or root / "port"
     rows = net.store.all("SELECT name, vram, meta FROM functions WHERE project_id=? AND status='asm' AND "
                          "(meta LIKE '%\"library\"%' OR meta LIKE '%BIOS call stub%')", proj["id"])
-    report = generate(source, port, sony_from_rows(rows), title=proj["name"], slug=slug, log=log, build=build,
-                      main=main, check=check, run_seconds=run_seconds)
+    sony = sony_from_rows(rows)
+    # SDK ranges: given (--sdk-range FROM-TO; "none" for none), else the project's compiler regions that hold Sony
+    # functions (SLUS-01252's libsnd)
+    if sdk_range:
+        ranges = [] if sdk_range == ["none"] else [parse_sdk_range(x) for x in sdk_range]
+    else:
+        ranges = sdk_ranges(cfg.get("regions") or [], sony)
+    report = generate(source, port, sony, title=proj["name"], slug=slug, log=log, build=build,
+                      main=main, check=check, run_seconds=run_seconds, sdk_range=ranges)
     if out is None:  # the project's own port/ (in the owner's repository, if any); not a folder given elsewhere
         from .export import commit_tree
         commit_tree(port, f"Port: {report['compiled']} matched files, {report['unmatched']} unmatched stubs, "
@@ -925,8 +1030,37 @@ def export_port(net, slug: str, out: Path | None = None, log=print, build: bool 
     return report
 
 
+def sdk_functions(build: dict, sony: dict[str, dict], ranges: list[tuple[int, int]],
+                  identified: dict[str, tuple[str, str]]) -> dict[str, dict]:
+    """The Sony set with the SDK ranges' functions in it (every function in a range, matched or not: flagged
+    sdk_range, so its C isn't compiled) and the identified unnamed ones (labelled with their Sony name)."""
+    out = dict(sony)
+    for lo, hi in ranges:
+        libs = [s["lib"] for s in sony.values() if s.get("vram") is not None and lo <= s["vram"] < hi]
+        lib = max(set(libs), key=libs.count) if libs else "libapi"
+        for f in build["functions"]:
+            if not lo <= f["vram"] < hi or not _C_NAME.match(f["name"]):
+                continue
+            n = f["name"]
+            if n in out:
+                out[n] = {**out[n], "sdk_range": True}
+                continue
+            label, why = identified.get(n, (n, None))
+            out[n] = {"lib": lib, "bios": None, "label": label, "objects": [], "vram": f["vram"], "sdk_range": True,
+                      "why": why or f"in the SDK range {lo:08X}-{hi:08X}" + (" (matched C, replaced)" if f.get("c")
+                                                                             else "")}
+    for f in build["functions"]:
+        n = f["name"]
+        if n in identified and n not in out and not f.get("c"):
+            label, why = identified[n]
+            out[n] = {"lib": sony_library(label), "bios": None, "label": label, "objects": [], "vram": f["vram"],
+                      "why": why}
+    return out
+
+
 def generate(source: Path, port: Path, sony: dict[str, dict], title: str, slug: str, log=print, build: bool = False,
-             main: str | None = None, check: bool = True, run_seconds: int = 5, ptr32: bool = True) -> dict:
+             main: str | None = None, check: bool = True, run_seconds: int = 5, ptr32: bool = True,
+             sdk_range: list[tuple[int, int]] | None = None) -> dict:
     t0 = time.time()
     b = json.loads((source / "build.json").read_text(encoding="utf-8"))
     image = (source / b["image"]).read_bytes()
@@ -971,6 +1105,10 @@ def generate(source: Path, port: Path, sony: dict[str, dict], title: str, slug: 
     auto_text = "".join((source / n).read_text(encoding="utf-8") for n in ("undefined_syms_auto.txt",)
                         if (source / n).exists())
     sony = {**sony, **syscall_stubs(b, image, sony)}
+    ranges = list(sdk_range or [])
+    sony = sdk_functions(b, sony, ranges, SDK_IDENTIFIED.get(slug, {}))
+    if ranges:
+        log("SDK ranges (every function in them is the SDK's): " + ", ".join(f"{lo:08X}-{hi:08X}" for lo, hi in ranges))
     p = plan(b, sources, headers, sony, sym_text, auto_text, excluded, handwritten_gte(b, image, set(sony)))
     if main_name not in {d["name"] for d in p["dispatch"]}:
         raise PortError(f"{main_name} isn't a function of this game")
@@ -1004,6 +1142,11 @@ def generate(source: Path, port: Path, sony: dict[str, dict], title: str, slug: 
         "sdk_called": sorted(s["name"] for s in p["sdk"] if s["called"]),
         "replayed": {n: h["label"] for n, h in p["replayed"].items()},
         "sdk_by_lib": {lib: sum(1 for s in p["sdk"] if s["lib"] == lib) for lib in LIBRARIES},
+        "sdk_ranges": [f"{lo:08X}-{hi:08X}" for lo, hi in ranges],
+        "sdk_range_functions": sum(1 for s in sony.values() if s.get("sdk_range")),
+        "sdk_range_replaced": sorted(f["name"] for f in b["functions"] if f.get("c") and
+                                     sony.get(f["name"], {}).get("sdk_range")),
+        "sdk_aliases": {s["name"]: s["alias"] for s in p["sdk"] if s["kind"] == "alias"},
         "symbols": len(p["symbols"]), "renamed": rn, "game_implements": p["game_implements"], "as_data_matched": p["as_data_matched"],
         "as_data_unmatched": p["as_data_unmatched"], "unresolved": p["unresolved"], "hazards": hz,
         "generated_in": round(time.time() - t0, 1),
@@ -1143,7 +1286,8 @@ def port_md(title: str, r: dict) -> str:
 
 Generated by decomp.wtf's port export (`decomp port <project>`) from the exported tree in `../source`. It compiles
 the game's matched C with clang for the host against a PS1 runtime layer, links, and runs the game's main until the
-first thing the runtime doesn't do yet. No rendering or audio yet: the window exists and is cleared each frame.
+first thing the runtime doesn't do yet. No rendering yet: the window exists and is cleared each frame. Sound is a
+software SPU (`psx/spu.c`) under libspu and a host libsnd (`psx/sdk`), mixed to SDL2's audio device.
 
 ## Build and run
 
@@ -1170,6 +1314,8 @@ the default is the host's architecture, arm64 on Apple silicon).
 | Sony functions as logging stubs (`gen/psx_sdk_stubs.c`) | {r['sdk_stubs']} ({sdk_lib}) |
 | BIOS C library calls (memcpy, strlen, rand, ...) implemented behind the game's stub names | {r['sdk_bios']} |
 | Sony functions implemented (`psx/sdk/*.c`) | {len(r['sdk_implemented'])}: {', '.join(r['sdk_implemented'])} |
+| SDK ranges: every function in them is the SDK's (the project's compiler regions holding Sony functions, or `--sdk-range`) | {', '.join(r.get('sdk_ranges') or []) or 'none'}: {r.get('sdk_range_functions', 0)} functions, {len(r.get('sdk_range_replaced') or [])} of them matched C the runtime replaces |
+| Unnamed SDK functions forwarded to the runtime's by their Sony name (`gen/psx_sdk_stubs.c`) | {len(r.get('sdk_aliases') or {})}{': ' + ', '.join(f"`{a}` = {b}" for a, b in (r.get('sdk_aliases') or {}).items()) if r.get('sdk_aliases') else ''} |
 | Handwritten GTE setups replayed on the software GTE (`gen/psx_unmatched.c`) | {len(r.get('replayed') or {})}{': ' + '; '.join(f"`{n}` ({v})" for n, v in (r.get('replayed') or {}).items()) if r.get('replayed') else ''} |
 | Sony functions the matched C calls by name | {len(r['sdk_called'])} |
 | Data symbols at their PS1 address (`gen/psx_symbols.S`) | {r['symbols']} |
@@ -1223,6 +1369,14 @@ generated from this game). `port.json` has these numbers.
   runtime hands the game must be in the window: RAM, the game's stack, or the PS1 heap (`InitHeap`/`malloc`, in RAM).
 - **Calls through the game's function pointers** go through `psx_host_fn`; the SIGSEGV handler that sent a jump
   into RAM to the host function stays as a safety net for jumps from anywhere else.
+- **Sound**: `psx/spu.c` is a software SPU written from psx-spx: 512 KB of SPU RAM, 24 ADPCM voices with the loop
+  flags, ADSR, the 4.12 pitch counter (linear interpolation), fixed volumes, the CD input; its register file is the
+  window's 0x1F801C00, so the game's own stores land in it (KON/KOFF consumed as triggers, ADSRVOL/ENDX written
+  back). `psx/sdk/libspu.c` drives it as Sony's libspu does; `psx/sdk/libsnd.c` is libsnd on the host (VABs, the
+  SEQ sequencer, the voice manager), ticked from the audio thread; the game's libsnd range is an SDK range, so its
+  C (matched or not) is replaced wholesale. `psx/xa.c` decodes XA-ADPCM sectors the CD layer hands it
+  (`psx_cd_xa_sector`). Output: SDL2's audio device, else a real-time thread (`PSX_AUDIO_WAV=file.wav` records it;
+  `PSX_AUDIO=0` none). Not yet: reverb, noise, pitch modulation, vibrato/portamento, SEP files.
 - **GTE**: `psx/gte.c` is a software GTE written from psx-spx (registers and their side effects, RTPS/RTPT, NCLIP,
   AVSZ3/4, MVMVA, SQR, OP, GPF/GPL, DPCS/DPCT, INTPL, DCPL, NCS/NCT, NCCS/NCCT, NCDS/NCDT, CC, CDP, the FLAG bits);
   not compared with hardware yet.
@@ -1248,7 +1402,8 @@ generated from this game). `port.json` has these numbers.
 - **Raw addresses**: {hz['raw_address_casts']} casts of a constant address to a pointer in {hz['raw_address_files']} files; translated like
   any other 32-bit pointer.
 - **Overlays** are compiled into the one executable and share addresses; the game loads their images from the disc,
-  and no CD is emulated yet. **Hardware registers** (0x1F801000 on) are plain memory.
+  and no CD is emulated yet. **Hardware registers** (0x1F801000 on) are plain memory, the SPU's (0x1F801C00) read
+  and written by the software SPU.
 - **Calls nothing answers** (named in the C, but neither matched, a stub nor a symbol):
   {', '.join(f'`{n}`' for n in r['unresolved'][:40]) or 'none'}.
 - **Matched files that don't compile for the host**:{ex_lines or ' none.'}
