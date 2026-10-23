@@ -25,7 +25,8 @@ still in assembly and 15 Sony stubs before a null pointer ended it (a null PS1 p
 game reads a camera pointer before the camera exists, RAM at 6 on the PS1). With RAM's mirrors mapped and libcd
 over the disc image (`--disc`, below) it goes on through 121: the main loop runs frames, and the game reads
 COMM.IMG, COMM.SND and COMM.DAT from the disc (224, 161 and 33 sectors) before a function whose matched C drops an
-argument hands its callee a host address (func_80104228, under the trace instrumentation; see the next pass).
+argument hands its callee a host address (func_80104228, under the trace instrumentation; since the trace keeps the
+argument registers, the run goes on to func_800DB780, still assembly: "Dropped arguments" below).
 No rendering. Sound: a software SPU under libspu and a host libsnd, mixed to SDL2's audio device. With the disc, the
 soft run goes through the game's sound set-up on them and loads COMM.SND's bank (SsVabOpenHead, SsVabTransBody:
 294,944 bytes to SPU RAM) before the same func_800F5120 fault ends it, 114 distinct game functions: the 121 less
@@ -88,8 +89,15 @@ the same bank played through the same code outside the game sounds (below).
   SpuSetTransferStartAddr).
 - **Sound.** psx/spu.c is a software SPU from psx-spx; psx/sdk/libspu.c drives it as Sony's libspu does, and
   psx/sdk/libsnd.c is libsnd on the host (below).
-- **Trace.** The game's files build with `-finstrument-functions`; the run logs the first 200 distinct functions it
-  enters, and on a crash the last 16 (a fault in the window is given as the PS1 address).
+- **Trace.** Opt-in (`decomp port --trace`, `-DPSX_TRACE=ON`, or `PSX_PORT_TRACE=1` at configure time): the run
+  logs the first 200 distinct functions it enters, and on a crash the last 16 (a fault in the window is given as the
+  PS1 address). It used to be `-finstrument-functions`, whose `__cyg_profile_func_enter(fn, site)` call loads x0
+  with the function's address and so broke every matched function that passes an argument through (below). Now
+  tools/cc_ptr32.py --trace puts an inline-asm `bl psx_trace_thunk` first in each game function (the PS1 address in
+  x16, the host function in x17, clobbers x10-x15, lr, q16-q31 and the flags declared); psx/trace.S saves x0-x9,
+  x16-x17 and q0-q15 around the C hook `psx_trace_enter(ps1, fn)`. `~{lr}`, not `~{x30}`: LLVM ignores the
+  latter, so the function got no frame and its `ret` came back to itself. Off by default, the run log still
+  reports what it reaches (unmatched, Sony stubs, calls through PS1 addresses) and the frames it ran.
 
 ## The GPU (2026-10-23)
 
@@ -289,11 +297,12 @@ the same bank played through the same code outside the game sounds (below).
    host (it runs the mixer without output); a listening test against the console.
 4. **Arguments the matched C drops.** An m2c draft that calls `func_800F5120()` from a `void` function matches on
    the PS1 because `$a0` passes through; on the host it does only while nothing touches x0. `-finstrument-functions`
-   (the trace) loads x0 with the function's own address for `__cyg_profile_func_enter`, so func_80104228 hands
-   func_800F5120 a host code address and the soft run ends there (121 functions). Built without the instrumentation
-   the same tree runs on for 15 s (about 900 frames) in its frame loop and stops advancing at func_800DB780, a state
-   handler still in assembly. A trace hook that keeps the argument registers (`-finstrument-function-entry-bare`
-   with an assembly hook that saves x0-x7 and identifies the function by its return address) would keep both.
+   (the trace) loaded x0 with the function's own address for `__cyg_profile_func_enter`, so func_80104228 handed
+   func_800F5120 a host code address and the soft run ended there (121 functions). The trace is now opt-in and keeps
+   the argument registers (Trace, above); with it on or off the soft run gets past func_80104228 and idles in its
+   frame loop for the 15 s (893 frames, see "Dropped arguments" below), stopping advancing at func_800DB780, a state
+   handler still in assembly. That is luck, not a fix: nothing at run time can repair a call that drops an argument,
+   so the generator now lists them (PORT.md, `port/hazards.json`) for the fleet to fix in the C.
 5. **The window's edges.** A game function compared with an int through an 8-byte pointer (2 files, `extern
    M2C_UNK func_X`) compares with the host address; Linux is untested and maps no mirrors (mach_vm_remap is
    macOS's; memfd_create would do it there).
@@ -301,6 +310,43 @@ the same bank played through the same code outside the game sounds (below).
    MDEC behind it (libpress is stubs); the BIOS's own file calls (B0 open/read on "cdrom:") are stubs.
 7. **Checking.** The GTE against hardware traces or a reference, and the matched C against the original by replaying
    inputs (psx-spx is a reference, not a test).
+
+## Dropped arguments (2026-10-23)
+
+**The trace.** Measured on SLUS-01252 with the disc, built from a copy of the 12:22 export, 15 s soft runs. Trace
+on (`--trace`): 109 distinct game functions, 77,719 calls, func_80104228 enters and calls func_800F5120 with its
+argument intact, no fault; 893 frames, the GPU at 894 fills and 1,794 VRAM loads, 6 functions in assembly reached,
+the last func_800DB780. Trace off (the default now): the same path (the same 6 functions in assembly, func_80104228
+reached through its PS1 address, func_800DB780 last), 894 frames, 895 fills, 1,796 loads. Before (`-finstrument-functions`): the segmentation fault in
+func_800F5120 at PS1 address 0x005C4D58 (the low half of func_80104228's host address) after 112 functions.
+tests/test_port_hazards.py has the same case in miniature (`int caller(void) { return callee() + 1; }` with
+`callee(int)`): 3703 through the thunk, something else under -finstrument-functions.
+
+**The list.** `generate()` writes `port/hazards.json` and PORT.md's "Arguments the matched C drops" (call_hazards in
+export_port.py: a regex/bracket scan of the one-function-per-file C, not clang's AST; 0.5 s over 4,005 files). Over
+the 3,935 files the port compiles:
+
+- a. **207 calls in 203 functions pass fewer arguments than the callee's definition takes**: 149 through an
+  unprototyped `M2C_UNK func_X();`, 32 through `(void)`, 16 through a prototype with fewer parameters, 10 with no
+  declaration of the caller's own. In 187 of them the caller's MIPS code leaves the registers untouched from its
+  entry to the call (pass-through: take the argument as a parameter and hand it on); in 20 an earlier call or
+  instruction wrote them first. Most-called callees: func_800FCD34 (26 callers), func_800F5FFC (25), func_800FD044
+  (10), func_800F5120 (8: func_80104228 is one), func_8015CA60 (6), func_800D8F80 (5). Two are against the runtime's
+  own prototypes: func_800F53C0 calls GetTPage with 2 of 4, func_8016A028 calls CdRead with none.
+- b. **1 call with no arguments through an unprototyped table slot** in compiled C (func_800CA600's
+  `(*((M2C_UNK (**)()) (arg0 + 0xD8)))()`); the 12 others in the export are libgpu/libetc/SJ00 code the runtime
+  replaces by its code.
+- c. **156 no-argument calls to functions still in assembly** (88 of them Sony's): no definition, and the database
+  records no signatures (functions.meta has `library`, `alike`, `toolchain`..., not parameters), so
+  the evidence is common.h's prototype or the callee's code: 41 read an argument register before writing it
+  (func_800F67C4, called with `()` from 25 functions, reads $a0), 115 read none, 0 unknown.
+
+A generator-side mitigation isn't possible without changing the C's meaning: a corrected prototype via `-include`
+makes clang demand an argument the caller doesn't have (its own incoming one isn't a named variable in a `void f(void)`),
+and rewriting the caller's parameter list in the port's copy is the same edit the fleet should make in the export,
+minus the match check. So the port runs as it is, and the list is where to act. ps1_diagnostics.audit_call_boundaries
+(another session's, uncommitted at the time) does a per-function lexical audit of the same class from the database;
+this one is export-wide and checks against the callee's definition.
 
 ## Sound (2026-10-23)
 

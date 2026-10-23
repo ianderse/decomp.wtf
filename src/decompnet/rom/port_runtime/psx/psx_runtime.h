@@ -31,6 +31,9 @@ extern const PsxFunction psx_functions[];
 extern const size_t psx_function_count;
 const PsxFunction *psx_function_at(uint32_t vram);
 const char *psx_host_name(const void *fn);
+/* the entry trace (cmake -DPSX_TRACE=ON): psx/trace.S calls it with the argument registers kept */
+void psx_trace_enter(uint32_t ps1, const void *fn);
+int psx_frames(void); /* vertical blanks since start (sdk/libetc.c) */
 
 /* ---- the memory convention: PS1 address A lives at host address PSX_HOST_BASE + A.
  * PS1 RAM (0x80000000) is mapped at 0x4_8000_0000, the scratchpad (0x1F800000) at 0x4_1F80_0000, the game's stack

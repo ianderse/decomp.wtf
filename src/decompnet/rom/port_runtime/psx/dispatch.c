@@ -1,5 +1,6 @@
 /* Calls through the game's function pointers (PS1 addresses) to the host function at that address (psx_host_fn,
- * which tools/cc_ptr32.py puts in front of every such call), and what the run reports: the matched functions it enters (-finstrument-functions on the game's files), the unmatched and Sony
+ * which tools/cc_ptr32.py puts in front of every such call), and what the run reports: the matched functions it enters
+ * (psx_trace_enter, with cmake -DPSX_TRACE=ON: tools/cc_ptr32.py --trace and psx/trace.S), the unmatched and Sony
  * functions it reaches, and where it crashed. */
 #define _XOPEN_SOURCE 700
 #define _DARWIN_C_SOURCE
@@ -116,9 +117,11 @@ static long trace_limit = -1;
 static const void *recent[16];
 static unsigned recent_at;
 
-NO_TRACE void __cyg_profile_func_enter(void *fn, void *site) {
+/* psx_trace_enter: from psx_trace_thunk (psx/trace.S), which tools/cc_ptr32.py --trace (cmake -DPSX_TRACE=ON) calls
+ * first in every game function, every argument register kept. ps1: the function's PS1 address, fn: its host code. */
+NO_TRACE void psx_trace_enter(uint32_t ps1, const void *fn) {
     unsigned long h = ((unsigned long)fn >> 2) % SEEN_SLOTS;
-    (void)site;
+    (void)ps1;
     n_entered++;
     recent[recent_at++ & 15] = fn;
     while (seen[h] && seen[h] != fn) h = (h + 1) % SEEN_SLOTS;
@@ -133,6 +136,13 @@ NO_TRACE void __cyg_profile_func_enter(void *fn, void *site) {
         const char *name = psx_host_name(fn);
         psx_log("trace: enters %s\n", name ? name : "?");
     }
+}
+
+/* -finstrument-functions' hook: only a build with -DPSX_PTR32=OFF -DPSX_TRACE=ON uses it (without the IR pass there
+ * is no thunk). It puts fn in x0, so matched C that passes an argument through breaks under it. */
+NO_TRACE void __cyg_profile_func_enter(void *fn, void *site) {
+    (void)site;
+    psx_trace_enter(0, fn);
 }
 
 NO_TRACE void __cyg_profile_func_exit(void *fn, void *site) { (void)fn; (void)site; }
@@ -172,8 +182,13 @@ void psx_exit_report(void) {
     size_t i;
     static int done;
     if (done++) return;
-    psx_log("psx: summary: %lu calls into %lu distinct game functions; %zu unmatched functions reached; "
-            "%zu Sony functions reached that are stubs\n", n_entered, n_distinct, n_unmatched, n_sdk);
+    if (n_entered)
+        psx_log("psx: summary: %lu calls into %lu distinct game functions; %zu unmatched functions reached; "
+                "%zu Sony functions reached that are stubs\n", n_entered, n_distinct, n_unmatched, n_sdk);
+    else
+        psx_log("psx: summary: the trace is off (cmake -DPSX_TRACE=ON, decomp port --trace); %zu unmatched "
+                "functions reached; %zu Sony functions reached that are stubs\n", n_unmatched, n_sdk);
+    psx_log("psx: %d frames (vertical blanks)\n", psx_frames());
     for (i = 0; i < n_unmatched; i++) psx_log("  unmatched %s\n", unmatched_hit[i]);
     for (i = 0; i < n_sdk; i++) psx_log("  sdk stub %s x%d\n", sdk_hit[i].name, *sdk_hit[i].calls);
     psx_gpu_exit(); /* what was drawn; PSX_PORT_DUMP_VRAM=path writes the VRAM as a PNG */
@@ -182,6 +197,7 @@ void psx_exit_report(void) {
 /* ---- faults: a call into PS1 code is redirected; anything else is reported */
 static void report_recent(void) {
     unsigned i;
+    if (!n_entered) return; /* the trace is off */
     psx_log("psx: the last game functions entered (oldest first):\n");
     for (i = 0; i < 16; i++) {
         const void *fn = recent[(recent_at + i) & 15];
