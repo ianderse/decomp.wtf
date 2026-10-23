@@ -1632,15 +1632,24 @@ class RomNetwork(Network):
         return super().release(agent, function, notes, project)
 
     def edit_context(self, agent: Agent, project: str | None, old: str, new: str, message: str,
-                     function: str | None = None) -> str:
+                     function: str | None = None, sources: dict[int, str] | None = None) -> str:
         self._rom_only(project, "edit_context")
         link = self._link(project)
         if link is None:
-            return super().edit_context(agent, project, old, new, message, function)
+            return super().edit_context(agent, project, old, new, message, function, sources)
+        if sources:
+            raise NetworkError("a room member's header edit can't carry matched sources")
         text = link.call("/collab/context", agent, old=old, new=new, message=message, function=function)
         if text.startswith("✅"):
             link.sync()
         return text
+
+    def replace_match(self, agent: Agent, function: str, source: str, project: str | None = None, note: str = "",
+                      header_old: str | None = None, header_new: str | None = None, message: str = "") -> dict:
+        self._rom_only(project, "replace_match")
+        if self._link(project) is not None:
+            raise NetworkError("replacing a match is for the room's host (its copy judges matches)")
+        return super().replace_match(agent, function, source, project, note, header_old, header_new, message)
 
     def add_note(self, agent: Agent, project: str | None, text: str, function: str | None = None) -> str:
         link = self._link(project)
@@ -1817,6 +1826,7 @@ class RomNetwork(Network):
         many fail at once that the check itself is more likely wrong (RELINK_LIMIT): then they're only listed."""
         proj = self._project(slug)
         version = self._header_stamp(proj["id"])
+        replaced = self._replace_stamp(proj["id"])
         res = self.export_rom(slug, log=log)
         report = {}
         try:
@@ -1861,7 +1871,8 @@ class RomNetwork(Network):
             raw = self._raw_addresses(Path(res["path"]), cfg) if res.get("path") else []
             cfg.setdefault("export", {}).update({
                 "raw_addresses": raw[:300],
-                "context_version": version, "checked_matched": matched, "failures": failures[:200],
+                "context_version": version, "replaced": replaced, "checked_matched": matched,
+                "failures": failures[:200],
                 "reopened": reopened, "acted": act, "differs": len(report.get("differs") or []),
                 "identical": res.get("identical")})
             db.execute("UPDATE projects SET config=? WHERE id=?", (json.dumps(cfg), proj["id"]))
@@ -1905,11 +1916,17 @@ class RomNetwork(Network):
         if not ex.get("checked_matched") and matched:
             return True
         return (abs(matched - (ex.get("checked_matched") or 0)) >= RELINK_EVERY
-                or ex.get("context_version") != self._header_stamp(proj["id"]))
+                or ex.get("context_version") != self._header_stamp(proj["id"])
+                or ex.get("replaced", None) != self._replace_stamp(proj["id"]))
 
     def _header_stamp(self, project_id: int) -> float | None:
         """When any of the project's headers last changed."""
         return self.store.one("SELECT MAX(created_at) AS t FROM context_versions WHERE project_id=?", project_id)["t"]
+
+    def _replace_stamp(self, project_id: int) -> float | None:
+        """When a matched source was last replaced by another (replace_match): the count of matches doesn't move."""
+        return self.store.one("SELECT MAX(created_at) AS t FROM events WHERE project_id=? AND kind='replace'",
+                              project_id)["t"]
 
     def start_relink(self, slug: str) -> None:
         """Keep the rebuilt-game check current while agents work (worker.py: its own process)."""

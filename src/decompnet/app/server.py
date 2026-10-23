@@ -633,6 +633,17 @@ def build(net: RomNetwork, home: Path, port: int, secret: str):
         res = net.attempt(agent, str(data.get("name", "")), str(data.get("source", "")), slug)
         return {"score": res["score"], "matched": res["matched"], "text": res["text"][-4000:]}
 
+    def p_replace(slug, request, data):
+        """You replace a matched function's source with another that matches byte for byte too (decomp
+        fix-passthrough, say); optional header_old/header_new/message edit the shared header in the same call, applied
+        only once the source is proven to match with it. Credit stays with the matcher."""
+        agent, _ = net.local_agent("you")
+        opt = lambda k: None if data.get(k) is None else str(data.get(k))
+        res = net.replace_match(agent, str(data.get("name", "")), str(data.get("source", "")), slug,
+                                note=str(data.get("note", "")), header_old=opt("header_old"),
+                                header_new=opt("header_new"), message=str(data.get("message", "")))
+        return {"replaced": res["replaced"], "score": res["score"], "text": res["text"][-4000:]}
+
     def p_release(slug, request, data):
         agent, _ = net.local_agent("you")
         try:
@@ -695,7 +706,7 @@ def build(net: RomNetwork, home: Path, port: int, secret: str):
                                                         r.query_params.get("which", "latest")), ["GET"]),
         "/api/compiler": (p_compiler, ["POST"]), "/api/export": (p_export, ["POST"]), "/api/open": (p_open, ["POST"]),
         "/api/delete": (p_delete, ["POST"]), "/api/agents/manual": (p_manual, ["POST"]),
-        "/api/try": (p_try, ["POST"]), "/api/release": (p_release, ["POST"]),
+        "/api/try": (p_try, ["POST"]), "/api/replace": (p_replace, ["POST"]), "/api/release": (p_release, ["POST"]),
         "/api/autopilot": (p_autopilot, ["POST"]), "/api/instructions": (p_instructions, ["POST"]),
         "/api/reopen": (p_reopen, ["POST"]),
         "/api/experiments": (p_experiments, ["GET", "POST"]),

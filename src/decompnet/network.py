@@ -794,6 +794,90 @@ class Network:
             warn += "\nwhen linking your code at the function's address:\n" + "\n".join(f"- {p}" for p in problems)
         return {"text": f"{head}\n{d.render()}{warn}{self.stall_note(fn['id'], agent.id)}", "score": d.score, "matched": False}
 
+    def replace_match(self, agent: Agent, function: str, source: str, project: str | None = None, note: str = "",
+                      header_old: str | None = None, header_new: str | None = None, message: str = "") -> dict:
+        """Swap a matched function's source for another that is byte-identical too (attempt() judges a matched
+        function as scratch and never records it, so nothing else can). The new source is compiled with the
+        function's own compiler and the current header and judged exactly as attempt() judges a match (linked at
+        the function's address where the project's targets come from a ROM); only an exact match is taken. The
+        credit stays with whoever matched it; the attempt is recorded (via "replace", score 0), a note says what
+        was replaced and why, and matched_at moves to now so the rebuilt-game check looks at it again.
+
+        header_new (with header_old: an exact-string edit, else appended) changes the shared header in the same
+        call, for a function whose prototype there no longer fits: the source is compiled against the would-be
+        header first, and the edit goes through edit_context (every other matched function checked) only once the
+        source is proven to match. Returns {"replaced", "score", "text"}; on a miss nothing changes."""
+        fn = self._function(function, project)
+        if fn["status"] != "matched":
+            raise NetworkError(f"{fn['name']} isn't matched ({fn['status']}): only a match's source can be replaced; "
+                               "match it first")
+        proj = self.store.one("SELECT * FROM projects WHERE id=?", fn["project_id"])
+        if not source.strip():
+            raise NetworkError("the replacement source is empty")
+        units = self._unit_contexts(proj["id"])
+        unit = self._effective_unit(fn, units)
+        ctx = self._context(proj["id"], unit)
+        header = ctx["header"]
+        edit = header_new is not None and bool((header_old or "").strip() or header_new.strip())
+        if edit:
+            self._require_level(agent, "Editing the shared header")
+            if not message.strip():
+                raise NetworkError("give a short commit message for the header edit")
+            if header_old:
+                from .textedit import replace_once
+
+                header = replace_once(header, header_old, header_new, "the header")
+            else:
+                header = header.rstrip("\n") + "\n\n" + header_new.strip("\n") + "\n"
+        result = self._compile(proj, header, source, fn)
+        where = f"(context v{ctx['version']}{', with the header edit' if edit else ''})"
+        if not result.ok:
+            return {"text": f"❌ NOT REPLACED: compile error {where}\n{result.log.strip()}", "replaced": False,
+                    "score": None}
+        cand, verdict, problems = self._evaluate(fn, proj, result.obj)
+        if cand is None:
+            return {"text": f"❌ NOT REPLACED: the object has no function named `{fn['name']}`.", "replaced": False,
+                    "score": None}
+        if self._hash_only(fn):
+            if cand.fingerprint() != fn["fingerprint"]:
+                return {"text": "❌ NOT REPLACED: it doesn't match the target fingerprint.", "replaced": False,
+                        "score": None}
+        else:
+            d = scoring.diff(self._target_obj(fn, proj), cand)
+            if verdict is not None:
+                d = scoring.DiffResult(0 if verdict else max(1, d.score), d.max_score, d.rows, verdict)
+            if not d.bytes_match:
+                warn = ("\nwhen linking your code at the function's address:\n" + "\n".join(f"- {p}" for p in problems)
+                        if problems else "")
+                return {"text": f"❌ NOT REPLACED: score {d.score} {where}, not byte-identical; the match stays as it "
+                                f"was.\n{d.render()}{warn}", "replaced": False, "score": d.score}
+        version = ctx["version"]
+        if edit:
+            said = self.edit_context(agent, proj["slug"], header_old or "", header_new, message,
+                                     function=fn["name"] if units else None, sources={fn["id"]: source})
+            if not said.startswith("✅"):
+                return {"text": f"❌ NOT REPLACED: the source matches with the header edit, but the edit was refused:\n"
+                                f"{said}", "replaced": False, "score": 0}
+            version = self._context(proj["id"], unit)["version"]
+        now = time.time()
+        why = note.strip() or "no reason given"
+        with self.store.tx() as db:
+            row = db.execute("SELECT status FROM functions WHERE id=?", (fn["id"],)).fetchone()
+            if row is None or row["status"] != "matched":
+                raise NetworkError(f"{fn['name']} stopped being a match meanwhile; nothing replaced")
+            db.execute("INSERT INTO attempts(function_id,agent_id,score,compiled,context_version,source,created_at,via) "
+                       "VALUES(?,?,?,?,?,?,?,?)", (fn["id"], agent.id, 0, True, version, source, now, "replace"))
+            db.execute("UPDATE functions SET attempts=attempts+1, matched_source=?, best_source=?, best_score=0, "
+                       "matched_at=? WHERE id=?", (source, source, now, fn["id"]))
+            db.execute("INSERT INTO notes(project_id,function_id,agent_id,text,created_at) VALUES(?,?,?,?,?)",
+                       (proj["id"], fn["id"], agent.id,
+                        f"Matched source replaced by {agent.name} (still byte-identical; credit stays with "
+                        f"{self._agent_name(fn['matched_agent_id'])}): {why}"[:4000], now))
+            self._event(db, proj["id"], agent.id, "replace", fn["name"])
+        return {"text": f"✅ REPLACED: {fn['name']}'s matched source is the new one (byte-identical"
+                        f"{', header edited' if edit else ''}); credit stays with "
+                        f"{self._agent_name(fn['matched_agent_id'])}.", "replaced": True, "score": 0}
+
     def stall_note(self, function_id: int, agent_id: int, after: int | None = None) -> str:
         """A nudge once an agent's last `after` compiles of a function, in its current claim, didn't beat its best
         in that claim: functions that match mostly do in the first few tries, and the agent's time is better spent
@@ -861,9 +945,10 @@ class Network:
     # -------------------------------------------------------- shared context
 
     def edit_context(self, agent: Agent, project: str | None, old: str, new: str, message: str,
-                     function: str | None = None) -> str:
+                     function: str | None = None, sources: dict[int, str] | None = None) -> str:
         """Exact-string edit of a header. Accepted only if every already-matched function compiled against
-        that header still matches with the new one — that's the project's test suite."""
+        that header still matches with the new one — that's the project's test suite. sources: {function id: its
+        new matched source} judged in place of the stored one and written with the header (replace_match)."""
         self._require_level(agent, "Editing the shared header")
         if function:
             fn = self._function(function, project)
@@ -887,14 +972,16 @@ class Network:
             else:
                 new_header = header.rstrip("\n") + "\n\n" + new.strip("\n") + "\n"
             members = self._matched_using(proj, unit)
-            broken = self.regression_test(proj, new_header, only=members)
+            given = dict(sources or {})
+            broken = self.regression_test(proj, new_header, sources=given, only=members)
             rewrites: dict[int, str] = {}
             if broken:
                 # matched sources often carry their own copy of a declaration (`void f(void);`, `extern s32 D_x;`)
                 # that now conflicts with the header's: without those copies, do they all still match?
-                rewrites = self._drop_own_declarations(proj, new_header, members, broken, new)
+                rewrites = {k: v for k, v in self._drop_own_declarations(proj, new_header, members, broken, new).items()
+                            if k not in given}
                 if rewrites:
-                    still = self.regression_test(proj, new_header, sources=rewrites, only=members)
+                    still = self.regression_test(proj, new_header, sources={**given, **rewrites}, only=members)
                     broken, rewrites = (still, {}) if still else ([], rewrites)
             if broken:
                 listing = "\n".join(f"- {name}: {why}" for name, why in broken[:10])
@@ -903,7 +990,7 @@ class Network:
             with self.store.tx() as db:
                 if self._latest_version(db, proj["id"], unit) != ctx["version"]:
                     continue  # someone else committed meanwhile: re-apply on top and re-test
-                for fid, src in rewrites.items():
+                for fid, src in {**rewrites, **given}.items():
                     db.execute("UPDATE functions SET matched_source=?, best_source=? WHERE id=? AND status='matched'",
                                (src, src, fid))
                 version = self._next_version(db, proj["id"])
