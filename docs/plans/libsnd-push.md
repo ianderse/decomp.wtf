@@ -9,26 +9,27 @@ engine.py, network.py; see the commits of 2026-10-22) and a restart of `decomp s
 average. They are Sony's libsnd (PSY-Q 2.6/3.0 objects around them: SESKON, SCSMVOL, SSINIT, SSCALL, PAUSE), not
 the game's code, and two things kept them stuck:
 
-- **The compiler.** 37 of the 50 carry the old-ASPSX fingerprint (`ori $r, $zero, imm` for `li`). In the same
-  stretch the non-trivial matches came from GCC 2.8.1: with ASPSX 2.34 for code with the fingerprint, plain
-  gcc-2.8.1-psx without it. The hint refresh wanted gcc-2.8.1-psx@2.34 for 39 of them and refused 31, because a
-  best attempt tuned over ~90 compiles for 2.7.2 scores worse under 2.8.1. Agents then kept tuning for 2.7.2, and
-  the notes describe the same diff every time: ra and s0 saved right after the frame is made, the stack restore in
-  the jr delay slot, one instruction more than the target.
+- **The compiler.** Measured on all 50 functions' best attempts under every PS1 setup on hand (28: each GCC from
+  2.6.0 to 2.95.2, plain, with ASPSX 2.21 or 2.34, and -O1; docs/plans/libsnd-survey.py did it, 2026-10-22): GCC 2.6.0,
+  2.6.3 and 2.7.2 with ASPSX 2.34 score best (mean 15% of the worst score, lowest for 29-31 of 50), GCC 2.8.1 is the
+  worst of the old family (31%), 2.91 and 2.95 are far off. 37 of the 50 carry ASPSX 2.34's `ori $r, $zero, imm`
+  for `li`. Two voice setters (func_80170DC8, func_80170EE4) want -O1 (175 and 270 vs 545 and 410). The hint refresh
+  had put 33 of them on gcc-2.8.1-psx@2.34 from 8 matched neighbours of 5-13 instructions, which compile the same
+  under most setups: too small to tell compilers apart. Agents then tuned for 2.8.1 and reported the same diff each
+  time: a CSE'd lui/addiu pointer and lui-$at-indexed table accesses the target has, which 2.8.1 splits.
 - **The data.** 24 of the 50 index the same pointer table (D_801FAD50) through raw casts, each function declaring
   it its own way. None of the region's shared globals is declared in context.h.
 
-Three project learnings (notes 3453, 5019, 5031) tell agents that GCC+maspsx can't produce this code and to
+Three project learnings (notes 3453, 5019, 5031, deleted 2026-10-22) told agents that GCC+maspsx can't produce this code and to
 flag_for_review it. Once the region compiles with 2.8.1 those are wrong; the instructions below override them, and
 they can be deleted (`decomp note delete <id>`).
 
 ## Steps
 
-1. Restart `decomp serve`. The worker's refresh then gives the 37 fingerprinted functions gcc-2.8.1-psx@2.34
-   (change 2: a far-off best attempt no longer blocks the hint). The function page shows "Compiler:" when it has.
-2. Steering > Compiler for an address range: 8016A000 to 80172000, gcc-2.8.1-psx. Hinted functions keep theirs;
-   the other 13 get plain 2.8.1. Best scores are recomputed under the new compiler (expect most to get worse: they
-   were tuned for 2.7.2).
+1. Restart `decomp serve`.
+2. Agents tab > Compiler for an address range: 8016A000 to 80172000, gcc-2.7.2-psx@2.34 (the owner's range replaces
+   the hints); then 80170DC8-80170E94 and 80170EE4-80170F48, gcc-2.7.2-psx/O1. Best scores are recomputed under the
+   new compiler (all 17 that moved first improved).
 3. Paste the instructions below into the project's instructions box.
 4. Start two sessions with the address range 8016A000-80172000: Claude on Opus, high effort, and Codex on Sol,
    high effort, 2-3 functions per session. The first session's first job is the header block (below).
@@ -37,12 +38,12 @@ they can be deleted (`decomp note delete <id>`).
 ## Instructions (paste into the project's instructions box)
 
 ```
-0x8016A000-0x80172000 is Sony's libsnd (PSY-Q 2.6/3.0 era), compiled with GCC 2.8.1: with ASPSX 2.34 where the
-code loads constants with `ori $r,$zero,imm`, plain gcc-2.8.1-psx elsewhere. Each function there now compiles with
-that setup; the earlier learnings saying GCC+maspsx can't produce it are out of date. Do NOT flag_for_review these;
-match them. Their saved best attempts were tuned for 2.7.2: read them for the structure, then recompile under the
-function's own compiler and work from there. Expect 2.8.1 to save ra/s0 right after the frame is made and to put the
-stack restore in the jr delay slot: that is the target's shape, not a mismatch to fight.
+0x8016A000-0x80172000 is Sony's libsnd (PSY-Q 2.6/3.0 era), built with the project's GCC 2.7.2 but the older
+assembler ASPSX 2.34 (constants loaded with `ori $r,$zero,imm`), measured on all 50 functions' best attempts:
+gcc-2.7.2-psx@2.34 (and GCC 2.6.x with it) scores best, GCC 2.8.1 is the worst of the old family. Each function
+there now compiles with that setup (func_80170DC8 and func_80170EE4: -O1); the earlier learnings saying the code
+can't be produced are out of date. Do NOT flag_for_review these; match them. Saved best attempts were tuned under
+other setups: read them for the structure, recompile under the function's own compiler, and work from there.
 
 libsnd's data, declare it ONCE in context.h (edit_context) before working the functions, then use the struct:
 - D_801FAD50: a table of pointers (indexed by the first argument, "sep") to arrays of 0xA8-byte sequence records

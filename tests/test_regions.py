@@ -38,8 +38,8 @@ def _best(net, name):
 
 
 def test_a_compiler_set_for_an_address_range(tmp_path, monkeypatch):
-    """Open functions in the range get it (their best attempts judged again with it); one outside, a matched one
-    and one the hint refresh gave a compiler keep theirs; clearing takes it back, hinted ones still alone."""
+    """Open functions in the range get it (their best attempts judged again with it), one the hint refresh gave a
+    compiler too (the owner's range wins); one outside and a matched one keep theirs; clearing takes it back."""
     hinted = {"toolchain": "gcc-2.8.1-psx", "toolchain_hint": "its code has the ori for li fingerprint"}
     net = _project(tmp_path, [("in_a", 0x8016A000, None, 300, "int a;"), ("in_b", 0x80171FFC, None, 200, "int b;"),
                               ("hinted", 0x8016B000, hinted, 100, "int h;"), ("out", 0x80172000, None, 50, "int o;"),
@@ -59,17 +59,18 @@ def test_a_compiler_set_for_an_address_range(tmp_path, monkeypatch):
         (0x8016A000, 0x80172000, OTHER, 3, 1)]
     assert _meta(net, "in_a") == {"toolchain": OTHER, "region": "8016A000-80172000"}
     assert _meta(net, "no_best")["toolchain"] == OTHER
-    assert _meta(net, "hinted") == hinted and _meta(net, "out") == {} and _meta(net, "in_b") == {}
-    assert compiled == [("in_a", OTHER)] and _best(net, "in_a") == 0
-    assert res["message"] == (f"{OTHER} set for 2 functions at 8016A000-80172000; best scores: 1 better, 0 worse, "
-                              "0 same; 1 kept their hinted compiler")
+    assert _meta(net, "hinted") == {"toolchain": OTHER, "region": "8016A000-80172000"}
+    assert _meta(net, "out") == {} and _meta(net, "in_b") == {}
+    assert sorted(compiled) == [("hinted", OTHER), ("in_a", OTHER)] and _best(net, "in_a") == 0
+    assert res["message"] == (f"{OTHER} set for 3 functions at 8016A000-80172000; best scores: 2 better, 0 worse, "
+                              "0 same; 1 had a hinted compiler or one of their own, replaced")
     assert net.regions("game") == res["regions"]
     assert "set for 8016A000-80172000 by the project's owner" in "\n".join(
         net._extra_brief(net.store.one("SELECT * FROM functions WHERE name='in_a'"), net.project_row("game")))
 
     res = net.set_region("game", "8016A000", "80172000", None)
     assert res["regions"] == [] and json.loads(net.project_row("game")["config"])["regions"] == []
-    assert _meta(net, "in_a") == {} and _meta(net, "hinted") == hinted
+    assert _meta(net, "in_a") == {} and _meta(net, "hinted") == {}
     assert _best(net, "in_a") == 10 * 100  # doesn't compile with the project's compiler: the worst score
 
 

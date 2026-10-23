@@ -2086,7 +2086,10 @@ class RomNetwork(Network):
             toolchain = str(toolchain).strip()
             platform = self.cfg(self._project(slug)).get("platform", "n64")
             toolchains.get(toolchain_id(toolchain))  # a known toolchain (ToolchainError otherwise), like /api/compiler
-            if toolchain_id(toolchain) not in PLATFORM_COMPILERS.get(platform, []):
+            # any compiler of the platform, not only the ones a project starts with: Sony's libraries were built
+            # with older GCCs than the games (SLUS-01252's libsnd: GCC 2.6/2.7 with ASPSX 2.34)
+            ok = PLATFORM_COMPILERS.get(platform, []) + (self._survey_compilers() if platform == "psx" else [])
+            if toolchain_id(toolchain) not in ok:
                 raise ValueError(f"{toolchain} is not a compiler for this platform")
         return lo, hi, toolchain or None
 
@@ -2126,28 +2129,29 @@ class RomNetwork(Network):
 
     def set_region(self, slug: str, lo, hi, toolchain: str | None, log=lambda *_: None) -> dict:
         """The project's owner says which compiler built an address range (a library linked in, built with other
-        tools): every open function in it compiles with that one (functions.meta toolchain + region), unless the
-        hint refresh gave it one from its own code's fingerprint (more specific than a range: kept). toolchain None
-        clears the range: its functions go back to the project's compiler (hinted ones keep theirs). Each function
-        whose compiler changed has its best attempt judged again. The latest range set wins where two overlap."""
+        tools): every open function in it compiles with that one (functions.meta toolchain + region), whatever it
+        had before: a hint from its code's fingerprint, or a compiler set some other way (the owner's range wins:
+        SLUS-01252's libsnd was hinted to gcc-2.8.1-psx@2.34 from 8 matched 5-instruction neighbours, and
+        measured on all 50 functions 2.8.1 was the worst of the old family). toolchain None clears the range: its
+        functions go back to the project's compiler (hinted ones keep theirs). Each function whose compiler
+        changed has its best attempt judged again. The latest range set wins where two overlap."""
         lo, hi, toolchain = self.check_region(slug, lo, hi, toolchain)
         proj = self._project(slug)
         main = self.cfg(proj).get("compiler", {}).get("toolchain")
         span = f"{lo:08X}-{hi:08X}"
-        changed, kept, other = [], 0, 0
+        changed, kept, replaced = [], 0, 0
         with self.store.tx() as db:
             rows = db.execute("SELECT * FROM functions WHERE project_id=? AND status='open' AND vram >= ? AND vram < ? "
                               "ORDER BY vram", (proj["id"], lo, hi)).fetchall()
             for r in rows:
                 meta = json.loads(r["meta"] or "{}")
-                if meta.get("toolchain_hint"):
-                    kept += 1
-                    continue
-                if meta.get("toolchain") and not meta.get("region"):
-                    other += 1  # a compiler of its own some other way (by hand, a tool): not ours to change
+                if not toolchain and meta.get("toolchain_hint"):
+                    kept += 1  # clearing a range doesn't take away what the code's own fingerprint says
                     continue
                 before = meta.get("toolchain") or main
                 if toolchain:
+                    if meta.pop("toolchain_hint", None) or (meta.get("toolchain") and not meta.get("region")):
+                        replaced += 1
                     meta["toolchain"], meta["region"] = toolchain, span
                 else:
                     meta.pop("toolchain", None)
@@ -2182,12 +2186,12 @@ class RomNetwork(Network):
                 log(f"{fn['name']}: {e}")
                 after = fn["best_score"]
             moved[self._moved(fn["best_score"], after)] += 1
-        n = len(rows) - kept - other
+        n = len(rows) - kept
         what = (f"{toolchain} set for {n} functions at {span}" if toolchain
                 else f"compiler for {span} back to the project's {main} for {n} functions")
         scores = f"; best scores: {moved['better']} better, {moved['worse']} worse, {moved['same']} same" if moved else ""
         rest = "".join([f"; {kept} kept their hinted compiler" if kept else "",
-                        f"; {other} kept a compiler of their own" if other else ""])
+                        f"; {replaced} had a hinted compiler or one of their own, replaced" if replaced else ""])
         detail = what + scores + rest
         with self.store.tx() as db:
             self._event(db, proj["id"], None, "autopilot", detail)
