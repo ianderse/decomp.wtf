@@ -494,13 +494,22 @@ def test_a_patch_replaces_the_exports_file(tmp_path):
     assert "GAME_PATCH_${_s}" in ep.cmakelists("x") and "--patches" in ep.cmakelists("x")
 
 
-def test_a_stale_or_unmatched_patch_is_an_error(tmp_path):
+def test_a_patch_for_an_unmatched_function_is_its_c(tmp_path):
+    pdir = tmp_path / "patches"
+    pdir.mkdir()
+    (pdir / "func_80156FF0.c").write_text(PATCH.replace("func_8002B68C", "func_80156FF0"))
+    got = ep.find_patches(pdir, PATCH_FUNCTIONS)
+    assert [(x["name"], x["path"], x["unmatched"]) for x in got] == [("func_80156FF0", "src/main/func_80156FF0.c",
+                                                                      True)]
+    assert "(its C: still assembly in the export)" in ep.patches_md(got)
+
+
+def test_a_stale_patch_is_an_error(tmp_path):
     import re
 
     import pytest
     for rel, text, why in [
         ("func_8002B000.c", PATCH.replace("func_8002B68C", "func_8002B000"), "the patch is stale"),
-        ("func_80156FF0.c", PATCH.replace("func_8002B68C", "func_80156FF0"), "not matched"),
         ("func_80028724.c", PATCH.replace("func_8002B68C", "func_80028724"), "patches/<segment>/func_80028724.c"),
         ("ovl_yend/func_8002B68C.c", PATCH, "in segment ovl_yend"),
         ("func_8002B68C.c", "#include \"common.h\"\nvoid func_8002B68C(void) {}\n", "comment block"),

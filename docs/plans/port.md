@@ -1,6 +1,10 @@
 # PS1 export for port: the game's matched C on the host
 
-Status (2026-10-23): native arm64. `decomp port <slug> [--build] [--main NAME]` (src/decompnet/rom/export_port.py,
+Status (2026-10-24): **the intro movie plays.** The soft run reaches XMV/A2MV24.STR, streams it through the St
+ring and decodes it with libpress over a software MDEC (psx/mdec.c): 385 frames in 30 s, 15.0 a second, the first
+at vblank 260, every frame LoadImage'd strip by strip into VRAM and shown 24-bit; the vblank count goes on climbing
+(1,798 at 30 s, 4,497 at 75 s with the movie still running); the XA soundtrack plays alongside it (the WAV's peak
+31,199, RMS 5,000-8,000 from 4 s on). "Movies" below. Before that (2026-10-23): native arm64. `decomp port <slug> [--build] [--main NAME]` (src/decompnet/rom/export_port.py,
 the runtime in src/decompnet/rom/port_runtime/) writes `<project>/port/`, a CMake project over the exported tree.
 **All three together (2026-10-23, the merge of the GPU, CD and sound branches, `--disc` the Arc the Lad II .bin,
 built from a copy of the 12:22 export):** 3,968 matched files compiled (4,005 in the export: 3 don't compile, the
@@ -283,6 +287,61 @@ the same bank played through the same code outside the game sounds (below).
   CdReadCallback/CdSyncCallback/CdComstr (unimplemented), and its St functions, which are prototypes only. CD-XA is
   on its TODO list; here it is the hook.
 
+## Movies: libpress over a software MDEC (2026-10-24)
+
+**The game's STR player** (main's func_800DD7B4 state, the overlay ovl_sj00 = SJ00.STG at 0x8006D800 linked with
+its own copy of libpress and libetc's callbacks): func_800DDB0C resets the MDEC (0x8006E614, MDEC_reset(0)), sets
+DecDCToutCallback(func_800DDF20), seeks the movie (CdlSeekL), StSetRing(0x800AA000, 32 sectors) and
+StSetStream(1 = 24-bit, frames 1..0x0FFFFFFF), CdRead2(0x1C0: double speed, real-time XA, streaming), then VLC-decodes
+the first frame. Each frame after (func_800DD85C -> func_800DDDB4): DecDCTin(the last VLC'd buffer, 3 = 24-bit),
+DecDCTout(the strip buffer 0x800A7000, 24 x 240 / 2 words: one 16-pixel column strip), DecDCToutSync; the callback
+LoadImage's the strip at x, moves x on by 24 halfwords and starts the next DecDCTout, and after 20 strips (480
+halfwords = 320 24-bit pixels) sets D_801A3EF4 and flips buffers; meanwhile func_800DE058 fetches the next frame
+(func_800DE0E8 spins on StGetNext up to 8M times with nothing else in the loop, checks the frame's first two words
+against the sector header's copy, ends the movie at the frame count in D_80185114), DecDCTvlc's it (0x8006E4F8)
+into the other buffer and StFreeRing's it; func_800DE268 spins on D_801A3EF4. Start (pad 0x800) stops it.
+
+**The stream**: A2MV24.STR is 320x240, BS v2, quant 1, 9 or 10 video sectors a frame plus one XA sector (file 1
+channel 1, stereo 37.8 kHz) in every 8: 10 sectors a frame at 150 sectors a second is 15 frames a second. Video
+sectors (Mode 2 Form 1, sub-mode 0x48) carry the 32-byte STR header (0x0160, 0x8001, chunk, chunks, frame, size,
+width, height, the BS header's first two words) and 2016 bytes; libcd's St ring puts a frame's chunks back to back
+and StGetNext hands out the oldest complete frame. XA sectors (Form 2, audio) go to `psx_cd_xa_sector` as before.
+What was missing: the player spins on StGetNext while the CD interrupt fills the ring, so StGetNext now waits for
+the next vertical blank when nothing is ready and the drive is streaming (psx_vblank_wait: present, the CD's 2.5
+sectors, the vblank callbacks), which paces the movie at the disc's speed; after 600 vblanks with no frame it stops
+waiting.
+
+**libpress** (psx/sdk/libpress.c, written from psx-spx's MDEC and BS sections): DecDCTvlc (BS v1/v2/v3: DC as 10
+bits or v3's Huffman differences, AC by psx-spx's table, escape + 16 raw bits, end of frame; resumable with
+DecDCTvlcSize), DecDCTin (the mode bits into MDEC(1)'s command word as the overlay's copy does; MDEC(2)/(3) commands
+load the tables), DecDCTout (rl_decode_block, the IDCT with the scale matrix, yuv_to_rgb, 15/24-bit or mono, rows of
+16 pixels a macroblock), DecDCTReset/MDEC_reset (the standard quant table, which is what the overlay uploads, and the
+scale matrix), Get/PutEnv, the *Sync calls (nothing to wait for) and both callbacks. The out-callback runs at the end
+of DecDCTout on the main thread; one that starts the next DecDCTout is queued, not nested, so the whole frame's
+strips are decoded and loaded before the first DecDCTout returns, and the spin on D_801A3EF4 finds it set. The
+overlay's API wrappers (matched m2c drafts that drop their arguments) and MDEC_reset are aliases to the runtime's
+through SDK_IDENTIFIED (which now takes matched functions too); DecDCToutCallback (main, named) and DecDCTin
+(overlay, named) are the runtime's by name. A callback set through a call without a prototype arrives as the host
+function's 64-bit address (cc_ptr32 translates a function's address only where it becomes 32 bits): libpress finds
+it in the function table.
+
+**func_800DDF20**, the callback, is still assembly: a port patch for an unmatched function (find_patches now takes
+those: its C in the port only, `src/<seg>/<name>.c`, the stub dropped) in `port-mdec/port/patches/func_800DDF20.c`,
+written from its MIPS. It is not in `~/Decomp/slus-01252/port/patches/` yet: copy it there (or match the function)
+for the real port to play movies.
+
+**SONY_SHAPES fix**: the interrupt table's slot 1 is DMACallback (ResetGraph calls its wrapper with 2, CdDataCallback
+with 3, DecDCToutCallback with 1) and slot 5 VSyncCallback (_SsStart's VSyncCallback(SsSeqCalledTbyT)); they were
+labelled the other way round.
+
+Measured (`port-mdec`, a copy of the 2026-10-24 export, soft, headless, `PSX_PORT_DUMP_EVERY=120`): black until the
+movie starts at vblank 260 (4.3 s); a sunset over a castle and its reflection at 10 s, the "Arc The Lad" title card at
+16 s, a battle grid with a party facing armoured enemies at 20 s, a red airship's hull at 24 s, the stone statues and a ring-shaped
+platform at 70 s. 15.0 frames a second throughout; PORT.md's run line counts the decoded frames and DecDCTout
+completions (`press:` at exit). Tests: tests/test_port_mdec.py (a flat macroblock round trip, zigzag, the IDCT against
+a float one within 2.5, psx-spx's AC codes, BS v2/v3 frames encoded in the test, the St ring on a synthetic disc
+with interleaved XA sectors and the vblank pacing).
+
 ## What the next pass needs
 
 1. **The rest of the CPU side:** func_80158ECC (a game function in assembly, the next strict stop), the BIOS wrappers
@@ -306,9 +365,14 @@ the same bank played through the same code outside the game sounds (below).
 5. **The window's edges.** A game function compared with an int through an 8-byte pointer (2 files, `extern
    M2C_UNK func_X`) compares with the host address; Linux is untested and maps no mirrors (mach_vm_remap is
    macOS's; memfd_create would do it there).
-6. **The CD's rest.** CD-DA (CdlPlay) isn't played; XA goes to the SPU's `psx_cd_xa_sector` (psx/xa.c); the St ring has no
-   MDEC behind it (libpress is stubs); the BIOS's own file calls (B0 open/read on "cdrom:") are stubs.
-7. **Checking.** The GTE against hardware traces or a reference, and the matched C against the original by replaying
+6. **The CD's rest.** CD-DA (CdlPlay) isn't played; XA goes to the SPU's `psx_cd_xa_sector` (psx/xa.c); the St ring feeds
+   libpress over the software MDEC (Movies, above); the BIOS's own file calls (B0 open/read on "cdrom:") are stubs.
+7. **Movies, the rest.** func_800DDF20 matched (or its port patch copied into the real port); func_800C2F94 (still
+   assembly) takes the STR header's bytes 0x1C/0x1D (zero in A2MV24.STR) and is passed over; the MDEC's exact
+   rounding (psx-spx calls its IDCT and YUV constants approximate) against a console capture; the 15-bit path has a test
+   but no game using it yet, DecDCTvlcSize's partial decodes neither; the movie's end and the state after it
+   (the run was still in the movie at 75 s).
+8. **Checking.** The GTE against hardware traces or a reference, and the matched C against the original by replaying
    inputs (psx-spx is a reference, not a test).
 
 ## Dropped arguments (2026-10-23)

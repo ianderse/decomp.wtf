@@ -46,11 +46,12 @@ void host_present(const uint16_t *vram, int x, int y, int w, int h, int rgb24) {
             SDL_RenderCopy(ren, tex, NULL, NULL); /* the whole window: a PS1 picture is 4:3 at any width */
         }
     }
-    {   /* PSX_PORT_DUMP_SCREEN=path: what the window shows, read back every 30 frames */
+    {   /* PSX_PORT_DUMP_SCREEN=path: what the window shows, read back every 30 frames (PSX_PORT_DUMP_EVERY: libgpu's
+         * numbered dumps instead) */
         static int n;
         const char *dump = getenv("PSX_PORT_DUMP_SCREEN");
         int ww, wh;
-        if (dump && *dump && n++ % 30 == 29 && SDL_GetRendererOutputSize(ren, &ww, &wh) == 0 && ww > 0 && wh > 0) {
+        if (dump && *dump && !getenv("PSX_PORT_DUMP_EVERY") && n++ % 30 == 29 && SDL_GetRendererOutputSize(ren, &ww, &wh) == 0 && ww > 0 && wh > 0) {
             uint32_t *shot = (uint32_t *)SDL_malloc((size_t)ww * (size_t)wh * 4);
             if (shot && SDL_RenderReadPixels(ren, NULL, SDL_PIXELFORMAT_ARGB8888, shot, ww * 4) == 0)
                 gpu_write_png(dump, shot, ww, wh);
