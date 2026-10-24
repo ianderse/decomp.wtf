@@ -18,7 +18,11 @@ CPU: MIPS R3000A (MIPS I). Things that look odd at first:
 - Overlays share addresses (several load at 0x80026000): one address can be a function in one overlay and data
   in another, so the shared header can't declare it for all of them. Keep an overlay's own declarations in
   its functions' sources, not the header; where its name clashes with another overlay's, use an alias
-  (`void func_8002735C_yend(void);` and call that): it names the same address.
+  (`void func_8002735C_yend(void);` and call that): it names the same address. The brief names each address
+  as your overlay sees it: its own function there, or `func_`/`D_` plus the address with a note where only
+  another overlay has a function. Never write another overlay's name (`ovl_yprop_func_80028724`) for an
+  address in yours: it matches on the PS1 (a relocation to the address), but a port links it to that
+  overlay's function.
 
 Compilers: PSY-Q SDK GCC 2.6/2.7.2/2.8.x and ASPSX versions differ in register allocation and
 instruction scheduling. Your code goes through GCC, then maspsx (Sony's assembler's delay-slot and nop rules),

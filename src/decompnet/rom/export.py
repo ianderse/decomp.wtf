@@ -362,6 +362,18 @@ def export_rom(net, slug: str, out: Path, log=print) -> dict:
         "symbols": {k: v for k, v in sorted(absolute.items(), key=lambda kv: kv[1])},
     }
     (out / "build.json").write_text(json.dumps(build, indent=1), encoding="utf-8")
+    # overlays share addresses: C that names another overlay's function there rebuilds the game byte for byte (a
+    # relocation to the address) but links to that function anywhere the overlays' C is linked by name (a port)
+    from .export_port import cross_overlay_refs
+    cross = cross_overlay_refs(build, {f["src"]: (out / f["src"]).read_text(encoding="utf-8", errors="replace")
+                                       for f in functions if f["kind"] == "c"})
+    if (bad := [r for r in cross if r["error"]]):
+        log(f"error: {len(bad)} references in overlays' matched C name another overlay's function at a shared address "
+            "(the game rebuilds: a relocation to the address; a port links them to that overlay's function):")
+    for r in bad[:20]:
+        log(f"  {r['seg']}/{r['caller']} names {r['name']}, {r['name_seg']}'s function at 0x{r['vram']:08X} "
+            f"({r['use']}): " + (f"{r['seg']}'s own is {r['own']}" if r["own"] else
+                                 f"{r['seg']} has no function there ({r['here']})"))
     shutil.copyfile(Path(__file__).with_name("export_build.py"), out / "build.py")
     units_json = []
     for f in functions:
@@ -388,7 +400,7 @@ def export_rom(net, slug: str, out: Path, log=print) -> dict:
     commit_tree(out, f"Export: {matched} of {len(functions)} functions as matching C"
                      + ("" if identical else " (the rebuilt game isn't identical yet)"), log)
     return {"path": str(out), "identical": identical, "matched": matched, "functions": len(functions),
-            "fallback": as_fallback, "log": (proc.stdout + proc.stderr)[-3000:]}
+            "fallback": as_fallback, "cross_overlay": cross, "log": (proc.stdout + proc.stderr)[-3000:]}
 
 
 def commit_tree(out: Path, message: str, log=print) -> bool:

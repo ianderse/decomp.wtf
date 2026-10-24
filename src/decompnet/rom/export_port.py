@@ -26,6 +26,7 @@ project's database, runs them, and optionally builds and runs the result.
 
 from __future__ import annotations
 
+import bisect
 import hashlib
 import json
 import os
@@ -2253,6 +2254,14 @@ def generate(source: Path, port: Path, sony: dict[str, dict], title: str, slug: 
                 + (f"it doesn't compile for the host: {excluded[x['path']]}" if x["path"] in excluded else
                    "the runtime replaces it") + "), so the patch does nothing")
     hz = hazards(headers, {k: v for k, v in sources.items() if k not in excluded})
+    xo = cross_overlay_refs(b, sources)
+    if (bad := [r for r in xo if r["error"]]):
+        log(f"error: {len(bad)} references in overlays' matched C name another overlay's function at a shared address "
+            "(PORT.md's Cross-overlay names; port.json's cross_overlay):")
+    for r in bad[:20]:
+        log(f"  {r['seg']}/{r['caller']} names {r['name']} ({r['name_seg']}'s function at 0x{r['vram']:08X}, "
+            f"{r['use']}): the port reaches that overlay's {r['links']}, not "
+            + (f"{r['seg']}'s own {r['own']}" if r["own"] else f"what {r['seg']} has there ({r['here']})"))
     ch = port_call_hazards(b, image, sources, headers, p, sony, aliases)
     put(port / "hazards.json", json.dumps(ch, indent=1) + "\n")
     log(f"dropped arguments: {ch['counts']['dropped']} calls pass fewer than the callee takes, "
@@ -2276,6 +2285,7 @@ def generate(source: Path, port: Path, sony: dict[str, dict], title: str, slug: 
         "symbols": len(p["symbols"]), "renamed": rn, "game_implements": p["game_implements"], "as_data_matched": p["as_data_matched"],
         "as_data_unmatched": p["as_data_unmatched"], "unresolved": p["unresolved"], "hazards": hz,
         "call_hazards": ch,
+        "cross_overlay": xo,
         "patches": [{"name": x["name"], "seg": x["seg"], "file": x["file"], "path": x["path"], "note": x["note"],
                      "compiled": x["path"] in compiled_set} for x in patches],
         "generated_in": round(time.time() - t0, 1),
@@ -2403,6 +2413,126 @@ def summarize_run(text: str) -> dict:
     return {"entered": entered, "unmatched_hit": unmatched, "sdk_hit": sdk, "fault": fault.group(1) if fault else None,
             "cd_reads": reads,
             "stopped_at": stopped.group(1) if stopped else None, "story": story, "log_head": "\n".join(keep[:70])}
+
+
+def shared_segments(build: dict) -> dict[str, tuple[int, int]]:
+    """{segment: (start, end)} of the code segments whose addresses another segment shares (overlays that load at
+    the same address and so are never in RAM together), from build.json's layout, else from where each segment's
+    functions are."""
+    span = {}
+    for s in build.get("segments") or []:
+        if s.get("kind") == "code" and s.get("vram") is not None and s.get("end") is not None:
+            span[s["name"]] = (int(s["vram"]), int(s["vram"]) + int(s["end"]) - int(s["start"]))
+    if not span:
+        for f in build["functions"]:
+            lo, hi = span.get(f["seg"], (f["vram"], f["vram"] + 4))
+            span[f["seg"]] = (min(lo, f["vram"]), max(hi, f["vram"] + 4))
+    return {n: (a, b) for n, (a, b) in span.items() if any(m != n and a < d and c < b for m, (c, d) in span.items())}
+
+
+def cross_overlay_refs(build: dict, sources: dict[str, str]) -> list[dict]:
+    """References in an overlay's matched C to a function of another overlay that shares its addresses: on the PS1
+    a relocation to the address, so the bytes match and the code runs whatever overlay is loaded; linked by name
+    (the native port, any build that links the overlays' C together), it reaches the other overlay's function.
+
+    Each: {"caller", "seg", "file", "name" (the name the C uses), "name_seg" (whose function that is), "vram",
+    "use" ("call", "address": taken or used as data, "declared": only a prototype, nothing uses it), "own" (the
+    caller's overlay's function at that address, the one the C means), "here" (what the caller's overlay has at the
+    address when it has no function there: "between f and g", "after f, its last function (data)"), "links" (what
+    the name links to in the port: "matched C", "stub", "its address"), "error" (a call, or an address taken that
+    reaches a host function: the other overlay's code, not this overlay's address)}."""
+    shared = shared_segments(build)
+    if not shared:
+        return []
+    fns = build["functions"]
+    segs_of: dict[str, set[str]] = {}
+    vram_of: dict[str, int] = {}
+    for f in fns:
+        segs_of.setdefault(f["name"], set()).add(f["seg"])
+        vram_of[f["name"]] = f["vram"]
+    at = {(f["seg"], f["vram"]): f["name"] for f in fns}
+    starts: dict[str, list[int]] = {}
+    for f in fns:
+        starts.setdefault(f["seg"], []).append(f["vram"])
+    for v in starts.values():
+        v.sort()
+    names = set(segs_of)
+    has_c = {f["name"] for f in fns if f.get("c")}
+    called_anywhere: set[str] = set()
+    for t in sources.values():
+        called_anywhere.update(re.findall(r"\b([A-Za-z_]\w*)\s*\(", _code(t)))
+    out = []
+    for f in fns:
+        path = f.get("c")
+        if not path or f["seg"] not in shared or path not in sources:
+            continue
+        mine = f["seg"]
+        lo, hi = shared[mine]
+        text = _code(sources[path])
+        tl = c_toplevel(sources[path])
+        bodies = " ".join(b for _, b in tl["definitions"].values())
+        called = {n for n, _ in body_calls(bodies, names)}
+        for name in sorted(set(_IDENT.findall(text)) & names):
+            theirs = segs_of[name]
+            if mine in theirs or not theirs & set(shared):
+                continue
+            v = vram_of[name]
+            if not lo <= v < hi or not any(shared[s][0] < hi and lo < shared[s][1] for s in theirs if s in shared):
+                continue
+            if name in called:
+                use = "call"
+            elif re.search(rf"\b{re.escape(name)}\b", bodies):
+                use = "address"
+            else:  # outside the bodies: a prototype or an extern, or an initializer (a table of functions)
+                stmts = [st for st in re.split(r"[;{}]", re.sub(r"\{[^{}]*\}", ";", text))
+                         if re.search(rf"\b{re.escape(name)}\b", st)]
+                use = "address" if any("=" in st for st in stmts) else "declared"
+            own = at.get((mine, v))
+            here = None
+            if own is None:
+                ss = starts.get(mine, [])
+                k = bisect.bisect_right(ss, v) - 1
+                prev = at[(mine, ss[k])] if k >= 0 else None
+                nxt = at[(mine, ss[k + 1])] if k + 1 < len(ss) else None
+                here = (f"between {prev} and {nxt} (inside {prev}, or data)" if prev and nxt else
+                        f"after {prev}, its last function (data)" if prev else "before its first function")
+            # what the name links to in the port (plan()): the other overlay's host function (its matched C, or its
+            # stub), or, for one still in assembly that nothing calls, an absolute symbol at its PS1 address, which
+            # is the right value for an address taken
+            links = "matched C" if name in has_c else "stub" if name in called_anywhere else "its address"
+            out.append({"caller": f["name"], "seg": mine, "file": path, "name": name, "name_seg": sorted(theirs)[0],
+                        "vram": v, "use": use, "own": own, "here": here, "links": links,
+                        "error": use == "call" or (use == "address" and links != "its address")})
+    return out
+
+
+def cross_overlay_md(refs: list[dict]) -> str:
+    """PORT.md's section on cross_overlay_refs."""
+    if not refs:
+        return ("## Cross-overlay names\n\nNo matched C of an overlay names another overlay's function at a shared "
+                "address (checked: cross_overlay_refs).\n\n")
+    errors = [r for r in refs if r["error"]]
+    out = [f"""## Cross-overlay names
+
+Overlays that load at the same address share their addresses, and names are per project: where two overlays have a
+function at one address, one of them carries the overlay's name in front (`ovl_yprop_func_80028724`). Matched C of
+one overlay that names another's function there is byte-exact on the PS1 (a relocation to the address: whatever
+overlay is loaded runs), but here it links to the other overlay's function. **{len(errors)} errors**: a call, or an
+address taken (data the caller's overlay keeps at that address, named by the other overlay's function) that links
+to a host function (`links`: its matched C or its stub) rather than to the PS1 address; the other
+{len(refs) - len(errors)} are prototypes nothing uses, or an address taken of a function still in assembly that
+nothing calls (an absolute symbol at its PS1 address: the right value). The fix is a name, through POST
+/api/replace (byte-identical, so the match stays) or a port patch: the caller's overlay's own function at that
+address (`own`), else a `D_` name for its data there (`here`: where that address is among its functions).
+
+| caller | segment | names | whose | use | links | own function there | else, in the caller's overlay |
+| :-- | :-- | :-- | :-- | :-- | :-- | :-- | :-- |
+"""]
+    for r in sorted(refs, key=lambda r: (not r["error"], r["seg"], r["caller"], r["name"])):
+        out.append(f"| `{r['caller']}` | {r['seg']} | `{r['name']}` | {r['name_seg']} | {r['use']}"
+                   f"{'' if r['error'] else ' (ok)'} | {r.get('links', '?')} | "
+                   f"{('`' + r['own'] + '`') if r['own'] else '-'} | {r['here'] or '-'} |\n")
+    return "".join(out) + "\n"
 
 
 def call_hazards_md(ch: dict | None) -> str:
@@ -2647,7 +2777,7 @@ generated from this game). `port.json` has these numbers.
 - **Arguments the matched C drops**: {(r.get('call_hazards') or {}).get('counts', {}).get('dropped', 0)} calls pass
   fewer arguments than the callee takes (below).
 
-{call_hazards_md(r.get('call_hazards'))}{patches_md(r.get('patches') or [])}## PsyCross
+{call_hazards_md(r.get('call_hazards'))}{cross_overlay_md(r.get('cross_overlay') or [])}{patches_md(r.get('patches') or [])}## PsyCross
 
 [PsyCross](https://github.com/OpenDriver2/PsyCross) (OpenDriver2) reimplements PSY-Q's libraries on SDL2 (2.0.16+),
 OpenAL-soft and OpenGL: a renderer that emulates VRAM, an SPU, a software GTE with PGXP. REDRIVER2 and the Silent Hill

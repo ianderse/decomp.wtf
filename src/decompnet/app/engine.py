@@ -189,6 +189,7 @@ class RomNetwork(Network):
         self.rooms: dict = {}  # slug -> collab.Room, for projects this computer shares
         self._remote_ids: dict[str, int] = {}
         self._ops: dict[int, dict] = {}  # project id -> look-alike index
+        self._overlay_views: dict[int, tuple] = {}  # project id -> (stamp, overlay_view)
         self._diffs: dict[tuple, dict] = {}  # (function, source, context, compiler) -> diff for the GUI
         self.autopilots: dict[str, dict] = {}  # slug -> progress of trying every function's machine draft
         # the app runs the autopilot and the permuter in worker processes (worker.py); tests and the workers
@@ -432,15 +433,92 @@ class RomNetwork(Network):
             out += ["Its C with this function's names (try it first):", "```c", source.strip(), "```"]
         return out
 
-    def rename_tokens(self, proj, text: str) -> str:
-        """Show automatic names under their current names (func_80001234 -> deflate)."""
+    def rename_tokens(self, proj, text: str, unit: str | None = None) -> str:
+        """Show automatic names under their current names (func_80001234 -> deflate). With `unit` (the function's
+        overlay), an address its overlay shares with others is named as that overlay sees it (unit_label)."""
         syms = self.symbols(proj["id"])
+        if unit and (view := self.overlay_view(proj)) is not None and unit in view["shared"]:
+            return _AUTO_TOKEN.sub(lambda m: self.unit_label(proj, unit, int(m.group(0)[-8:], 16), view)[0], text)
         return _AUTO_TOKEN.sub(lambda m: syms.label(int(m.group(0)[-8:], 16)), text)
+
+    def overlay_view(self, proj) -> dict | None:
+        """For a game whose overlays share addresses (several load at 0x80026000): {"shared": {unit: (lo, hi)} of
+        those segments, "at": {(unit, vram): name}, "owner": {name: unit}, "starts": {unit: [(vram, size, name)]}}.
+        None when no two segments overlap. Names are per project, so the symbol table has one name per address:
+        another overlay's function's name, for an address of this one (ovl_yprop_func_80028724 where ovl_yguild's
+        own func_80028724 is what runs). Cached until a rename, split or merge."""
+        segs = [s for s in self.cfg(proj).get("segments") or [] if s.get("vram") is not None and s.get("rom_end")]
+        span = {s["name"]: (s["vram"], s["vram"] + s["rom_end"] - s["rom_start"]) for s in segs}
+        shared = {n: (a, b) for n, (a, b) in span.items()
+                  if any(m != n and a < d and c < b for m, (c, d) in span.items())}
+        if not shared:
+            return None
+        row = self.store.one("SELECT v FROM symbols_stamp WHERE project_id=?", proj["id"])
+        count = self.store.one("SELECT COUNT(*) AS n, MAX(id) AS m FROM functions WHERE project_id=?", proj["id"])
+        key = (row["v"] if row else 0, count["n"], count["m"], tuple(sorted(shared.items())))
+        cache = self._overlay_views
+        if proj["id"] in cache and cache[proj["id"]][0] == key:
+            return cache[proj["id"]][1]
+        at, owner, starts = {}, {}, {}
+        for r in self.store.all("SELECT name, unit, vram, size FROM functions WHERE project_id=? AND vram IS NOT NULL "
+                                "ORDER BY vram", proj["id"]):
+            owner[r["name"]] = r["unit"]
+            if r["unit"] in shared:
+                at[(r["unit"], r["vram"])] = r["name"]
+                starts.setdefault(r["unit"], []).append((r["vram"], r["size"] or 0, r["name"]))
+        view = {"shared": shared, "at": at, "owner": owner, "starts": starts}
+        cache[proj["id"]] = (key, view)
+        return view
+
+    def unit_label(self, proj, unit: str, addr: int, view: dict | None = None) -> tuple[str, str | None]:
+        """(name, note) for an address as seen from a function of `unit`. In an overlay that shares its addresses
+        with others: its own function there, if it has one; else, where the project's name for the address is
+        another overlay's function, a name that is nobody's: func_<addr> inside one of this overlay's functions,
+        D_<addr> outside them (its data), with a note saying what this overlay has there. The matcher resolves
+        every one of them to the address, so only the name changes, never the bytes."""
+        syms = self.symbols(proj["id"])
+        view = view if view is not None else self.overlay_view(proj)
+        if view is None or unit not in view["shared"] or not any(a <= addr < b for a, b in view["shared"].values()):
+            return syms.label(addr), None
+        own = view["at"].get((unit, addr))
+        if own is not None:
+            return own, None
+        name, _ = syms.name_at(addr)
+        other = view["owner"].get(name)
+        if other is None or other == unit or other not in view["shared"]:
+            return syms.label(addr), None  # data, this overlay's own function (+offset), the resident program's
+        fns = view["starts"].get(unit, [])
+        inside = next((f for f in fns if f[0] < addr < f[0] + f[1]), None)
+        before = [f for f in fns if f[0] + f[1] <= addr]
+        after = [f for f in fns if f[0] > addr]
+        theirs = ", ".join(f"{u}'s {n}" for (u, v), n in sorted(view["at"].items()) if v == addr) or f"{other}'s {name}"
+        if inside is not None:
+            label = f"func_{addr:08X}"
+            what = f"inside its {inside[2]} (+0x{addr - inside[0]:X}), not a function start"
+        else:
+            label = f"D_{addr:08X}"
+            what = (f"past its last function ({before[-1][2]} ends at 0x{before[-1][0] + before[-1][1]:08X}): its data"
+                    if before and not after else
+                    f"between its {before[-1][2]} and {after[0][2]}" if before and after else "before its first function")
+        return label, (f"{label}: no function of {unit} starts at 0x{addr:08X} ({theirs} does, in another overlay, "
+                       f"not loaded with this one); the code at this address in {unit} is {what}")
+
+    def overlay_notes(self, proj, fn) -> list[str]:
+        """The notes unit_label gives for the addresses `fn`'s assembly names (see rename_tokens)."""
+        view = self.overlay_view(proj)
+        if view is None or fn["unit"] not in view["shared"] or not fn["asm"]:
+            return []
+        out = []
+        for addr in sorted({int(t[-8:], 16) for t in _AUTO_TOKEN.findall(fn["asm"])}):
+            note = self.unit_label(proj, fn["unit"], addr, view)[1]
+            if note:
+                out.append(note)
+        return out
 
     def _asm_text(self, fn, proj) -> str:
         if not self.is_rom(proj):
             return super()._asm_text(fn, proj)
-        return self.rename_tokens(proj, fn["asm"])
+        return self.rename_tokens(proj, fn["asm"], fn["unit"])
 
     # ------------------------------------------------------------------ import
 
@@ -716,14 +794,25 @@ class RomNetwork(Network):
                        "in that range was built with it). (The judge still tries the project's setup on near misses.)")]
         calls = sorted(x["calls"].get(fn["vram"], ()))
         callers = sorted(x["called_by"].get(fn["vram"], ()))
+        label = syms.label
+        view = self.overlay_view(proj)
+        if view is not None and fn["unit"] in view["shared"]:
+            # xrefs are by address, and overlays share theirs: this function's own calls and callers, named as its
+            # overlay sees them
+            calls, callers, used = self._unit_refs(proj, fn, view)
+            label = lambda a: self.unit_label(proj, fn["unit"], a, view)[0]
+            x = {**x, "uses": {fn["vram"]: used}}
         if calls:
             bios = {r["vram"]: m.group(1) for r in self.store.all(  # BIOS call stubs: what they call
                 f"SELECT vram, meta FROM functions WHERE project_id=? AND status='asm' AND vram IN "
                 f"({','.join('?' * len(calls[:30]))})", proj["id"], *calls[:30])
                 if (m := re.search(r"(?:a BIOS call stub|a Sony library function), (\w+)", r["meta"] or ""))}
-            lines.append("calls: " + ", ".join(syms.label(a) + (f" (= {bios[a]})" if a in bios else "") for a in calls[:30]))
+            lines.append("calls: " + ", ".join(label(a) + (f" (= {bios[a]})" if a in bios else "") for a in calls[:30]))
         if callers:
-            lines.append("called by: " + ", ".join(syms.label(a) for a in callers[:30]))
+            lines.append("called by: " + ", ".join(label(a) for a in callers[:30]))
+        if notes := self.overlay_notes(proj, fn):
+            lines += ["", "### Overlay addresses (overlays share addresses: names are this overlay's)",
+                      *[f"- {n}" for n in notes[:12]]]
         if self.cfg(proj).get("platform") == "psx" and fn["status"] != "matched":
             if fn["attempts"] >= 10:
                 lines += ["", "PS1 reference tools: find_reference_examples(function) retrieves matched examples "
@@ -743,11 +832,11 @@ class RomNetwork(Network):
             prev = {r["name"]: r for r in self.store.all("SELECT name, kind, size, preview FROM symbols WHERE project_id=?", proj["id"])}
             for a in used[:40]:
                 name, off = syms.name_at(a)
-                r = prev.get(name)
+                r = prev.get(name) if label is syms.label or label(a) == syms.label(a) else None  # not another overlay's
                 desc = f"{r['kind']}, {r['size']} bytes" if r else "unknown size"
                 if r and r["preview"]:
                     desc += f": {r['preview']}"
-                lines.append(f"- {syms.label(a)} (0x{a:08X}; {desc})")
+                lines.append(f"- {label(a)} (0x{a:08X}; {desc})")
         twin = self._twin_lines(proj, fn) if fn["status"] != "matched" else []
         lines += twin
         alike = [] if twin else [(r, sim) for r, sim in self.similar(proj, fn, top=3) if r["status"] == "matched"]
@@ -782,14 +871,43 @@ class RomNetwork(Network):
                       "Your code is linked at this function's address and must reproduce the ROM bytes exactly."]
         return lines
 
+    def _unit_refs(self, proj, fn, view: dict) -> tuple[list[int], list[int], list[int]]:
+        """(calls, callers, data used) of a function of an overlay that shares its addresses, from its own relocations
+        and those of the functions that can call it (its overlay's and the resident program's), not from xrefs(),
+        which is keyed by address and so mixes every overlay's function at that address."""
+        starts = {f["vram"] for f in self.store.all("SELECT vram FROM functions WHERE project_id=? AND vram IS NOT NULL",
+                                                    proj["id"])}
+        calls, used = set(), set()
+        lo, hi = fn["vram"], fn["vram"] + (fn["size"] or 0)
+        for _, rtype, addr in json.loads(fn["relocs"] or "[]"):
+            if lo <= addr < hi:
+                continue
+            if addr in starts:
+                calls.add(addr)
+            elif rtype not in (match.R_MIPS_26, 10):
+                used.add(addr)
+        maybe = sorted(self.xrefs(proj)["called_by"].get(fn["vram"], ()))
+        callers = set()
+        if maybe:
+            for r in self.store.all(f"SELECT vram, unit, relocs FROM functions WHERE project_id=? AND vram IN "
+                                    f"({','.join('?' * len(maybe))})", proj["id"], *maybe):
+                if r["unit"] != fn["unit"] and r["unit"] in view["shared"]:
+                    continue
+                if any(addr == fn["vram"] for _, _, addr in json.loads(r["relocs"] or "[]")):
+                    callers.add(r["vram"])
+        return sorted(calls), sorted(callers), sorted(used)
+
     def _callee_signatures(self, proj, fn, calls: list[int], limit: int = 12) -> list[str]:
         """The real prototypes of matched callees the header doesn't declare: an agent guessing a callee's signature
         gets argument types (and so registers and extensions) wrong, or a "conflicting types" error later."""
         if not calls:
             return []
         header = self._context(proj["id"], fn["unit"])["header"]
-        rows = self.store.all(f"SELECT name, matched_source FROM functions WHERE project_id=? AND status='matched' "
+        rows = self.store.all(f"SELECT name, unit, matched_source FROM functions WHERE project_id=? AND status='matched' "
                               f"AND vram IN ({','.join('?' * len(calls[:60]))})", proj["id"], *calls[:60])
+        view = self.overlay_view(proj)
+        if view is not None and fn["unit"] in view["shared"]:  # not another overlay's function at the same address
+            rows = [r for r in rows if r["unit"] == fn["unit"] or r["unit"] not in view["shared"]]
         out = []
         for r in rows:
             name = r["name"]
@@ -1814,7 +1932,8 @@ class RomNetwork(Network):
             cfg = json.loads(db.execute("SELECT config FROM projects WHERE id=?", (proj["id"],)).fetchone()["config"])
             cfg["export"] = {"t": time.time(), "path": str(res["path"]), "identical": res.get("identical"),
                              "matched": res.get("matched"), "functions": res.get("functions"),
-                             "fallback": len(res.get("fallback") or [])}
+                             "fallback": len(res.get("fallback") or []),
+                             "cross_overlay": sum(1 for r in res.get("cross_overlay") or [] if r["error"])}
             db.execute("UPDATE projects SET config=? WHERE id=?", (json.dumps(cfg), proj["id"]))
         return res
 

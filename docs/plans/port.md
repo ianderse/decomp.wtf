@@ -465,7 +465,91 @@ port` (only `gen/`, `include/`, `psx/`, `tools/` are rewritten), so `patches/` s
   address where the caller's overlay starts no function at all (yguild's func_800287A0 -> yshop's
   func_800273F0/func_80027460, yshop's func_80027614 -> yseg's func_80026C8C ...: an overlay split worth
   checking). All of them link to the wrong code in the port; the fix belongs in the symbol naming (the overlay's
-  own symbol at each jal), not in patches.
+  own symbol at each jal), not in patches. Done since: "Cross-overlay names" below.
+
+## Cross-overlay names (2026-10-24)
+
+Where the names came from: the project's symbol table (RomNetwork.symbols, rom/symbols.py) has one name per address,
+and the import adds every function to it in turn, so at an address two overlays share the last one's name stays
+(`ovl_yprop_func_80028724`, splat having prefixed the clash). The stored assembly says `jal func_80028724`; the brief
+showed it through rename_tokens with that table, and the brief's "calls"/"called by"/"Data it uses" lists and the
+callee signatures came from xrefs, keyed by address alone (every overlay's function at that address mixed). An agent
+on ovl_yguild's func_80026F50 was shown ovl_yprop's name and ovl_yprop's prototype and wrote them; the bytes match
+(a relocation to the address), the port links ovl_yprop's function.
+
+- **The brief** now names an address as the function's own overlay has it (RomNetwork.overlay_view, unit_label; for
+  segments that share addresses only): its own function there; else, where the table's name is another overlay's
+  function, `func_<addr>` inside one of its functions or `D_<addr>` outside them, with a note under "Overlay
+  addresses" ("no function of ovl_yguild starts at 0x800273F0 (ovl_yshop's func_800273F0 does ...); the code at this
+  address in ovl_yguild is inside its func_8002735C (+0x94), not a function start"). Calls, callers, data used and
+  callee signatures come from the function's own relocations and its own overlay's (and the resident program's)
+  functions. Only names change: every one of them resolves to the same address in the matcher. The PS1 guide says
+  never to write another overlay's name for an address in yours.
+- **The export and the port** check it (export_port.cross_overlay_refs, on build.json and the C actually built):
+  a reference in an overlay's matched C to a function of another overlay that shares its addresses is an error
+  when it is a call, or an address taken that links to a host function (that overlay's matched C or its stub);
+  a prototype nothing uses, or the address of a function still in assembly that nothing calls (an absolute symbol
+  at its PS1 address, the right value), is listed but not an error. The export logs the errors and keeps the list
+  (`cross_overlay` in its result, the error count in projects.config `export`); the port logs them, writes them to
+  port.json and PORT.md's "Cross-overlay names" (a hazard class, with the caller's own function there or what its
+  overlay has at that address). Patches count: the check reads a patched file's patch.
+- **The fix, through POST /api/replace** (names only, each judged byte-identical by replace_match), 93 functions:
+  - 13 functions, 14 calls, to the caller's overlay's own function at the address (the 14 of the 28 above:
+    10 ovl_yguild functions -> its own func_80026250 / func_80028724, ovl_yprop's func_800277E0/func_8002790C ->
+    its func_80027A48, ovl_yend's func_800274F4 -> its func_800275D4), plus 4 ovl_smith functions that take the
+    address of another overlay's function where smith has its own (`assert_n(&ovl_yguild_func_80027304)` ->
+    `&func_80027304`, and ovl_yshop_func_80026310, ovl_yseg_func_800267C4, ovl_yshop_func_80027BC8 the same way).
+    Note: "callee named by this overlay's own function at the address (port correctness; same bytes)".
+  - 76 functions, 115 addresses: this overlay's data (or a code address inside one of its functions) named by
+    another overlay's function, `(u8 *) func_8002899C + 0x60` in ovl_yshop, whose code ends at 0x800288C0, for
+    ovl_yguild's function; in the port that read the other overlay's host code. Renamed `D_<addr>` (a prototype of
+    it made `extern u8 D_<addr>[];`), an alias `func_<addr>_<overlay>` inside one of its functions, or
+    `D_<addr>_<overlay>` where the automatic name is taken (ovl_smith's function at 0x8002B54C is *named*
+    `D_8002B54C`, see below) or declared otherwise in that source (func_80026320 has `extern u32 D_80027494;`).
+- **The 14 calls with no own function** (the plan's second 14) are not calls, and no overlay misses a split: the 11
+  from func_80027614, func_80028154 (3 each), func_80027F1C, func_800287A0 (2 each) and func_80026178 are
+  prototypes left in twin-copied sources ("identical to func_80026D0C (matched), with its names changed"), where
+  own_source turned the twin's helper definitions into prototypes nothing calls; the other 3 are data (above). Per
+  address, the caller's overlay's image (game.overlays.exe through its segment):
+
+  | caller (overlay) | name | in the caller's overlay | evidence |
+  | :-- | :-- | :-- | :-- |
+  | func_80026178 (yshop) | func_80026264 | inside func_80026248 +0x1C | `addiu $a0, $a0, -0x7690` after `lui`; no `jr $ra` before |
+  | func_80027614 (yshop) | func_80026C8C | inside func_80026B34 +0x158 | `addiu $a0, ...` between `lui $a0` and `jal 0x800C3564` |
+  | func_80027614 (yshop) | func_80026D34 | inside func_80026D2C +0x8 | the third instruction after `addiu $sp, -32; sw $ra` |
+  | func_80027614 (yshop) | func_80026DA4 | inside func_80026D2C +0x78 | right after `jal 0x80155698; nop` |
+  | func_800264F8 (yshop) | func_8002899C | data, after its last function (ends 0x800288C0) | halfword tables and zeros |
+  | func_80027ACC (yshop) | func_80028AAC | data, after its last function | zeros; read as `((s32 *) &x)[3]` |
+  | func_80026E08 (yseg) | func_800273C8 | data, after its last function (ends 0x80027360) | `(s32) x + 8` passed on |
+  | func_80027F1C (yprop) | func_800273F0 | inside func_800272C4 +0x12C | the `nop` in `jal 0x800C3564`'s delay slot |
+  | func_80027F1C (yprop) | func_80027460 | inside func_80027424 +0x3C | after `jal 0x800286A4` |
+  | func_80028154 (yguild) | func_80026C8C | inside func_80026B84 +0x108 | `addiu $s1, $s1, 1` in a loop (`bne` back at +0x110) |
+  | func_80028154 (yguild) | func_80026D34 | inside func_80026CF0 +0x44 | `addiu $a0, ...` after `lui $a0` |
+  | func_80028154 (yguild) | func_80026DA4 | inside func_80026CF0 +0xB4 | the delay slot of `jal 0x80027DB4` |
+  | func_800287A0 (yguild) | func_800273F0 | inside func_8002735C +0x94 | the instruction after `j 0x80027458; nop` |
+  | func_800287A0 (yguild) | func_80027460 | inside func_8002735C +0x104 | `jal 0x8016766C` |
+
+  None follows a `jr $ra` and its delay slot, so there is nothing to split (and no person-facing split exists
+  anyway: split_function is the agents' MCP tool only, no /api route).
+- **Counts** (export_port.cross_overlay_refs on the export, before: today's tree with the 93 replacements' renames
+  undone; after: the export of 2026-10-24 07:33, identical, 4040 of 4851 in C, fallback 0):
+
+  | | before | after |
+  | :-- | --: | --: |
+  | calls naming another overlay's function | 14 (all with an own function there) | 0 |
+  | addresses taken, linking to another overlay's host function | 119 (4 with an own function) | 0 |
+  | **errors** | **133** | **0** |
+  | prototypes nothing uses (not errors) | 70 | 70 |
+  | addresses of an uncalled assembly function (its PS1 address: not errors) | 12 | 12 |
+
+  The old scan (`name(` in the C, any use) went from 28 to 11, the 11 unused prototypes.
+- Left alone, the same root (one name per address): a rename of an address renames every overlay's symbol there,
+  so overlay functions carry other overlays' data names: ovl_smith's `D_8002B54C`, `str_800288AC`, `obj_800288E0`
+  and `build_filtered_slot_list` (renames `func_8002B54C -> D_8002B54C` and so on, meant for another overlay's
+  data), and ovl_yend's `yend_draw_marked_text`, which ovl_yseg/ovl_yshop/ovl_yguild C used for their own data at
+  0x80027398 (now `D_80027398`). rename_symbol would need a unit too. port/patches/func_80026F50.c is still needed
+  (the result and the dropped $a1); its note about the names is history now that the export's C names
+  ovl_yguild's functions.
 
 ## Sound (2026-10-23)
 
