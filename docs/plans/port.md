@@ -390,6 +390,46 @@ definition (`s32 func_800F5498(a) u32 a; {`) the detector doesn't see, all verif
 chains (9 verified; func_80139260 and func_80163D18 are the other 2 failures). None of the 22 comes from a declaration inside a body; 57 calls through a cast of a game
 function (`((T (*)()) func_X)(...)`) are seen by neither and not rewritten.
 
+**The rest (2026-10-23, later).**
+
+- *Calls through a cast.* Both detectors now see them (export_port.cast_calls: a cast in the call, `(*(T (*)()) &f)()`,
+  a local pointer that only ever holds one game function). All 57 on SLUS-01252 pass what the callee's definition
+  takes, so none drops an argument and nothing was rewritten.
+- *Flow-aware scan.* passes_through now follows the caller's control flow (a call on another branch doesn't count; a
+  loop's back edge does; a later call of the same callee is judged at its own jal). That turned 2 leftovers into
+  pass-through: func_80111734 and func_80112B10 -> func_8010B800. Both were verified and applied.
+- *The permuter* (`decomp permuter export --passthrough`, run on the Mac Studio with -j 8 for about 6 h;
+  `import --replace`). Matched and replaced: func_80028064 and func_8013A14C (note "pass-through argument made
+  explicit (permuted)"). Not matched, best judge score: func_800ED7B4 25, get_word16_table_0x801D2090 20,
+  func_800E254C 200, func_801338FC 220, func_80163D18 210, func_80139260 30 (nothing better than the base).
+  func_800E254C's callee func_800D8F80 ignores its argument (`n = 0` first), so that call is harmless anyway.
+- *Leftovers, classified* (31 calls in the last dry run's residual; the `callee reads` column in PORT.md computes
+  the same thing):
+  - (i) value known in the C: ovl_yseg_func_800267C4 -> func_80159DC8, where $a1 is `amount`. Made explicit and
+    replaced. func_800ED738 -> draw_text_glyphs was not a dropped argument at all: a `Pair2` passed by value is
+    two words on MIPS ($a2/$a3) but one 8-byte register on the host. It now passes `p.x, p.y` with the real
+    signature, byte-identical, replaced.
+  - (ii) callee ignores it (its code never reads the register, and neither does its C): 24 calls. These are
+    func_80027F1C, func_80027D2C (2), func_800287A0 (2), func_800273C8, func_8002754C (`s16 arg0` never used);
+    func_800D8F80 (4: func_800271F4, func_800286E4's later calls, func_800E0F4C, func_800E254C; it assigns
+    `n = 0` first); func_800DAD44 (6 callers: `a1`, `a2` never used); func_80168B68 (2: `arg3` unused);
+    func_80138528 (2: a2/a3 only go on to func_800FE158, which takes one); func_8010522C's `a1` (shadowed by a
+    local); func_801555AC (2: `a1` unused); func_80151EF0's `arg2` (overwritten unless the code is 4, which
+    func_80151D34 handles before the call); func_800DDDB4 (its C never names a0-a2; the liveness scan says
+    $a1/$a2 only because it is conservative through func_80176200 and the call through 0x8006E538).
+    Follow-up: dropping those unused parameters from the definitions would remove the hazards outright.
+  - (iii) stack arguments: func_80028414 -> func_8002B68C ignores both stack arguments (`a4`, `a5` unused).
+  - Real bugs for a person (2):
+    - func_80026F50 -> ovl_yprop_func_80028724. $a1 is whatever func_800290C0 -> draw_window_frame's last
+      callee left, and the callee passes it to func_800E9B3C and draw_text_glyphs.
+    - func_8002B68C -> func_800E8AAC. The 7th argument's stack slot is the caller's saved $ra, and the callee
+      tests `arg6 == 1`, which is never true on the PS1 and undefined on the host. Passing 0 would be honest,
+      but it can't match: the slot is where $ra is saved.
+- Not redone in this pass: the fresh export and port build. Counts from the last dry run, after these replacements:
+  39 calls dropped before them; 6 are now fixed, 2 are real bugs, and the rest are harmless (callee ignores them)
+  or near misses kept as before. Two calls against the runtime's own prototypes (func_800F53C0 -> GetTPage,
+  func_8016A028 -> CdRead) are outside fix-passthrough's scope (no game definition).
+
 ## Sound (2026-10-23)
 
 ### libsnd: replaced wholesale, not run as C (option (a) of the brief)
