@@ -151,7 +151,7 @@ NO_TRACE void __cyg_profile_func_exit(void *fn, void *site) { (void)fn; (void)si
 #define MAX_HIT 4096
 static const char *unmatched_hit[MAX_HIT];
 static size_t n_unmatched;
-static struct { const char *name; int *calls; } sdk_hit[MAX_HIT];
+static struct { const char *name; unsigned *calls; } sdk_hit[MAX_HIT];
 static size_t n_sdk;
 
 int psx_unmatched(const char *name) {
@@ -169,12 +169,19 @@ int psx_unmatched(const char *name) {
     return 0;
 }
 
-int psx_sdk_stub(const char *name, int *calls) {
-    if (++*calls == 1 && n_sdk < MAX_HIT) {
-        sdk_hit[n_sdk].name = name;
-        sdk_hit[n_sdk++].calls = calls;
+/* the count saturates (psx_log_due): a stub the game spins on 2^31 times no longer wraps negative and logs every
+ * call (a 7 GB log once); after the first 20 every 10,000th call is logged with its count, up to the 10,000,000th */
+int psx_sdk_stub(const char *name, unsigned *calls) {
+    if (psx_log_due(calls)) {
+        if (*calls == 1 && n_sdk < MAX_HIT) {
+            sdk_hit[n_sdk].name = name;
+            sdk_hit[n_sdk++].calls = calls;
+        }
+        if (*calls <= PSX_LOG_FIRST)
+            psx_log("sdk: %s (call %u): not implemented yet, returns 0\n", name, *calls);
+        else
+            psx_log("sdk: %s: %u calls (logged every %u from here)\n", name, *calls, PSX_LOG_EVERY);
     }
-    if (*calls <= 20) psx_log("sdk: %s (call %d): not implemented yet, returns 0\n", name, *calls);
     return 0;
 }
 
@@ -190,7 +197,9 @@ void psx_exit_report(void) {
                 "functions reached; %zu Sony functions reached that are stubs\n", n_unmatched, n_sdk);
     psx_log("psx: %d frames (vertical blanks)\n", psx_frames());
     for (i = 0; i < n_unmatched; i++) psx_log("  unmatched %s\n", unmatched_hit[i]);
-    for (i = 0; i < n_sdk; i++) psx_log("  sdk stub %s x%d\n", sdk_hit[i].name, *sdk_hit[i].calls);
+    for (i = 0; i < n_sdk; i++)
+        psx_log("  sdk stub %s x%u%s\n", sdk_hit[i].name, *sdk_hit[i].calls,
+                *sdk_hit[i].calls >= PSX_COUNT_MAX ? " (or more)" : "");
     psx_mdec_exit(); /* the movie frames the MDEC decoded */
     psx_gpu_exit(); /* what was drawn; PSX_PORT_DUMP_VRAM=path writes the VRAM as a PNG */
 }

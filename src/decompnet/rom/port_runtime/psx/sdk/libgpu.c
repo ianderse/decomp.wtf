@@ -100,7 +100,7 @@ static void load(psx_addr rect, psx_addr p) {
     static int logged;
     const RECT *r = H(rect);
     start();
-    if (logged++ < 8) psx_log("gpu: LoadImage %d,%d %dx%d from 0x%08X\n", r->x, r->y, r->w, r->h, p);
+    if (logged < 8 && ++logged) psx_log("gpu: LoadImage %d,%d %dx%d from 0x%08X\n", r->x, r->y, r->w, r->h, p);
     if (r->w <= 0 || r->h <= 0) return;
     gpu_load_image(r->x, r->y, r->w, r->h, (const uint16_t *)H(p));
 }
@@ -300,7 +300,7 @@ psx_addr PutDrawEnv(psx_addr a) {
     gpu_gp0((const uint32_t *)H(dr + 4), (int)(rd32(dr) >> 24));
     draw_env = *env;
     have_draw = 1;
-    if (logged++ < 2)
+    if (logged < 2 && ++logged)
         psx_log("gpu: PutDrawEnv clip %d,%d %dx%d, offset %d,%d, clear %s to %d,%d,%d\n", env->clip.x, env->clip.y,
                 env->clip.w, env->clip.h, env->ofs[0], env->ofs[1], env->isbg ? "on" : "off", env->r0, env->g0,
                 env->b0);
@@ -329,7 +329,7 @@ psx_addr PutDispEnv(psx_addr a) {
     _ctl(0x08000000u | mode);
     gpu_set_display(env->disp.x, env->disp.y, w, h, env->isrgb24);
     disp_env = *env;
-    if (logged++ < 2)
+    if (logged < 2 && ++logged)
         psx_log("gpu: PutDispEnv display %d,%d %dx%d%s\n", env->disp.x, env->disp.y, w, h,
                 env->isrgb24 ? ", 24-bit" : "");
     return a;

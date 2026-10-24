@@ -79,10 +79,12 @@ the same bank played through the same code outside the game sounds (below).
 - **Stubs.** Each function still in assembly: logs and stops (or returns 0 with PSX_PORT_SOFT=1); a handwritten one
   that only sets GTE control registers from constants (mfc0/mtc0 $12, li, ctc2, jr $ra: InitGeom's body) is
   replayed on the software GTE instead. Each Sony function (the database's library and BIOS-stub rows, plus syscall
-  wrappers found by their code): logs its first 20 calls and returns 0. Implemented: VSync (window, pad, 60 Hz), the
+  wrappers found by their code): logs its first 20 calls (then every 10,000th, the count saturating) and returns 0.
+  Implemented: VSync (window, pad, 60 Hz), the
   environment calls, PadInitDirect/PadStartCom, libgte's matrix arithmetic, InitGeom/SetGeomOffset/SetGeomScreen,
   the BIOS's memcpy/memset/strlen/rand family, InitHeap/malloc/free/calloc/realloc (a first-fit heap in RAM),
-  OpenEvent (handles 0xF1000000 + n)/CloseEvent/EnableEvent/DisableEvent and Enter/ExitCriticalSection. psx/gte.c
+  the events (handles 0xF1000000 + slot; delivered, tested, waited for: "Events and the memory card" below), the
+  memory card and Enter/ExitCriticalSection. psx/gte.c
   is a software GTE from psx-spx.
 - **SDK ranges.** An address range whose every function is the SDK's, matched C or not: its C isn't compiled and
   each function is a Sony function (the runtime's when it has one, a labelled stub otherwise). The default is the
@@ -341,6 +343,67 @@ platform at 70 s. 15.0 frames a second throughout; PORT.md's run line counts the
 completions (`press:` at exit). Tests: tests/test_port_mdec.py (a flat macroblock round trip, zigzag, the IDCT against
 a float one within 2.5, psx-spx's AC codes, BS v2/v3 frames encoded in the test, the St ring on a synthetic disc
 with interleaved XA sectors and the vblank pacing).
+
+## Events, the memory card and the pad (2026-10-24)
+
+**What the game does after the movie.** It re-reads COMM.IMG/SND/DAT and checks the memory cards: func_800DBEC8 (at
+boot) opened 8 events, SwCARD (0xF4000001) and HwCARD (0xF0000011) with the specs IOE 0x0004, ERROR 0x8000, TIMEOUT
+0x0100 and NEW 0x2000, EvMdNOINTR, into D_801A1630..D_801A164C; func_800DC288(port) drains the four SwCARD ones with
+TestEvent, calls `_card_info(port * 16)` (func_8017CEE0, bios A0 AB) and spins on TestEvent (func_8017DD80, B0 0B)
+until one fires: IOE returns 0, TIMEOUT 1 ("no card"), ERROR 2, NEW clears the card (func_800DF510, then
+`_card_clear`: _new_card + _card_write(chan, 0x3F, 0)) and waits on the HwCARD four. It asks slot 2 three times, then
+slot 1 three times. The port's TestEvent was a stub returning 0, so the game spun forever at vblank 5466, and the
+stub's call counter wrapped negative and logged every call: a 7 GB log.
+
+**Events** (psx/sdk/libapi.c) as psx-spx's EvCB: a slot's status 0 free, 0x1000 disabled (OpenEvent leaves it so),
+0x2000 enabled/busy, 0x4000 ready; DeliverEvent(class, spec) makes every enabled/busy match ready (EvMdNOINTR) or
+calls its function (EvMdINTR, never ready); TestEvent returns 1 for a ready one and makes it busy again (the test
+clears the flag), WaitEvent blocks with a vblank pump, UnDeliverEvent takes ready ones back. Handles stay 0xF1000000 +
+slot (the lowest free one). A game spinning on TestEvent never calls VSync, where the "interrupts" happen here, so a
+miss while the card has an event on its way waits a vblank (and 100,000 misses with no vblank pump one anyway).
+
+**The card** (psx/sdk/libcard.c, from psx-spx's memory card chapters): `PSX_MEMCARD=path` backs slot 1 with a 128 KB
+image (raw frames, an emulator's .mcr; created formatted when missing: "MC" in frame 0, 15 free directory frames
+0xA0, no broken sectors, frames 36-62 0xFF, frame 63 a copy of frame 0; written back whole after a write); slot 2 is
+always empty; without the variable there is no card. `_card_info`/`_card_load` deliver SwCARD and HwCARD a vblank
+later (from libetc's frame, never inside the call): TIMEOUT without a card, ERROR for a file of the wrong size, NEW
+for the card's power-on "new card" flag (info) or an unformatted card (load), else IOE; `_card_read`/`_card_write`
+deliver HwCARD only (a write clears the flag; `_new_card` lets one through while it is set). The BIOS's file calls
+on "bu00:" (open with 0x200 creating mode >> 16 blocks, lseek, read, write, close, format, firstfile/nextfile with
+'?'/'*' and the 40-byte direntry, erase) are synchronous. All of it reaches the game through the generator's
+BIOS_LIBC table by bios label (A0 70/AB/AC/AD, B0 07/0A/0B/20, 32-36, 41-43, 45, 4A-4C, 4E/4F, 50, 5C/5D), and
+PSY-Q's names (InitCARD, _card_info, ... _card_format) for a game that has them named.
+
+**The pad.** SLUS-01252's pad reader func_800C305C was still assembly, so the game never saw a button (the keyboard
+reached PadInitDirect's buffer, nothing read it). A port patch (`port-card/port/patches/func_800C305C.c`, from its
+MIPS) runs it: libpad's state machine (PadGetState/PadInfoMode/PadSetAct/PadSetActAlign: libpad's own functions,
+matched as the game's at func_8017E360/E430/E050/E090, now SDK_IDENTIFIED and answered by the runtime's libpad: a
+digital pad on port 1, PadStateFindCTP1) and the bits into D_801A1AEC and the pressed/repeat words.
+`PSX_PAD_SCRIPT="start@300,cross@600-640"` (psx/pad_script.c) presses buttons at vblanks for a run that reproduces:
+up down left right cross circle square triangle l1 l2 r1 r2 start select, 10 vblanks a press
+(`PSX_PAD_SCRIPT_HOLD`) unless FROM-TO, ORed with the keyboard in `psx_pad_bits`, which libpad's buffers and PadRead
+read each vblank.
+
+**Two more patches the card check needed** (same folder): func_80137FD4 calls its state's function from D_8018DC34
+without the object ($a0 passes through on the PS1; on the host x0 was the state function's own address, and
+func_8013838C wrote through it); func_80138064 passes func_800DC844/func_800DD354 an out-pointer that is the caller's
+$s0 on the PS1 (an uninitialised `register` in the C), garbage on the host, which faulted once a card was present.
+
+**Logs.** psx_sdk_stub's counter saturates and logs the first 20 calls, then every 10,000th with its count up to the
+10,000,000th (`psx_log_due` in psx_runtime.h: at most 1,020 lines a site); the per-call logs in libetc (callbacks,
+SetRCnt), libapi (OpenEvent, DeliverEvent) and libcard go through it, and libgpu/libsnd's `logged++ < N` counters no
+longer wrap. A 200 s soft run that used to write 7 GB writes 13 KB.
+
+Measured (`port-card`, a copy of the 2026-10-24 export with the five patches, soft, headless,
+`PSX_PAD_SCRIPT=start@300`): Start skips the movie at vblank 300; the card check runs at vblanks 442-447 (slot 2
+three times, slot 1 three times, SwCARD/HwCARD TIMEOUT a vblank after each `_card_info`, the game's loop returning
+index 2); the title screen (Arc The Lad II, New Game / Continue / Convert) from 10 s; left alone, at 70 s the game
+replays the intro movie as its attract mode, this time to its end (150 s), checks the cards again (vblank 9309) and
+is back on the title at 160 s (a 200 s run, 1,282 movie frames decoded, a 13 KB log). Down
+and Cross on Continue: "No Memory Card was found." (Retry / Cancel) without a card; with `PSX_MEMCARD` pointing at a
+new file the card is created formatted, `_card_info` answers NEW, the game clears it (HwCARD IOE), lists
+BASLUS-01252ARC2-00* and BASLUS-01224ARC1-00* (Arc 1's saves, for Convert: none), and Continue shows "Load, Card 1:
+1-3 [No Data Present]". Tests: tests/test_port_card.py.
 
 ## What the next pass needs
 

@@ -8,6 +8,7 @@
 
 #include "../psx_runtime.h"
 #include "libetc.h"
+#include "libcard.h"
 #include "libcd.h"
 #include "libgpu.h"
 #include "libpad.h"
@@ -41,6 +42,7 @@ static void one_frame(void) {
     host_frame();
     psx_pad_update();
     psx_cd_vblank(); /* the CD's events of this frame (libcd.h) */
+    psx_card_vblank(); /* the memory card's events, a vblank after the call that started them (libcard.h) */
     if (host_quit()) {
         psx_log("psx: window closed after %d frames\n", frames);
         exit(0);
@@ -89,7 +91,7 @@ static int hcount(void) {
 int VSync(int mode) {
     static int logged;
     int h;
-    if (!logged++) psx_log("etc: first VSync(%d)\n", mode);
+    if (!logged) logged = 1, psx_log("etc: first VSync(%d)\n", mode);
     if (mode < 0) return frames;
     if (mode == 1) return hcount();
     h = hcount();
@@ -111,7 +113,8 @@ psx_addr VSyncCallbacks(int ch, psx_addr func) {
     ch &= 7;
     old = vsync_cb[ch];
     vsync_cb[ch] = func;
-    psx_log("etc: VSyncCallbacks(%d, 0x%08X)\n", ch, func);
+    static unsigned logs;
+    if (psx_log_due(&logs)) psx_log("etc: VSyncCallbacks(%d, 0x%08X)\n", ch, func);
     return old;
 }
 #endif
@@ -126,7 +129,9 @@ psx_addr InterruptCallback(int irq, psx_addr func) {
     if (irq < 0 || irq > 10) return 0;
     old = irq_cb[irq];
     irq_cb[irq] = func;
-    psx_log("etc: InterruptCallback(%d, 0x%08X)%s\n", irq, func, irq ? ": recorded, not delivered" : "");
+    static unsigned logs;
+    if (psx_log_due(&logs))
+        psx_log("etc: InterruptCallback(%d, 0x%08X)%s\n", irq, func, irq ? ": recorded, not delivered" : "");
     return old;
 }
 #endif
@@ -137,7 +142,8 @@ psx_addr DMACallback(int ch, psx_addr func) {
     ch &= 7;
     old = dma_cb[ch];
     dma_cb[ch] = func;
-    psx_log("etc: DMACallback(%d, 0x%08X): recorded, not delivered\n", ch, func);
+    static unsigned logs;
+    if (psx_log_due(&logs)) psx_log("etc: DMACallback(%d, 0x%08X): recorded, not delivered\n", ch, func);
     return old;
 }
 #endif
@@ -147,7 +153,8 @@ int ResetCallback(void) {
     memset(vsync_cb, 0, sizeof vsync_cb);
     memset(irq_cb, 0, sizeof irq_cb);
     memset(dma_cb, 0, sizeof dma_cb);
-    psx_log("etc: ResetCallback\n");
+    static unsigned logs;
+    if (psx_log_due(&logs)) psx_log("etc: ResetCallback\n");
     return 0;
 }
 #endif
@@ -179,7 +186,7 @@ void PadInit(int mode) { (void)mode; }
 #endif
 #ifndef PSX_GAME_HAS_PadRead
 uint32_t PadRead(int id) {
-    uint16_t b = host_pad();
+    uint16_t b = psx_pad_bits();
     (void)id;
     return (uint32_t)(uint16_t)((b << 8) | (b >> 8));
 }
@@ -217,7 +224,8 @@ int SetRCnt(uint32_t spec, int target, int mode) {
     rcnt[i].target = (uint32_t)target & 0xFFFF;
     rcnt[i].mode = (uint32_t)mode;
     clock_gettime(CLOCK_MONOTONIC, &rcnt[i].base);
-    psx_log("etc: SetRCnt(%d, target %d, mode 0x%X)\n", i, target, mode);
+    static unsigned logs;
+    if (psx_log_due(&logs)) psx_log("etc: SetRCnt(%d, target %d, mode 0x%X)\n", i, target, mode);
     return 1;
 }
 #endif

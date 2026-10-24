@@ -91,7 +91,7 @@ static int n_seqs = N_SEQS, reserved_voices = SPU_VOICES, mono, tick_hz = 60, ga
 static uint32_t clock_age;
 static int logged;
 
-#define LOG(...) do { if (logged++ < LOGS * 4) psx_log(__VA_ARGS__); } while (0)
+#define LOG(...) do { if (logged < LOGS * 4 && ++logged) psx_log(__VA_ARGS__); } while (0)
 
 static uint16_t rd16(const uint8_t *p) { return (uint16_t)(p[0] | p[1] << 8); }
 

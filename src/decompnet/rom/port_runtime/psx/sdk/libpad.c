@@ -1,4 +1,5 @@
-/* libpad: PadInitDirect's buffers get the keyboard as a digital pad (id 0x41) on port 1, nothing on port 2. */
+/* libpad: PadInitDirect's buffers get the keyboard and PSX_PAD_SCRIPT's presses (psx_pad_bits, psx/pad_script.c)
+ * as a digital pad (id 0x41) on port 1, nothing on port 2. */
 #include <stddef.h>
 
 #include "../psx_runtime.h"
@@ -30,7 +31,7 @@ void PadStopCom(void) { started = 0; }
 #endif
 
 void psx_pad_update(void) {
-    uint16_t bits = host_pad();
+    uint16_t bits = psx_pad_bits();
     if (buf1) {
         buf1[0] = 0x00; /* connected */
         buf1[1] = 0x41; /* digital pad, 1 halfword of buttons */
@@ -40,3 +41,40 @@ void psx_pad_update(void) {
     if (buf2) buf2[0] = 0xFF; /* no controller */
     (void)started;
 }
+
+/* libpad's state and actuator calls, for a game that runs libpad's state machine itself (SLUS-01252's pad reader):
+ * port 0x00 is a digital pad once PadInitDirect has its buffers, PadStateFindCTP1 (2: found, no actuators to set
+ * up), port 0x10 nothing (PadStateDiscon, 0); no modes, no motors, nothing to align */
+#ifndef PSX_GAME_HAS_PadGetState
+int PadGetState(int port) { return (port & 0xFF) == 0x00 && buf1 ? 2 : 0; }
+#endif
+#ifndef PSX_GAME_HAS_PadInfoMode
+int PadInfoMode(int port, int term, int offs) {
+    (void)port;
+    (void)term;
+    (void)offs;
+    return 0;
+}
+#endif
+#ifndef PSX_GAME_HAS_PadSetMainMode
+int PadSetMainMode(int port, int offs, int lock) {
+    (void)port;
+    (void)offs;
+    (void)lock;
+    return 0;
+}
+#endif
+#ifndef PSX_GAME_HAS_PadSetAct
+void PadSetAct(int port, uint8_t *data, int len) {
+    (void)port;
+    (void)data;
+    (void)len;
+}
+#endif
+#ifndef PSX_GAME_HAS_PadSetActAlign
+int PadSetActAlign(int port, uint8_t *data) {
+    (void)port;
+    (void)data;
+    return 0;
+}
+#endif

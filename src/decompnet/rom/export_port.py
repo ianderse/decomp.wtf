@@ -56,11 +56,16 @@ GAME_OPT = "-O1"
 IMPLEMENTED = {
     "VSync": "libetc", "ResetGraph": "libgpu", "SetGraphDebug": "libgpu", "SetDispMask": "libgpu",
     "SetDefDrawEnv": "libgpu", "SetDefDispEnv": "libgpu", "PutDrawEnv": "libgpu", "PutDispEnv": "libgpu",
-    "PadInitDirect": "libpad", "PadStartCom": "libpad", "PadStopCom": "libpad",
+    "PadInitDirect": "libpad", "PadStartCom": "libpad", "PadStopCom": "libpad", "PadGetState": "libpad",
+    "PadInfoMode": "libpad", "PadSetMainMode": "libpad", "PadSetAct": "libpad", "PadSetActAlign": "libpad",
     "SetRotMatrix": "libgte", "SetTransMatrix": "libgte", "RotMatrix": "libgte", "TransMatrix": "libgte",
     "ScaleMatrix": "libgte", "MulMatrix0": "libgte", "ApplyMatrix": "libgte", "SquareRoot0": "libgte",
     "InitGeom": "libgte", "SetGeomOffset": "libgte", "SetGeomScreen": "libgte",
     "OpenEvent": "libapi", "CloseEvent": "libapi", "EnableEvent": "libapi", "DisableEvent": "libapi",
+    "DeliverEvent": "libapi", "UnDeliverEvent": "libapi", "TestEvent": "libapi", "WaitEvent": "libapi",
+    # libcard over the card image (psx/sdk/libcard.c): PSY-Q's names, for a game that has them named
+    **{n: "libcard" for n in """InitCARD StartCARD StopCARD _bu_init _card_info _card_load _card_auto _card_read
+       _card_write _new_card _card_status _card_wait _card_chan _card_clear _card_format""".split()},
     "EnterCriticalSection": "libapi", "ExitCriticalSection": "libapi",
     # libgpu over the software GPU (psx/gpu.c, psx/sdk/libgpu.c): the library and the driver under it
     **{n: "libgpu" for n in """SetGraphReverse SetGraphQueue GetGraphType GetGraphDebug GetDrawEnv GetDispEnv DrawSync
@@ -145,6 +150,16 @@ SDK_IDENTIFIED = {
         "func_8006E614": ("MDEC_reset", "mode 0: MDEC1 = 0x80000000, the DMA channels stopped, MDEC_in of the quant "
                                         "table (0x40000001 + 128 bytes at D_8006F360) and the scale matrix "
                                         "(0x60000000 + 64 halfwords at D_8006F3E4); 1: abort; else the time-out path"),
+        # libpad's state machine, matched as the game's: each reads libpad's port object through D_801A0ED4 (which
+        # libpad's PadInitDirect sets up, not the runtime's); the game's pad reader func_800C305C calls them
+        "func_8017E360": ("PadGetState", "matched C: the port object's state byte (+0x49), 2/3 -> 1 and 6 -> 4 "
+                                         "while a request is pending; the pad reader steps its own state on 0/1/2/6"),
+        "func_8017E430": ("PadInfoMode", "matched C: switch on term 1 (current id, +0xE8), 2 (current extended id, "
+                                         "+0xE6), 3 (offset, +0xE4), 4 (the id list, offs < count +0xE3), 100"),
+        "func_8017E050": ("PadSetAct", "matched C: the port object's actuator data pointer (+0x28) and length "
+                                       "(+0x34); the pad reader calls it (port, &D_801A0F7C, 2)"),
+        "func_8017E090": ("PadSetActAlign", "matched C: when the port is idle, the align request (+0x46 = 1, the "
+                                            "callbacks at +0x14/+0x18, the data at +0x20), 1; else 0"),
     },
 }
 # the BIOS's C library calls (A0 table slot -> wrapper signature) the runtime implements behind the game's stub names
@@ -165,11 +180,39 @@ BIOS_LIBC = {
     "A0_34": ("int", "void *a", "(psx_bios_free(PSX_PTR(a)), 0)"),
     "A0_37": ("void *", "unsigned n, unsigned size", "psx_bios_calloc(n, size)"),
     "A0_38": ("void *", "void *a, unsigned n", "psx_bios_realloc(PSX_PTR(a), n)"),
-    # events: a handle each, never delivered yet
+    # events (psx/sdk/libapi.c): opened, delivered (by the game, and by the card driver from the vblank), tested
+    "B0_07": ("int", "unsigned a, unsigned b", "psx_bios_DeliverEvent(a, b)"),
     "B0_08": ("int", "unsigned a, unsigned b, unsigned c, unsigned d", "psx_bios_OpenEvent(a, b, c, d)"),
     "B0_09": ("int", "unsigned a", "psx_bios_CloseEvent(a)"),
+    "B0_0A": ("int", "unsigned a", "psx_bios_WaitEvent(a)"),
+    "B0_0B": ("int", "unsigned a", "psx_bios_TestEvent(a)"),
     "B0_0C": ("int", "unsigned a", "psx_bios_EnableEvent(a)"),
     "B0_0D": ("int", "unsigned a", "psx_bios_DisableEvent(a)"),
+    "B0_20": ("int", "unsigned a, unsigned b", "psx_bios_UnDeliverEvent(a, b)"),
+    # the memory card (psx/sdk/libcard.c): slot 1 is PSX_MEMCARD's card image, the events a vblank later
+    "B0_4A": ("int", "int a", "psx_bios_InitCARD(a)"),
+    "B0_4B": ("int", "void", "psx_bios_StartCARD()"),
+    "B0_4C": ("int", "void", "psx_bios_StopCARD()"),
+    "B0_4E": ("int", "int a, int b, const void *c", "psx_bios_card_write(a, b, PSX_PTR(c))"),
+    "B0_4F": ("int", "int a, int b, void *c", "psx_bios_card_read(a, b, PSX_PTR(c))"),
+    "B0_50": ("int", "void", "psx_bios_new_card()"),
+    "B0_5C": ("int", "int a", "psx_bios_card_status(a)"),
+    "B0_5D": ("int", "int a", "psx_bios_card_wait(a)"),
+    "A0_70": ("int", "void", "psx_bios_bu_init()"),
+    "A0_AB": ("int", "int a", "psx_bios_card_info(a)"),
+    "A0_AC": ("int", "int a", "psx_bios_card_load(a)"),
+    "A0_AD": ("int", "int a", "psx_bios_card_auto(a)"),
+    # the BIOS's file calls, on the card's "bu00:" (a direntry returned as the game's own pointer)
+    "B0_32": ("int", "const char *a, int b", "psx_bios_open(PSX_PTR(a), b)"),
+    "B0_33": ("int", "int a, int b, int c", "psx_bios_lseek(a, b, c)"),
+    "B0_34": ("int", "int a, void *b, int n", "psx_bios_read(a, PSX_PTR(b), n)"),
+    "B0_35": ("int", "int a, const void *b, int n", "psx_bios_write(a, PSX_PTR(b), n)"),
+    "B0_36": ("int", "int a", "psx_bios_close(a)"),
+    "B0_41": ("int", "const char *a", "psx_bios_format(PSX_PTR(a))"),
+    "B0_42": ("unsigned", "const char *a, void *b",
+              "psx_bios_firstfile(PSX_PTR(a), PSX_PTR(b)) ? psx_ps1(PSX_PTR(b)) : 0u"),
+    "B0_43": ("unsigned", "void *a", "psx_bios_nextfile(PSX_PTR(a)) ? psx_ps1(PSX_PTR(a)) : 0u"),
+    "B0_45": ("int", "const char *a", "psx_bios_erase(PSX_PTR(a))"),
     # libapi's syscall wrappers (syscall_stubs)
     "SYS_01": ("int", "void", "psx_EnterCriticalSection()"),
     "SYS_02": ("int", "void", "psx_ExitCriticalSection()"),
@@ -880,9 +923,10 @@ def _c_string(s: str) -> str:
 def sdk_stubs_c(sdk: list[dict], renames: dict[str, str] | None = None) -> str:
     renames = renames or {}
     declared: set[str] = set()
-    out = ["/* Sony's library functions and BIOS call stubs: a logging stub each (the first 20 calls of each), or the",
+    out = ["/* Sony's library functions and BIOS call stubs: a logging stub each (psx_sdk_stub: the first 20 calls of",
+           " * each, then every 10,000th with its count up to the 10,000,000th; the count saturates, never wraps), or the",
            " * runtime's implementation of the BIOS's C library calls. The implemented ones (psx/sdk) are not here. */",
-           '#include "psx_runtime.h"', '#include "libapi.h"', '#include "libcd.h"', ""]
+           '#include "psx_runtime.h"', '#include "libapi.h"', '#include "libcard.h"', '#include "libcd.h"', ""]
     for lib in LIBRARIES:
         group = [s for s in sdk if s["lib"] == lib and s["kind"] != "implemented"]
         if not group:
@@ -910,7 +954,7 @@ def sdk_stubs_c(sdk: list[dict], renames: dict[str, str] | None = None) -> str:
                     out.append(f"int {c}({args}) {{ return ((int (*)({', '.join(['long'] * 8)})){tgt})({fwd}); }}"
                                f" /* {tgt}{': ' + _c_string(s['why']) if s.get('why') else ''} */")
             else:
-                out.append(f"static int calls_{s['name']};")
+                out.append(f"static unsigned calls_{s['name']};")
                 label = s["name"] if s["label"] == s["name"] else f"{s['name']} ({s['label']})"
                 out.append(f'int {c}(void) {{ return psx_sdk_stub("{label}", &calls_{s["name"]}); }}{note}')
         out.append("")
@@ -2732,8 +2776,13 @@ resolves), `PSX_NULL_FAULT=1` RAM's KUSEG mirror unmapped (a null PS1 pointer fa
 at exit (also after a crash); `PSX_PORT_DUMP_SCREEN=file.png` what the SDL window shows, every 30 frames
 (with `PSX_PORT_DUMP_EVERY=N` the display area every N vblanks as file-NNNNNN.png instead, headless too);
 `PSX_GPU_SELFTEST=N` N frames drawn through libgpu (environments, an ordering table, polygons, a CLUT sprite, a
-polyline) instead of the game. Keys: arrows (d-pad), Z/X/A/S (cross/circle/square/triangle),
-Return (start), right shift (select), Q/W (L1/R1), 1/2 (L2/R2). CMake options: `-DPSX_PTR32=OFF` (the C as it is,
+polyline) instead of the game; `PSX_MEMCARD=card.mcr` a memory card in slot 1, a 128 KB card image (raw frames, as
+emulators keep them; created formatted when missing, written back after every write; without it there is no card,
+and the card calls answer TIMEOUT a vblank later, as a console with an empty slot does). Keys: arrows (d-pad), Z/X/A/S
+(cross/circle/square/triangle), Return (start), right shift (select), Q/W (L1/R1), 1/2 (L2/R2); `PSX_PAD_SCRIPT=
+"start@300,cross@600-640"` presses buttons at those vblanks, alongside the keyboard (names: up down left right cross
+circle square triangle l1 l2 r1 r2 start select; a press lasts 10 vblanks, `PSX_PAD_SCRIPT_HOLD=N`, unless given as
+FROM-TO), for a run that reproduces. CMake options: `-DPSX_PTR32=OFF` (the C as it is,
 8-byte pointers), `-DPSX_HOST=sdl|cocoa|none`, `-DCMAKE_OSX_ARCHITECTURES=x86_64` (the same build for Rosetta 2;
 the default is the host's architecture, arm64 on Apple silicon).
 
@@ -2746,7 +2795,7 @@ the default is the host's architecture, arm64 on Apple silicon).
 | Matched files left out (don't compile for the host; stubbed) | {len(ex)} |
 | Unmatched functions (stubs in `gen/psx_unmatched.c`, the left-out ones included) | {r['unmatched']} |
 | Sony functions as logging stubs (`gen/psx_sdk_stubs.c`) | {r['sdk_stubs']} ({sdk_lib}) |
-| BIOS C library calls (memcpy, strlen, rand, ...) implemented behind the game's stub names | {r['sdk_bios']} |
+| BIOS calls implemented behind the game's stub names (the C library, the heap, events, the memory card and its files) | {r['sdk_bios']} |
 | Sony functions implemented (`psx/sdk/*.c`) | {len(r['sdk_implemented'])}: {', '.join(r['sdk_implemented'])} |
 | SDK ranges: every function in them is the SDK's (the project's compiler regions holding Sony functions, or `--sdk-range`) | {', '.join(r.get('sdk_ranges') or []) or 'none'}: {r.get('sdk_range_functions', 0)} functions, {len(r.get('sdk_range_replaced') or [])} of them matched C the runtime replaces |
 | Unnamed SDK functions forwarded to the runtime's by their Sony name or their code (`SONY_SHAPES`; `gen/psx_sdk_stubs.c`) | {len(r.get('sdk_aliases') or {})}{': ' + ', '.join(f"`{a}` = {b}" for a, b in (r.get('sdk_aliases') or {}).items()) if r.get('sdk_aliases') else ''} |

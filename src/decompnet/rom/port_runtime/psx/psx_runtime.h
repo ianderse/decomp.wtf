@@ -101,7 +101,18 @@ void psx_ram_init(void);
 void *psx_map(uint32_t ps1_addr, uint32_t size); /* a part of the window, or NULL if it is taken */
 void psx_dispatch_init(void);
 int psx_unmatched(const char *name);
-int psx_sdk_stub(const char *name, int *calls);
+int psx_sdk_stub(const char *name, unsigned *calls);
+/* a per-site log that can't grow without bound: counts the call in *n (saturating at PSX_COUNT_MAX, never wrapping)
+ * and says whether to log it: the first PSX_LOG_FIRST, then every PSX_LOG_EVERY-th up to PSX_LOG_LAST, then never
+ * (at most 1,020 lines a site, however long the run) */
+#define PSX_LOG_FIRST 20u
+#define PSX_LOG_EVERY 10000u
+#define PSX_LOG_LAST 10000000u
+#define PSX_COUNT_MAX 0x7FFFFFFFu
+static inline int psx_log_due(unsigned *n) {
+    if (*n < PSX_COUNT_MAX) ++*n;
+    return *n <= PSX_LOG_FIRST || (*n <= PSX_LOG_LAST && *n % PSX_LOG_EVERY == 0);
+}
 int psx_soft(void);
 void psx_exit_report(void);
 void psx_gpu_exit(void); /* psx/sdk/libgpu.c: the GPU's counts, and PSX_PORT_DUMP_VRAM */
@@ -118,6 +129,11 @@ void host_present(const uint16_t *vram, int x, int y, int w, int h, int rgb24);
 void gpu_display_rgba(const uint16_t *vram, int x, int y, int w, int h, int rgb24, uint32_t *out);
 int gpu_write_png(const char *path, const uint32_t *px, int w, int h);
 uint16_t host_pad(void);                         /* PS1 pad bits, 1 = pressed (PSY-Q PAD* order) */
+/* the scripted pad (psx/pad_script.c, PSX_PAD_SCRIPT): presses over vblank ranges, ORed with the keyboard */
+typedef struct { uint16_t bits; int from, to; } PsxPadPress;
+int psx_pad_script_parse(const char *s, PsxPadPress *out, int max, int hold);
+uint16_t psx_pad_script_bits(const PsxPadPress *p, int n, int frame);
+uint16_t psx_pad_bits(void); /* what the pad layer reads each vblank: host_pad() | the script's at psx_frames() */
 int host_quit(void);
 void host_shutdown(void);
 const char *host_name(void);
