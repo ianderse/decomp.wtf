@@ -532,3 +532,10 @@ def test_port_md_lists_the_patches():
             "saved $ra as the 7th argument, never 1; the port passes 0. |") in md
     assert "None." in ep.patches_md([])
     assert "patches_md(r.get('patches')" in inspect.getsource(ep.port_md)
+
+
+def test_run_sh_renders_the_shell_as_written():
+    from decompnet.rom.export_port import run_sh
+    text = run_sh("slus-01252", "game.overlays.exe")
+    assert text.startswith("#!/bin/sh") and "${PSX_PORT_SOFT:-1}" in text and "{ echo" in text
+    assert "../source/game.overlays.exe" in text and "decomp port slus-01252 --build" in text and "@SLUG@" not in text and "@IMAGE@" not in text

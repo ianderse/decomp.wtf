@@ -998,22 +998,22 @@ if [ -z "$PSX_DISC" ]; then
   [ -n "$PSX_DISC" ] && export PSX_DISC
 fi
 if [ -z "$PSX_SOURCE_DIR" ]; then
-  if [ -f "../source/{image}" ]; then
-    cp -f "../source/{image}" "{image}" 2>/dev/null
-  elif [ ! -f "{image}" ]; then
-    echo "run.sh: no game executable: ../source/{image} is missing (export in progress?) and no copy here yet" >&2
+  if [ -f "../source/@IMAGE@" ]; then
+    cp -f "../source/@IMAGE@" "@IMAGE@" 2>/dev/null
+  elif [ ! -f "@IMAGE@" ]; then
+    echo "run.sh: no game executable: ../source/@IMAGE@ is missing (export in progress?) and no copy here yet" >&2
     exit 1
   fi
-  [ -f "../source/{image}" ] || export PSX_SOURCE_DIR="$(pwd)"
+  [ -f "../source/@IMAGE@" ] || export PSX_SOURCE_DIR="$(pwd)"
 fi
-[ -x build/game ] || {{ echo "run.sh: build/game is missing: decomp port {slug} --build" >&2; exit 1; }}
+[ -x build/game ] || { echo "run.sh: build/game is missing: decomp port @SLUG@ --build" >&2; exit 1; }
 exec ./build/game "$@"
 """
 
 
 def run_sh(slug: str, image: str) -> str:
     """The launcher next to the binary: `port/run.sh`, soft mode and the disc set, the executable kept at hand."""
-    return RUN_SH.format(slug=slug, image=image)
+    return RUN_SH.replace("@SLUG@", slug).replace("@IMAGE@", image)  # not str.format: the shell's ${...} has braces
 
 
 def cmakelists(slug: str) -> str:
