@@ -17,7 +17,7 @@ picked up. What it adds, in <project>/port/:
   (logs, then stops unless PSX_PORT_SOFT=1); Sony's library functions as logging stubs, a few implemented (VSync,
   the environment calls, the pad, libgte's matrix arithmetic, the BIOS's C library calls).
 - a table of every function at its PS1 address, so a call through a function pointer read from the game's data (a
-  MIPS address) lands on the host function (psx_host_fn); the overlays that share an address are told apart by their
+  MIPS address) lands on the host function (psx/call32.S's trampoline, then psx_host_fn); the overlays that share an address are told apart by their
   code in RAM. A game function's address taken in the C is its PS1 address too (gen/psx_function_addrs.txt).
 
 Generation is a set of pure functions (tested in tests/test_export_port.py); export_port() reads the tree and the
@@ -2846,12 +2846,13 @@ generated from this game). `port.json` has these numbers.
   address) is its low 32 bits; a string literal of the game's whose address it takes is moved into the window (an
   absolute symbol `__psx_lit_<sha1>` at 0x70000000 and up, its bytes copied in at start-up: `build/psx_literals.S`); a game function's address taken in the C is its PS1 address (`gen/psx_function_addrs.txt`),
   so function pointers in RAM are MIPS addresses and compare equal to the game's data; a call through a 32-bit
-  pointer asks the runtime (`psx_host_fn`: the function table, overlays told apart by their code in RAM; any other
-  address ends the run with it). 32-bit
+  pointer goes through the runtime's trampoline (`psx/call32.S`, the PS1 address in x15/r10 as LLVM's `nest`
+  argument; the argument registers the C didn't set keep what the caller had, as `jalr` does on the PS1) to the
+  function table's (`psx_host_fn`: overlays told apart by their code in RAM; any other address ends the run with it). 32-bit
   address arithmetic stays as it is. All 4000 files' IR goes through it; the same 3 fail as before (their C).
 - **The runtime's side**: a pointer the game passes is a PS1 address (`PSX_PTR`/`psx_host`), and a pointer the
   runtime hands the game must be in the window: RAM, the game's stack, or the PS1 heap (`InitHeap`/`malloc`, in RAM).
-- **Calls through the game's function pointers** go through `psx_host_fn`; the SIGSEGV handler that sent a jump
+- **Calls through the game's function pointers** go through `psx_call32` and `psx_host_fn`; the SIGSEGV handler that sent a jump
   into RAM to the host function stays as a safety net for jumps from anywhere else.
 - **Sound**: `psx/spu.c` is a software SPU written from psx-spx: 512 KB of SPU RAM, 24 ADPCM voices with the loop
   flags, ADSR, the 4.12 pitch counter (linear interpolation), fixed volumes, the CD input; its register file is the

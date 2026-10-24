@@ -307,17 +307,28 @@ def test_ir_a_game_functions_address_is_its_ps1_address():
     assert "%6 = ptrtoint ptr @host_thing to i32" in out  # not a game function: its truncated host address
 
 
-def test_ir_calls_through_a_32_bit_pointer_ask_the_runtime():
+def test_ir_calls_through_a_32_bit_pointer_go_through_the_trampoline():
+    # case 5: psx_call32 (psx/call32.S) with the PS1 address as the nest argument (x15 / r10), the C call's own
+    # arguments after it; no psx_host_fn call in front, whose result would land in x0 (the callee's own address)
     out = _patch("%3 = load ptr addrspace(271), ptr %1, align 4",
                  "call addrspace(271) void %3(ptr addrspace(271) noundef %0) #2, !dbg !7",
                  "%4 = call addrspace(271) i32 addrspacecast (ptr @g to ptr addrspace(271))(i32 noundef 1)",
-                 "call addrspace(271) void inttoptr (i32 -2145926668 to ptr addrspace(271))()")
+                 "call addrspace(271) void inttoptr (i32 -2145926668 to ptr addrspace(271))()",
+                 "%5 = load ptr addrspace(271), ptr %1, align 4",
+                 "%6 = tail call addrspace(271) i32 (i32, ...) %5(i32 noundef 7, double 1.0)")
     assert "%__p32_1 = ptrtoint ptr addrspace(271) %3 to i32" in out
-    assert "%__p32_2 = call ptr @psx_host_fn(i32 %__p32_1), !dbg !7" in out
-    assert "call void %__p32_2(ptr addrspace(271) noundef %0) #2, !dbg !7" in out
+    assert "%__p32_2 = zext i32 %__p32_1 to i64" in out and "%__p32_3 = inttoptr i64 %__p32_2 to ptr" in out
+    assert "call void @psx_call32(ptr nest %__p32_3, ptr addrspace(271) noundef %0) #2, !dbg !7" in out
     assert "%4 = call i32 @g(i32 noundef 1)" in out  # a direct call written through a cast
-    assert "%__p32_3 = call ptr @psx_host_fn(i32 -2145926668)" in out and "call void %__p32_3()" in out
-    assert out.count("declare ptr @psx_host_fn(i32)") == 1
+    assert "%__p32_4 = zext i32 -2145926668 to i64" in out
+    assert "call void @psx_call32(ptr nest %__p32_5)" in out  # no arguments: x0-x7 are the caller's
+    assert "%6 = tail call i32 (ptr, i32, ...) @psx_call32(ptr nest %__p32_8, i32 noundef 7, double 1.0)" in out
+    assert "psx_host_fn" not in out and out.count("declare void @psx_call32()") == 1
+    assert cc_leftovers(out) == []
+
+
+def cc_leftovers(out):
+    return _tool("cc_ptr32").leftovers(out)
 
 
 def test_the_window_base_is_one_constant():

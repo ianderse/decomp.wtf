@@ -67,11 +67,26 @@ the same bank played through the same code outside the game sounds (below).
   SLUS-01252's bss ends at 0x801FFA20, 0x5D0 bytes below the top, and where the game puts its heap is only known at
   run time. Any other data of a game file whose address goes 32-bit fails the compile (none: across the 3,997
   files' IR only the 2 string literals are host data the game points at); (4) a game function's address as a 32-bit pointer or integer: its PS1 address, from
-  gen/psx_function_addrs.txt; (5) a call through a 32-bit pointer: `psx_host_fn(i32)`, then the call through the
-  host pointer it returns; (6) ptrtoint/inttoptr between 271 and i32 stay (PS1 address arithmetic). Constants (raw
+  gen/psx_function_addrs.txt; (5) a call through a 32-bit pointer: a call to `psx_call32` (psx/call32.S) with
+  the C call's own return type and arguments plus the PS1 address as LLVM's `nest` argument (x15 on arm64, r10 on
+  x86_64: outside the argument registers, and set by the compiler at the call itself, which inline asm writing x16
+  before an ordinary call couldn't promise), the trampoline keeping x0-x7, x8 and q0-q7 around the lookup and
+  branching to the host function (see "Calls through PS1 addresses"); (6) ptrtoint/inttoptr between 271 and i32 stay (PS1 address arithmetic). Constants (raw
   addresses, a symbol's address) are folded as constant expressions; an i32 made into an ordinary pointer is a PS1
   address too. A check after the transform fails the compile if any access through addrspace(271) is left.
-- **Calls through PS1 addresses.** psx_host_fn looks the address up in gen/psx_functions.c (every function with its
+- **Calls through PS1 addresses.** The trampoline (psx/call32.S, 2026-10-24): on the PS1 a `jalr` leaves every
+  argument register the C didn't set as the caller had it, and matched C relies on it (`(*slot)()` or `handler()`
+  whose callee reads $a0, the caller's object still there). The port used to call psx_host_fn first and then the
+  pointer it returned, so such a call arrived with x0 = the callee's own host address: SLUS-01252's New Game
+  faulted in func_800C58EC writing `*(u16 *)(arg0 + 0x84)` at its own address truncated, plus 0x84. Now x0-x7, the
+  struct-return pointer x8 and q0-q7 reach the callee as the call site left them, and `br` (no frame) returns it
+  straight to the caller. As far as the caller's compiled code leaves them alone: a register the C never sets
+  holds whatever clang left there, which is the caller's own argument only while nothing used it in between (port
+  patches like func_800CA600.c and func_80137FD4.c, which pass the object, stay the sure fix). On arm64 a
+  direct-mapped cache of 1,024 {PS1 address, the two code words in RAM there, host function} answers without
+  saving anything (psx_function_at depends on just those); a miss, or other code in RAM at the address, asks
+  psx_call32_lookup in C. x86_64 has the same trampoline without the cache (a `jmp`). tests/test_port_call32.py runs
+  it with every argument register set. psx_host_fn looks the address up in gen/psx_functions.c (every function with its
   PS1 address and first two instructions, which tell overlays at one address apart); any other address ends the
   run with the PS1 address in the message. No host function is ever handed to the game as a pointer (the runtime
   registers no callbacks yet; one that does needs a PS1 identity of its own in the table). The SIGSEGV handler that moved a jump into RAM to
@@ -404,6 +419,59 @@ and Cross on Continue: "No Memory Card was found." (Retry / Cancel) without a ca
 new file the card is created formatted, `_card_info` answers NEW, the game clears it (HwCARD IOE), lists
 BASLUS-01252ARC2-00* and BASLUS-01224ARC1-00* (Arc 1's saves, for Convert: none), and Continue shows "Load, Card 1:
 1-3 [No Data Present]". Tests: tests/test_port_card.py.
+
+## Calls through function pointers keep the argument registers (2026-10-24)
+
+**The bug.** New Game (`PSX_PAD_SCRIPT="start@300,cross@900"`) ended about 20 s in with a segmentation fault in
+func_800C58EC, which writes `*(u16 *)(arg0 + 0x84)`: arg0 was func_800C58EC's own host address cut to 32 bits.
+Some caller invokes it through a 32-bit function pointer with fewer arguments than it reads, `(*slot)()` or
+`handler()`, byte-exact on the MIPS because $a0 still holds the caller's object at the `jalr`. The port's call was
+`h = psx_host_fn(addr); h()`, so x0 was psx_host_fn's result, the callee's own address. The port patch for the one
+audited table call (func_800CA600.c) didn't help, so another site does it too, and the class is every call through
+a pointer that passes fewer arguments than the callee reads.
+
+**The fix: psx/call32.S.** cc_ptr32.py's case 5 now emits `call <ret> @psx_call32(ptr nest %ps1, <the C call's own
+arguments>)`: LLVM puts the `nest` argument in x15 on arm64 (r10 on x86_64), outside the argument registers, and
+sets it at the call itself; inline asm that writes x16 before an ordinary call (as the brief suggested, and as the
+trace does for its own call) can't promise the register allocator leaves it alone until the `bl`. The trampoline
+looks the address up and `br`s to the host function, so the callee returns straight to the caller with the stack
+arguments where the caller put them. x0-x7, x8 and q0-q7 reach the callee as the call site left them: the C call's
+explicit arguments where clang put them, and the registers it doesn't set holding whatever the caller's compiled
+code left there, which is the caller's own argument as long as nothing in between used the register (that is not
+guaranteed the way it is on the MIPS, where GCC's code is the code; port patches that pass the object explicitly
+stay the sure fix). On arm64 a direct-mapped cache of 1,024 slots {PS1 address, the two code words in RAM there,
+host function} answers with x9-x14/x16 only: psx_function_at's answer depends on the address and those two words
+alone (overlays at one address are told apart by them), so a slot whose words are still in RAM is the same answer,
+and an overlay load misses. A miss saves the registers and calls psx_call32_lookup (psx_host_fn: the first-call
+log, the error and the exit for an address with no function, then the slot filled). x86_64 has the trampoline
+without the cache (`jmp *%r11`), assembled by the tests, not run. tests/test_port_call32.py runs the arm64 one with
+x0-x8 and d0-d7 set to known values through the lookup, a cache hit and a cache miss on changed code words, and
+checks that an IR call with a `nest` argument reaches the lookup with the address and the callee with x0/x1.
+
+**The fault report** now prints the host backtrace, walked from the interrupted fp/lr (`backtrace()` stops at the
+first frame outside the thread's stack, and the game runs on the PS1 stack at 0x60000000 in the window), each frame
+checked to be in the game's stack, PS1 RAM or the host stack before it is read; and says what a faulting window
+address looks like: "the PS1 address of func_X's code" for a function's own address used as data, or "looks like a
+host code address truncated: a function pointer or return address stored as 32 bits" when its low 32 bits fall in
+the executable's __TEXT (with the function and offset it was cut from).
+
+Measured (`port-call`, a copy of the 2026-10-24 export with port-card's seven patches, soft, headless): the
+generator's strict run stops at func_80156FF0 (as before), the soft one runs its 5 s (292 frames, the movie
+playing). New Game, 90 s: Start skips the movie at vblank 300, the title from 10 s, Cross at 900 fades it out
+(15.5 s), the screen black from 16 s while the game reads SG00.STG (225,280 bytes, the VAB heads and bodies to SPU
+RAM, 284,672 more bytes), then func_800C5804 and **func_800C58EC are called through their PS1 addresses and return**,
+and run_callback_and_record_coordinate_deltas, func_800C3F68, func_800C3E0C, func_80150408 and func_80150434 after
+them. The run stops at vblank 1058 (17.6 s) with a segmentation fault in func_80166B80 at PS1 0x01FB002D; the new
+backtrace names the chain: func_80166B80 <- func_80157F94 <- assert_fail (a misnomer: the window system's set-up)
+<- func_80150434 <- initialize_world_section <- func_800C2838 <- func_800C27B8 (main). The cause is soft mode's
+stubs: func_801574C8 builds a window from func_80155B6C (matched, but its file declares func_80155AD4 after calling
+it, which clang refuses: "conflicting types", so it is excluded and stubbed) and func_801668AC (still assembly, 124
+instructions), both returning 0, and func_80166B80 reads the null object's fields. A port patch moving
+func_80155B6C's prototype up compiles it; func_801668AC needs matching. The still-assembly functions New Game reaches,
+in order: func_80156FF0, func_8014F118, func_800C2F94, func_80137BD8, func_800F8C18, func_800F94BC, func_800C3944,
+func_800F9B98, func_800FA818, func_800F8EF8, func_800D76C8, func_800C5DB0, func_800C45B4, func_801668AC (and
+func_80155B6C's excluded C). The title path (`start@300`, 30 s) is unchanged: the title from 10 s, still there at
+25 s, no fault.
 
 ## What the next pass needs
 

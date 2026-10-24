@@ -63,6 +63,7 @@ int psx_vblank_wait(void);
 #define PSX_SCRATCH_SIZE 0x00010000u /* scratchpad and the I/O ports after it, as plain memory */
 #define PSX_STACK_TOP 0x60800000u    /* the game's stack: 8 MB below this (a fallback lower in the window if taken) */
 #define PSX_STACK_SIZE 0x00800000u
+extern uint32_t psx_game_stack_bottom; /* where main.c mapped it (PSX_STACK_TOP - PSX_STACK_SIZE, or a fallback) */
 #define PSX_LITERAL_BASE 0x70000000u /* the game's string literals (tools/cc_ptr32.py --collect-literals) */
 #define PSX_LITERAL_SIZE 0x00100000u
 #define PSX_RUNTIME_BUF_BASE 0x7F000000u /* the runtime's own buffers it hands the game (psx_runtime_alloc) */
@@ -87,6 +88,14 @@ static inline int psx_in_window(const void *p) {
  * table's function at that address (overlays told apart by their code in RAM); anything else ends the run with the
  * PS1 address. Calls through the game's function pointers go here (tools/cc_ptr32.py). */
 void *psx_host_fn(uint32_t addr);
+/* psx/call32.S: the trampoline every call through a game function pointer goes through (cc_ptr32.py's case 5), the
+ * PS1 address in x15 (r10), the call site's argument registers kept; its cache of recent lookups ({PS1 address, the
+ * code words in RAM there, host function}, direct-mapped by address) and the C lookup behind it */
+typedef struct { uint32_t ps1, word0, word1, pad; const void *fn; } PsxCall32Slot;
+#define PSX_CALL32_SLOTS 1024 /* psx/call32.S agrees */
+extern PsxCall32Slot psx_call32_cache[PSX_CALL32_SLOTS];
+void psx_call32(void);
+void *psx_call32_lookup(uint32_t addr);
 
 /* the PS1 heap in RAM (InitHeap's region, as the BIOS's malloc): memory the runtime may hand the game */
 void psx_heap_init(uint32_t addr, uint32_t size);

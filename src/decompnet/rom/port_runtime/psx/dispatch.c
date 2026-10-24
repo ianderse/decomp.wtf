@@ -5,6 +5,8 @@
 #define _XOPEN_SOURCE 700
 #define _DARWIN_C_SOURCE
 #include <dlfcn.h>
+#include <execinfo.h>
+#include <pthread.h>
 #include <signal.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -12,6 +14,10 @@
 #include <string.h>
 #include <ucontext.h>
 #include <unistd.h>
+#if defined(__APPLE__)
+#include <mach-o/dyld.h>
+#include <mach-o/getsect.h>
+#endif
 
 #include "psx_runtime.h"
 
@@ -107,6 +113,27 @@ NO_TRACE void *psx_host_fn(uint32_t addr) {
     report_recent();
     psx_exit_report();
     _exit(139);
+}
+
+/* psx/call32.S's lookup: psx_host_fn (the log, and the end of the run when there is no function), the answer kept in
+ * the trampoline's cache with the two code words in RAM at the address now. psx_function_at depends on nothing
+ * else, so a later call that finds the same words there gets the same function. Only addresses in RAM are kept (the
+ * trampoline reads the words without a range check). The slot's function goes last and is cleared first: a reader
+ * that sees a function sees the address and words that go with it (the game's code runs on one thread). */
+PsxCall32Slot psx_call32_cache[PSX_CALL32_SLOTS];
+
+NO_TRACE void *psx_call32_lookup(uint32_t addr) {
+    void *fn = psx_host_fn(addr);
+    if (addr >= PSX_RAM_BASE && addr + 8 <= PSX_RAM_BASE + PSX_RAM_SIZE && !(addr & 3)) {
+        PsxCall32Slot *slot = &psx_call32_cache[(addr >> 2) & (PSX_CALL32_SLOTS - 1)];
+        const uint32_t *code = psx_host(addr);
+        __atomic_store_n(&slot->fn, NULL, __ATOMIC_RELEASE);
+        slot->ps1 = addr;
+        slot->word0 = code[0];
+        slot->word1 = code[1];
+        __atomic_store_n(&slot->fn, fn, __ATOMIC_RELEASE);
+    }
+    return fn;
 }
 
 /* ---- trace of the game's functions */
@@ -226,6 +253,111 @@ static uint32_t window_addr(uintptr_t a, int *in) {
     return (uint32_t)a;
 }
 
+/* the executable's code (__TEXT), for telling a truncated host code address in the fault report */
+static void host_text(uintptr_t *start, uintptr_t *end) {
+#if defined(__APPLE__)
+    unsigned long size = 0;
+    uint8_t *p = getsegmentdata((const void *)_dyld_get_image_header(0), "__TEXT", &size);
+    *start = (uintptr_t)p;
+    *end = (uintptr_t)p + size;
+#elif defined(__linux__)
+    extern char __executable_start[], etext[];
+    *start = (uintptr_t)__executable_start;
+    *end = (uintptr_t)etext;
+#else
+    *start = *end = 0;
+#endif
+}
+
+/* a 32-bit value as the host code address it was cut from: an address in the executable's code whose low 32 bits
+ * are v, 0 when there is none */
+static uintptr_t truncated_host_code(uint32_t v) {
+    uintptr_t start, end, hi;
+    host_text(&start, &end);
+    if (start >= end) return 0;
+    for (hi = start >> 32; hi <= (end - 1) >> 32; hi++) {
+        uintptr_t a = (hi << 32) | v;
+        if (a >= start && a < end) return a;
+    }
+    return 0;
+}
+
+/* what an address in the window says about the bug: a PS1 function's own address used as data, or the low half of
+ * a host code address (a function pointer or a return address that went through 32 bits) */
+static void explain_window_addr(uint32_t ps1) {
+    const PsxFunction *f = psx_function_at(ps1);
+    uintptr_t host = truncated_host_code(ps1);
+    if (f && f->vram == ps1)
+        psx_log("psx: that is the PS1 address of %s's code (%s): a function's address used as a data pointer\n",
+                f->name, f->segment);
+    if (host) {
+        const char *name = psx_host_name((void *)host);
+        Dl_info info;
+        long off = 0;
+        if (dladdr((void *)host, &info) && info.dli_saddr) off = (long)(host - (uintptr_t)info.dli_saddr);
+        psx_log("psx: looks like a host code address truncated: a function pointer or return address stored as 32 "
+                "bits (0x%08X is the low half of %p, %s+0x%lX)\n", ps1, (void *)host, name ? name : "?", off);
+    }
+}
+
+/* the faulting code's callers. backtrace() stops at the first frame outside the thread's own stack, and the game's
+ * functions run on the PS1 stack in the window, so the chain is walked here from the interrupted registers: pc, lr,
+ * then each frame record {previous fp, return address}, as long as fp is aligned and inside the game's stack, PS1
+ * RAM or the thread's host stack, increasing within each (the game's main runs on the PS1 stack, called from the host one; nothing else
+ * is read). x86_64 has no lr: pc, then the frames. */
+static void host_stack(uintptr_t *lo, uintptr_t *hi) {
+#if defined(__APPLE__)
+    pthread_t self = pthread_self();
+    *hi = (uintptr_t)pthread_get_stackaddr_np(self);
+    *lo = *hi - pthread_get_stacksize_np(self);
+#else
+    *lo = *hi = 0;
+#endif
+}
+
+static int frame_ok(uintptr_t fp, uintptr_t prev, uintptr_t lo, uintptr_t hi) {
+    int in_ram = 0, in_host;
+    if (!fp || (fp & 7)) return 0;
+    if (psx_in_window((const void *)fp)) {
+        uint32_t a = (uint32_t)fp;
+        in_ram = (a >= PSX_RAM_BASE && a + 16 <= PSX_RAM_BASE + PSX_RAM_SIZE)
+                 || (psx_game_stack_bottom && a >= psx_game_stack_bottom
+                     && a + 16 <= psx_game_stack_bottom + PSX_STACK_SIZE);
+    }
+    in_host = fp >= lo && fp + 16 <= hi;
+    if (!in_ram && !in_host) return 0;
+    /* increasing within one stack; a move from one stack to the other is allowed */
+    if (prev && psx_in_window((const void *)prev) == psx_in_window((const void *)fp) && fp <= prev) return 0;
+    return 1;
+}
+
+static void host_backtrace(const ucontext_t *uc) {
+    void *frames[64];
+    int n = 0;
+    uintptr_t fp = 0, lr = 0, pc = 0, prev = 0, lo, hi;
+    host_stack(&lo, &hi);
+#if defined(__APPLE__) && defined(__aarch64__)
+    pc = uc->uc_mcontext->__ss.__pc; lr = uc->uc_mcontext->__ss.__lr; fp = uc->uc_mcontext->__ss.__fp;
+#elif defined(__APPLE__) && defined(__x86_64__)
+    pc = uc->uc_mcontext->__ss.__rip; fp = uc->uc_mcontext->__ss.__rbp;
+#elif defined(__linux__) && defined(__aarch64__)
+    pc = uc->uc_mcontext.pc; lr = uc->uc_mcontext.regs[30]; fp = uc->uc_mcontext.regs[29];
+#elif defined(__linux__) && defined(__x86_64__)
+    pc = uc->uc_mcontext.gregs[REG_RIP]; fp = uc->uc_mcontext.gregs[REG_RBP];
+#endif
+    if (pc) frames[n++] = (void *)pc;
+    if (lr) frames[n++] = (void *)lr;
+    while (n < 64 && frame_ok(fp, prev, lo, hi)) {
+        const uintptr_t *rec = (const uintptr_t *)fp;
+        if (!rec[1]) break;
+        if (!(n == 2 && lr && rec[1] == lr)) frames[n++] = (void *)rec[1]; /* a leaf's lr is its frame's too */
+        prev = fp;
+        fp = rec[0];
+    }
+    psx_log("psx: host backtrace (the faulting pc, its return address, then the callers' frames):\n");
+    backtrace_symbols_fd(frames, n, STDOUT_FILENO);
+}
+
 static void on_fault(int sig, siginfo_t *info, void *ctx) {
     uintptr_t pc = 0;
     ucontext_t *uc = ctx;
@@ -257,6 +389,7 @@ static void on_fault(int sig, siginfo_t *info, void *ctx) {
             return;
         }
         psx_log("psx: call into PS1 code at 0x%08X, where no function is known\n", ps1_pc);
+        host_backtrace(uc);
     } else {
         const char *where = psx_host_name((void *)pc);
         ps1_addr = window_addr((uintptr_t)info->si_addr, &in_addr);
@@ -264,10 +397,15 @@ static void on_fault(int sig, siginfo_t *info, void *ctx) {
                 info->si_addr, (void *)pc, where ? where : "?");
         if (in_addr && ps1_addr < 0x10000)
             psx_log("psx: that is a null PS1 pointer + 0x%X (the window's base is never mapped)\n", ps1_addr);
-        else if (in_addr)
+        else if (in_addr) {
             psx_log("psx: that is PS1 address 0x%08X\n", ps1_addr);
-        else if ((uintptr_t)info->si_addr < 0x100000000ull && (uintptr_t)info->si_addr >= 0x10000)
+            explain_window_addr(ps1_addr);
+        }
+        else if ((uintptr_t)info->si_addr < 0x100000000ull && (uintptr_t)info->si_addr >= 0x10000) {
             psx_log("psx: below 4 GB: a PS1 address used as a host pointer without the translation\n");
+            explain_window_addr((uint32_t)(uintptr_t)info->si_addr);
+        }
+        host_backtrace(uc);
     }
     report_recent();
     psx_exit_report();

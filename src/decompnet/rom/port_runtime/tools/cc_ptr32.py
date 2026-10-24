@@ -24,8 +24,18 @@ except values and arithmetic:
   4. a game function's address taken as a 32-bit pointer or integer (addrspacecast (ptr @f ...), ptrtoint (ptr @f to
      i32)): the function's PS1 address (from --functions), so function pointers stored in RAM are MIPS addresses,
      round-trip, and compare equal to the ones in the game's data;
-  5. a call through an addrspace(271) pointer: psx_host_fn(i32 address) (the runtime's lookup in the function table)
-     and the call through the host pointer it returns;
+  5. a call through an addrspace(271) pointer: a call to psx_call32 (psx/call32.S) with the C call's own return
+     type and argument list, plus the PS1 address as a `nest` argument, which LLVM passes in x15 on arm64 (r10 on
+     x86_64), outside the argument registers. The trampoline saves x0-x7, x8 and q0-q7, finds the host function
+     (a cache of recent lookups, else psx_host_fn: the function table, overlays told apart by their code in RAM),
+     restores them and branches to it, so it returns straight to the caller. Why not psx_host_fn and a call through
+     the pointer it returns, as before: the MIPS `jalr` leaves every argument register the C doesn't set as the
+     caller had it, and matched C relies on that (`(*slot)()`, `handler()` whose callee reads $a0, still the
+     caller's object); the host call left x0 = psx_host_fn's result, the callee's own address (SLUS-01252's
+     func_800C58EC wrote through its own host address, truncated). The C call's explicit arguments still go where
+     clang puts them; only the registers it leaves alone now keep what the caller had, as far as the caller's
+     compiled code leaves them alone. `nest` is set by the compiler at the call itself, which inline asm writing
+     x16/x17 before an ordinary call can't promise (the register allocator may use them in between);
   6. ptrtoint/inttoptr between addrspace(271) and i32 stay as they are: PS1 address arithmetic.
 
 A constant (a raw address, a data symbol's address) is translated as a constant expression; a 32-bit integer turned
@@ -67,6 +77,7 @@ MEM_DECL = {
     "memset": "declare void @llvm.memset.p0.{w}(ptr, i8, {w}, i1 immarg)",
 }
 HOST_FN_DECL = "declare ptr @psx_host_fn(i32)"
+CALL32_DECL = "declare void @psx_call32()"
 
 
 class IRError(RuntimeError):
@@ -178,6 +189,7 @@ class Transform:
         self.n = 0
         self.need_mem: set[tuple[str, str]] = set()
         self.need_host_fn = False
+        self.need_call32 = False
         self.dbg = ""  # the current line's debug location, for the calls it gets
 
     def tmp(self) -> str:
@@ -390,10 +402,25 @@ class Transform:
             value = a
         else:
             raise IRError(f"a call through a 32-bit pointer this doesn't understand: {rhs[:200]}")
-        h = self.tmp()
-        pre.append(f"{indent}{h} = call ptr @psx_host_fn(i32 {value}){self.dbg}")
-        self.need_host_fn = True
-        return head + rest[:start] + h + rest[end:]
+        # case 5: psx_call32 with the PS1 address as the nest argument (x15 / r10), the call's own arguments after it
+        z, p = self.tmp(), self.tmp()
+        pre += [f"{indent}{z} = zext i32 {value} to i64", f"{indent}{p} = inttoptr i64 {z} to ptr"]
+        self.need_call32 = True
+        before = rest[:start].rstrip()
+        if before.endswith(")"):  # an explicit function type (varargs): the nest parameter first
+            k, depth = len(before) - 1, 0
+            while k >= 0:
+                depth += {")": 1, "(": -1}.get(before[k], 0)
+                if not depth:
+                    break
+                k -= 1
+            params = before[k + 1:-1].strip()
+            before = before[:k] + "(ptr" + (", " + params if params else "") + ")"
+        before += " "
+        args_end = _balanced_end(rest, end)
+        args = rest[end + 1:args_end - 1].strip()
+        return (head.replace("musttail ", "") + before + "@psx_call32(ptr nest " + p + (", " + args if args else "")
+                + ")" + rest[args_end:])
 
 
 _LIT_DEF = re.compile(r'^(@[-\w.$]+) = (?:private|internal) (?:unnamed_addr )?constant \[(\d+) x i8\] c"((?:[^"\\]|\\[0-9A-Fa-f]{2})*)"(.*)$')
@@ -499,7 +526,7 @@ def patch(ir: str, functions: dict[str, int] | None = None, literals: dict[str, 
             continue
         if re.match(r"declare .*@llvm\.(memcpy|memmove|memset)(\.p\d+)+\.i(32|64)\(", line) and "271" in line:
             continue
-        if line.startswith("declare ") and "@psx_host_fn(" in line:
+        if line.startswith("declare ") and ("@psx_host_fn(" in line or "@psx_call32(" in line):
             continue
         out.append(line)
     text = "\n".join(out)
@@ -509,6 +536,8 @@ def patch(ir: str, functions: dict[str, int] | None = None, literals: dict[str, 
             text += "\n" + MEM_DECL[kind].format(w=width) + "\n"
     if t.need_host_fn or "@psx_host_fn(" in text:
         text += "\n" + HOST_FN_DECL + "\n"
+    if t.need_call32 and not re.search(r"^declare [^\n]*@psx_call32\(", text, re.M):
+        text += "\n" + CALL32_DECL + "\n"
     return text
 
 

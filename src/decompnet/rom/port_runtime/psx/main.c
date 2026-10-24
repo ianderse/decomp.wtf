@@ -10,6 +10,8 @@
 
 /* the game's stack in the window, so its locals' addresses are PS1 addresses (sp 0x6000xxxx): PSX_STACK_TOP, or
  * lower if something else is there (nothing should be) */
+uint32_t psx_game_stack_bottom;
+
 static void *game_stack(uint32_t *bottom) {
     static const uint32_t tops[] = {PSX_STACK_TOP, 0x50800000u, 0x40800000u, 0x30800000u}; /* not 0x7xxxxxxx: literals */
     size_t i;
@@ -17,6 +19,7 @@ static void *game_stack(uint32_t *bottom) {
         void *p = psx_map(tops[i] - PSX_STACK_SIZE, PSX_STACK_SIZE);
         if (!p) continue;
         *bottom = tops[i] - PSX_STACK_SIZE;
+        psx_game_stack_bottom = *bottom;
         return (char *)p + PSX_STACK_SIZE;
     }
     return NULL;
