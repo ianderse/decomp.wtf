@@ -449,3 +449,77 @@ def test_config_carries_the_disc():
     c = ep.config_c("SLUS-01252", "baserom.exe", entry, "func_800C27B8", '/discs/Arc "II".bin')
     assert '"/discs/Arc \\"II\\".bin", /* the disc image' in c
     assert '"", /* the disc image' in ep.config_c("SLUS-01252", "baserom.exe", entry, "func_800C27B8")
+
+
+PATCH = ("/* The PS1 passes its saved $ra as the 7th argument, never 1; the port passes 0.\n"
+         " * More of the why. */\n#include \"common.h\"\nvoid func_8002B68C(void) { func_800E8AAC(0); }\n")
+PATCH_FUNCTIONS = [
+    {"name": "func_8002B68C", "seg": "ovl_smith", "vram": 0x8002B68C, "c": "src/ovl_smith/func_8002B68C.c"},
+    {"name": "func_80028724", "seg": "ovl_yguild", "vram": 0x80028724, "c": "src/ovl_yguild/func_80028724.c"},
+    {"name": "func_80028724", "seg": "ovl_yshop", "vram": 0x80028724, "c": "src/ovl_yshop/func_80028724.c"},
+    {"name": "func_80156FF0", "seg": "main", "vram": 0x80156FF0},
+]
+
+
+def test_a_patch_replaces_the_exports_file(tmp_path):
+    pdir = tmp_path / "port" / "patches"
+    (pdir / "ovl_yguild").mkdir(parents=True)
+    (pdir / "func_8002B68C.c").write_text(PATCH)
+    (pdir / "ovl_yguild" / "func_80028724.c").write_text("// returns what the PS1 returns\nint func_80028724(void) "
+                                                         "{ return 1; }\n")
+    got = ep.find_patches(pdir, PATCH_FUNCTIONS)
+    assert [(x["name"], x["path"], x["file"]) for x in got] == [
+        ("func_8002B68C", "src/ovl_smith/func_8002B68C.c", "patches/func_8002B68C.c"),
+        ("func_80028724", "src/ovl_yguild/func_80028724.c", "patches/ovl_yguild/func_80028724.c")]
+    assert got[0]["note"] == "The PS1 passes its saved $ra as the 7th argument, never 1; the port passes 0."
+    assert got[1]["note"] == "returns what the PS1 returns"
+    # the build compiles the patch: ptr32.py reads it in place of the export's file, and CMake depends on it
+    src, out = tmp_path / "source", tmp_path / "out"
+    (src / "src" / "ovl_smith").mkdir(parents=True)
+    (src / "src" / "ovl_smith" / "func_8002B68C.c").write_text("void func_8002B68C(void) { func_800E8AAC(); }\n")
+    (src / "src" / "main").mkdir()
+    (src / "src" / "main" / "func_800C27B8.c").write_text("void func_800C27B8(void) {}\n")
+    gen = tmp_path / "port" / "gen"
+    gen.mkdir()
+    (gen / "game_patches.txt").write_text(ep.patches_txt(got))
+    lst = tmp_path / "list.txt"
+    lst.write_text("src/ovl_smith/func_8002B68C.c\nsrc/main/func_800C27B8.c\n")
+    _tool("ptr32").main(["--src", str(src), "--out", str(out), "--list", str(lst), "--patches",
+                         str(gen / "game_patches.txt")])
+    assert "func_800E8AAC(0)" in (out / "src" / "ovl_smith" / "func_8002B68C.c").read_text()
+    assert (out / "src" / "main" / "func_800C27B8.c").read_text() == "void func_800C27B8(void) {}\n"
+    cm = ep.game_sources_cmake(["src/ovl_smith/func_8002B68C.c"], {}, got)
+    assert ("set(GAME_PATCH_src/ovl_smith/func_8002B68C.c ${CMAKE_CURRENT_SOURCE_DIR}/patches/func_8002B68C.c)"
+            in cm)
+    assert "GAME_PATCH_${_s}" in ep.cmakelists("x") and "--patches" in ep.cmakelists("x")
+
+
+def test_a_stale_or_unmatched_patch_is_an_error(tmp_path):
+    import re
+
+    import pytest
+    for rel, text, why in [
+        ("func_8002B000.c", PATCH.replace("func_8002B68C", "func_8002B000"), "the patch is stale"),
+        ("func_80156FF0.c", PATCH.replace("func_8002B68C", "func_80156FF0"), "not matched"),
+        ("func_80028724.c", PATCH.replace("func_8002B68C", "func_80028724"), "patches/<segment>/func_80028724.c"),
+        ("ovl_yend/func_8002B68C.c", PATCH, "in segment ovl_yend"),
+        ("func_8002B68C.c", "#include \"common.h\"\nvoid func_8002B68C(void) {}\n", "comment block"),
+    ]:
+        pdir = tmp_path / rel.replace("/", "_") / "patches"
+        (pdir / rel).parent.mkdir(parents=True)
+        (pdir / rel).write_text(text)
+        with pytest.raises(ep.PortError, match=re.escape(why)):
+            ep.find_patches(pdir, PATCH_FUNCTIONS)
+    assert ep.find_patches(tmp_path / "none", PATCH_FUNCTIONS) == []
+
+
+def test_port_md_lists_the_patches():
+    import inspect
+    got = [{"name": "func_8002B68C", "file": "patches/func_8002B68C.c", "path": "src/ovl_smith/func_8002B68C.c",
+            "note": "The PS1 passes its saved $ra as the 7th argument, never 1; the port passes 0."}]
+    md = ep.patches_md(got)
+    assert md.startswith("## Port patches")
+    assert ("| `func_8002B68C` | `patches/func_8002B68C.c` (for `src/ovl_smith/func_8002B68C.c`) | The PS1 passes its "
+            "saved $ra as the 7th argument, never 1; the port passes 0. |") in md
+    assert "None." in ep.patches_md([])
+    assert "patches_md(r.get('patches')" in inspect.getsource(ep.port_md)

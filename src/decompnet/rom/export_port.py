@@ -954,9 +954,12 @@ def sdk_config_h(headers: dict[str, str], game_implements: list[str] = ()) -> st
     return "\n".join(out) + "\n"
 
 
-def game_sources_cmake(paths: list[str], renames: dict[str, str] | None = None) -> str:
+def game_sources_cmake(paths: list[str], renames: dict[str, str] | None = None,
+                       patches: list[dict] | None = None) -> str:
     out = "# the game's matched C, relative to the exported tree (generated)\nset(GAME_SOURCES\n" + \
         "".join(f"    {p}\n" for p in paths) + ")\n"
+    out += "# the port's patches (patches/): compiled in place of the export's file\n" + \
+        "".join(f"set(GAME_PATCH_{x['path']} ${{CMAKE_CURRENT_SOURCE_DIR}}/{x['file']})\n" for x in patches or [])
     out += "# game functions named like the host's C library, renamed in the game's files\nset(GAME_RENAMES\n" + \
         "".join(f"    {a}={b}\n" for a, b in sorted((renames or {}).items())) + ")\n"
     return out
@@ -988,8 +991,14 @@ endif()
 option(PSX_TRACE "log the game functions entered (tools/cc_ptr32.py --trace: argument registers kept)" ${{_psx_trace_default}})
 
 include(${{CMAKE_CURRENT_SOURCE_DIR}}/gen/game_sources.cmake)
-set(GAME_INPUTS ${{GAME_SOURCES}})
-list(TRANSFORM GAME_INPUTS PREPEND "${{PSX_SOURCE_DIR}}/")
+set(GAME_INPUTS)  # each file from the export, or the port's patch for it (patches/, gen/game_patches.txt)
+foreach(_s IN LISTS GAME_SOURCES)
+  if(DEFINED GAME_PATCH_${{_s}})
+    list(APPEND GAME_INPUTS ${{GAME_PATCH_${{_s}}}})
+  else()
+    list(APPEND GAME_INPUTS ${{PSX_SOURCE_DIR}}/${{_s}})
+  endif()
+endforeach()
 if(PSX_PTR32)
   # the game's files and headers rewritten into build/ptr32 (every pointer 4 bytes, long 32 bits) whenever the
   # export changes; the export itself stays as it is
@@ -1002,9 +1011,9 @@ if(PSX_PTR32)
     OUTPUT ${{PTR32_DIR}}/stamp ${{GAME_SOURCES_PORTED}}
     COMMAND ${{Python3_EXECUTABLE}} ${{CMAKE_CURRENT_SOURCE_DIR}}/tools/ptr32.py --src ${{PSX_SOURCE_DIR}} --out ${{PTR32_DIR}}
             --list ${{CMAKE_CURRENT_SOURCE_DIR}}/gen/game_sources.txt --headers ${{PSX_SOURCE_DIR}}/include
-            --stamp ${{PTR32_DIR}}/stamp
+            --stamp ${{PTR32_DIR}}/stamp --patches ${{CMAKE_CURRENT_SOURCE_DIR}}/gen/game_patches.txt
     DEPENDS ${{GAME_INPUTS}} ${{PSX_GAME_HEADERS}} ${{CMAKE_CURRENT_SOURCE_DIR}}/tools/ptr32.py
-            ${{CMAKE_CURRENT_SOURCE_DIR}}/gen/game_sources.txt
+            ${{CMAKE_CURRENT_SOURCE_DIR}}/gen/game_sources.txt ${{CMAKE_CURRENT_SOURCE_DIR}}/gen/game_patches.txt
     COMMENT "ptr32: the game's C with the PS1's pointer size")
   set(GAME_COMPILE ${{GAME_SOURCES_PORTED}})
   set(GAME_INCLUDES ${{CMAKE_CURRENT_SOURCE_DIR}}/include ${{PTR32_DIR}}/include ${{PSX_SOURCE_DIR}}/include)
@@ -1906,8 +1915,10 @@ def load_ptr32(port: Path):
 
 def check_sources(src_root: Path, paths: list[str], include_dirs: list[Path], force_include: Path,
                   arch_flags: list[str], jobs: int | None = None, extra: list[str] = (),
-                  launcher: list[str] = (), scratch: Path | None = None) -> dict[str, str]:
-    """Compile each matched file for the host the way the build will; {path: error class} for the ones that fail."""
+                  launcher: list[str] = (), scratch: Path | None = None,
+                  overrides: dict[str, Path] | None = None) -> dict[str, str]:
+    """Compile each matched file for the host the way the build will; {path: error class} for the ones that fail.
+    overrides: {path: file} compiled in place of src_root/path (the port's patches)."""
     cc = shutil.which("clang") or shutil.which("cc")
     if not cc:
         return {}
@@ -1920,7 +1931,8 @@ def check_sources(src_root: Path, paths: list[str], include_dirs: list[Path], fo
     def one(p: str):
         obj = tmp / (re.sub(r"\W", "_", p) + ".o")
         try:
-            r = subprocess.run(base + ["-o", str(obj), "-c", str(src_root / p)], capture_output=True, text=True,
+            r = subprocess.run(base + ["-o", str(obj), "-c", str((overrides or {}).get(p, src_root / p))],
+                               capture_output=True, text=True,
                                encoding="utf-8", errors="replace", timeout=180)
         except subprocess.TimeoutExpired:
             return p, "the compiler took over 2 minutes"
@@ -1942,6 +1954,101 @@ def check_sources(src_root: Path, paths: list[str], include_dirs: list[Path], fo
 def host_arch_flags() -> list[str]:
     """The compile check builds for the host's own architecture, as the CMake build does."""
     return []
+
+
+# ---------------------------------------------------------------------------------------------- patches
+
+def _patch_note(text: str) -> str:
+    """The first line of the comment block a patch file starts with ('' when it doesn't start with one)."""
+    t = text.lstrip()
+    if t.startswith("//"):
+        body = t.split("\n", 1)[0][2:]
+    elif t.startswith("/*"):
+        body = t[2:t.find("*/")] if "*/" in t else ""
+    else:
+        return ""
+    for line in body.splitlines():
+        line = line.strip().lstrip("*/").strip()
+        if line:
+            return line
+    return ""
+
+
+def find_patches(pdir: Path, functions: list[dict]) -> list[dict]:
+    """The port's patches: port/patches/<function>.c (or <segment>/<function>.c, for an overlay function whose name
+    another segment's function has too) replaces the export's file for that function in the port build only; the
+    export and the database stay as they are. For the original game's own bugs that matched C has to keep (it reads
+    a leftover register or stack slot: deterministic on the PS1, undefined on the host). Each starts with a comment
+    block saying what the PS1 does and why the port differs. A patch for a function that is unknown (renamed since?),
+    in no or several segments, or not matched, is an error: a stale patch must not be silently ignored.
+    [{name, seg, file (relative to the port), path (the export's file it replaces), note (the first comment line),
+    text}]"""
+    if not pdir.is_dir():
+        return []
+    by_name: dict[str, list[dict]] = {}
+    for f in functions:
+        by_name.setdefault(f["name"], []).append(f)
+    out, errors, seen = [], [], {}
+    for pf in sorted(pdir.rglob("*.c")):
+        rel = pf.relative_to(pdir)
+        if len(rel.parts) > 2:
+            errors.append(f"{rel}: a patch is patches/<function>.c or patches/<segment>/<function>.c")
+            continue
+        name, seg = pf.stem, (rel.parts[0] if len(rel.parts) == 2 else None)
+        cands = [f for f in by_name.get(name, []) if seg is None or f.get("seg") == seg]
+        if not cands:
+            errors.append(f"{rel}: no function {name}" + (f" in segment {seg}" if seg else "") +
+                          " in the export (renamed or removed? the patch is stale)")
+            continue
+        if len(cands) > 1:
+            errors.append(f"{rel}: {name} is in segments " + ", ".join(sorted(str(f.get('seg')) for f in cands)) +
+                          f": put it in patches/<segment>/{name}.c")
+            continue
+        f = cands[0]
+        if not f.get("c"):
+            errors.append(f"{rel}: {name} is not matched (a patch replaces a matched function's C; an unmatched one "
+                          "is a stub)")
+            continue
+        text = pf.read_text(encoding="utf-8", errors="replace")
+        note = _patch_note(text)
+        if not note:
+            errors.append(f"{rel}: doesn't start with a comment block saying what the PS1 does and why the port "
+                          "differs")
+            continue
+        if not re.search(r"\b" + re.escape(name) + r"\s*\(", strip_c(text)):
+            errors.append(f"{rel}: doesn't define {name}")
+            continue
+        if f["c"] in seen:
+            errors.append(f"{rel}: {seen[f['c']]} patches {name} already")
+            continue
+        seen[f["c"]] = str(rel)
+        out.append({"name": name, "seg": f.get("seg"), "file": "patches/" + rel.as_posix(), "path": f["c"],
+                    "note": note, "text": text})
+    if errors:
+        raise PortError("port patches (" + str(pdir) + "):\n  " + "\n  ".join(errors))
+    return out
+
+
+def patches_txt(patches: list[dict]) -> str:
+    """gen/game_patches.txt for tools/ptr32.py --patches: the export's path, a tab, the patch relative to gen/."""
+    return "# the port's patches (generated): the export's file, and the patch compiled in its place\n" + \
+        "".join(f"{x['path']}\t../{x['file']}\n" for x in patches)
+
+
+def patches_md(patches: list[dict]) -> str:
+    """PORT.md's section on the port's patches."""
+    head = ("## Port patches\n\nFiles in `patches/` replace the export's copy of a function in this build only "
+            "(`patches/<function>.c`, or `patches/<segment>/<function>.c`); the export and the database keep the "
+            "matched C. They are for the original game's own bugs that the matching C has to keep (it reads a "
+            "leftover register or stack slot: deterministic on the PS1, undefined on the host) and for calls the "
+            "port links differently from the PS1. A patch whose function is renamed, unknown or not matched stops "
+            "the generator.\n\n")
+    if not patches:
+        return head + "None.\n\n"
+    return head + "| Function | Patch | What it does |\n| :-- | :-- | :-- |\n" + "".join(
+        f"| `{x['name']}` | `{x['file']}` (for `{x['path']}`)" + ("" if x.get("compiled", True) else
+                                                                  " (not compiled: does nothing)")
+        + f" | {x['note'].replace('|', '/')} |\n" for x in patches) + "\n"
 
 
 # ---------------------------------------------------------------------------------------------- the export
@@ -2060,6 +2167,10 @@ def generate(source: Path, port: Path, sony: dict[str, dict], title: str, slug: 
                if p.name != "psx_gte.h"}
     paths = [f["c"] for f in b["functions"] if f.get("c")]
     sources = {p: (source / p).read_text(encoding="utf-8", errors="replace") for p in paths}
+    patches = find_patches(port / "patches", b["functions"])
+    for x in patches:
+        sources[x["path"]] = x["text"]
+        log(f"patch: {x['file']} replaces {x['path']} ({x['note']})")
 
     port.mkdir(parents=True, exist_ok=True)
     write_runtime(port)
@@ -2068,12 +2179,22 @@ def generate(source: Path, port: Path, sony: dict[str, dict], title: str, slug: 
     excluded = {}
     check_list = port / "build" / "check_sources.txt"
     put(check_list, "".join(f"{x}\n" for x in paths))
+    put(gen / "game_patches.txt", patches_txt(patches))
+    # a file patched now and not before, or the other way round: its rewrite in build/ptr32 came from the other
+    # copy and may be newer than this one, so it goes (ptr32.py redoes it)
+    try:
+        before = {x["path"] for x in json.loads((port / "port.json").read_text(encoding="utf-8")).get("patches", [])}
+    except (OSError, ValueError, AttributeError, TypeError):
+        before = None
+    now = {x["path"] for x in patches}
+    for x in (now if before is None else before ^ now):
+        (port / "build" / "ptr32" / x).unlink(missing_ok=True)
     if check:
         log(f"compiling the {len(paths)} matched files for the host once, to leave out the ones that don't compile")
         if ptr32:  # the sources the build compiles: rewritten into build/ptr32, as its CMake rule does
             pdir = port / "build" / "ptr32"
             load_ptr32(port).main(["--src", str(source), "--out", str(pdir), "--list", str(check_list),
-                                   "--headers", str(source / "include")])
+                                   "--headers", str(source / "include"), "--patches", str(gen / "game_patches.txt")])
             import sys
             excluded = check_sources(pdir, paths, [port / "include", pdir / "include", source / "include"],
                                      port / "include" / "psx_port_game.h", host_arch_flags(), extra=PTR32_FLAGS,
@@ -2081,7 +2202,8 @@ def generate(source: Path, port: Path, sony: dict[str, dict], title: str, slug: 
                                      scratch=port / "build")
         else:
             excluded = check_sources(source, paths, [port / "include", source / "include"],
-                                     port / "include" / "psx_port_game.h", host_arch_flags())
+                                     port / "include" / "psx_port_game.h", host_arch_flags(),
+                                     overrides={x["path"]: port / x["file"] for x in patches})
         log(f"  {len(paths) - len(excluded)} compile, {len(excluded)} don't")
     sym_text = (source / "symbol_addrs.txt").read_text(encoding="utf-8") if (source / "symbol_addrs.txt").exists() else ""
     auto_text = "".join((source / n).read_text(encoding="utf-8") for n in ("undefined_syms_auto.txt",)
@@ -2113,7 +2235,8 @@ def generate(source: Path, port: Path, sony: dict[str, dict], title: str, slug: 
         "psx_function_addrs.txt": function_addrs(p["dispatch"], rn),
         "psx_config.c": config_c(title, b["image"], entry, rn.get(main_name, main_name), disc or ""),
         "psx_sdk_config.h": sdk_config_h(headers, p["game_implements"]),
-        "game_sources.cmake": game_sources_cmake(p["compiled"], rn),
+        "game_sources.cmake": game_sources_cmake(p["compiled"], rn, patches),
+        "game_patches.txt": patches_txt(patches),
         "game_sources.txt": "".join(f"{x}\n" for x in p["compiled"]),
     }
     for old in gen.iterdir():
@@ -2123,6 +2246,12 @@ def generate(source: Path, port: Path, sony: dict[str, dict], title: str, slug: 
         put(gen / name, text)
     put(port / "CMakeLists.txt", cmakelists(slug))
     put(port / ".gitignore", "build/\n")
+    compiled_set = set(p["compiled"])
+    for x in patches:
+        if x["path"] not in compiled_set:
+            log(f"patch {x['file']}: {x['name']} isn't compiled in the port ("
+                + (f"it doesn't compile for the host: {excluded[x['path']]}" if x["path"] in excluded else
+                   "the runtime replaces it") + "), so the patch does nothing")
     hz = hazards(headers, {k: v for k, v in sources.items() if k not in excluded})
     ch = port_call_hazards(b, image, sources, headers, p, sony, aliases)
     put(port / "hazards.json", json.dumps(ch, indent=1) + "\n")
@@ -2147,6 +2276,8 @@ def generate(source: Path, port: Path, sony: dict[str, dict], title: str, slug: 
         "symbols": len(p["symbols"]), "renamed": rn, "game_implements": p["game_implements"], "as_data_matched": p["as_data_matched"],
         "as_data_unmatched": p["as_data_unmatched"], "unresolved": p["unresolved"], "hazards": hz,
         "call_hazards": ch,
+        "patches": [{"name": x["name"], "seg": x["seg"], "file": x["file"], "path": x["path"], "note": x["note"],
+                     "compiled": x["path"] in compiled_set} for x in patches],
         "generated_in": round(time.time() - t0, 1),
         "disc": disc or "",
         "libcd": {n: a for n, a in sorted(aliases.items())},
@@ -2516,7 +2647,7 @@ generated from this game). `port.json` has these numbers.
 - **Arguments the matched C drops**: {(r.get('call_hazards') or {}).get('counts', {}).get('dropped', 0)} calls pass
   fewer arguments than the callee takes (below).
 
-{call_hazards_md(r.get('call_hazards'))}## PsyCross
+{call_hazards_md(r.get('call_hazards'))}{patches_md(r.get('patches') or [])}## PsyCross
 
 [PsyCross](https://github.com/OpenDriver2/PsyCross) (OpenDriver2) reimplements PSY-Q's libraries on SDL2 (2.0.16+),
 OpenAL-soft and OpenGL: a renderer that emulates VRAM, an SPU, a software GTE with PGXP. REDRIVER2 and the Silent Hill

@@ -9,10 +9,11 @@ struct/union/enum tag or body), a qualifier, another declarator `*`, or a `(` th
 `(u8 (**)())`), or a declaration's comma (`void *p, *q;`). Everything else (multiplication, dereference) is left
 alone. Calls and memory copies through these pointers need tools/cc_ptr32.py (clang's x86-64 backend can't do them).
 
-  ptr32.py --src DIR --out DIR --list FILE [--headers DIR]
+  ptr32.py --src DIR --out DIR --list FILE [--headers DIR] [--patches FILE]
 
 rewrites each path in FILE (relative to --src) to the same path under --out, and every *.h in --headers to
---out/include, skipping outputs newer than their input. Used by the port's CMakeLists.txt, and by decomp.wtf's
+--out/include, skipping outputs newer than their input. --patches: lines `PATH<TAB>FILE`, FILE (relative to the
+patches file's folder) read in place of --src/PATH (the port's patches/, which replace a function in the port only). Used by the port's CMakeLists.txt, and by decomp.wtf's
 generator for its compile check. Standard library only.
 """
 
@@ -235,12 +236,21 @@ def main(argv=None) -> int:
     ap.add_argument("--list", required=True, help="file with one source path (relative to --src) per line")
     ap.add_argument("--headers", help="directory whose *.h are rewritten into --out/include")
     ap.add_argument("--stamp", help="touch this file when done")
+    ap.add_argument("--patches", help="file of `PATH<TAB>FILE` lines: FILE (relative to this file's folder) read "
+                                      "in place of --src/PATH")
     a = ap.parse_args(argv)
     src, out = Path(a.src), Path(a.out)
     headers = sorted(Path(a.headers).glob("*.h")) if a.headers else []
     headers = [h for h in headers if h.name != "psx_gte.h"]  # the host's own is force-included
     types = header_types(headers)
     stale_headers = any(_newer(h, out / "include" / h.name) for h in headers)
+    patched = {}
+    if a.patches and Path(a.patches).exists():
+        base = Path(a.patches).resolve().parent
+        for line in Path(a.patches).read_text(encoding="utf-8").splitlines():
+            if "\t" in line and not line.startswith("#"):
+                rel, f = line.split("\t", 1)
+                patched[rel.strip()] = (base / f.strip()).resolve()
     n = 0
     for h in headers:
         dst = out / "include" / h.name
@@ -252,7 +262,7 @@ def main(argv=None) -> int:
         p = line.strip()
         if not p or p.startswith("#"):
             continue
-        s, d = src / p, out / p
+        s, d = patched.get(p, src / p), out / p
         if stale_headers or _newer(s, d):
             d.parent.mkdir(parents=True, exist_ok=True)
             d.write_text(rewrite(s.read_text(encoding="utf-8", errors="replace"), types), encoding="utf-8")

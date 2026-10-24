@@ -419,9 +419,10 @@ function (`((T (*)()) func_X)(...)`) are seen by neither and not rewritten.
     $a1/$a2 only because it is conservative through func_80176200 and the call through 0x8006E538).
     Follow-up: dropping those unused parameters from the definitions would remove the hazards outright.
   - (iii) stack arguments: func_80028414 -> func_8002B68C ignores both stack arguments (`a4`, `a5` unused).
-  - Real bugs for a person (2):
+  - Real bugs for a person (2), both fixed by a port patch now (below):
     - func_80026F50 -> ovl_yprop_func_80028724. $a1 is whatever func_800290C0 -> draw_window_frame's last
-      callee left, and the callee passes it to func_800E9B3C and draw_text_glyphs.
+      callee left, and the callee passes it to func_800E9B3C and draw_text_glyphs. (Not a game bug after all:
+      the callee is the wrong overlay's, see "Port patches".)
     - func_8002B68C -> func_800E8AAC. The 7th argument's stack slot is the caller's saved $ra, and the callee
       tests `arg6 == 1`, which is never true on the PS1 and undefined on the host. Passing 0 would be honest,
       but it can't match: the slot is where $ra is saved.
@@ -429,6 +430,42 @@ function (`((T (*)()) func_X)(...)`) are seen by neither and not rewritten.
   39 calls dropped before them; 6 are now fixed, 2 are real bugs, and the rest are harmless (callee ignores them)
   or near misses kept as before. Two calls against the runtime's own prototypes (func_800F53C0 -> GetTPage,
   func_8016A028 -> CdRead) are outside fix-passthrough's scope (no game definition).
+
+**Port patches (2026-10-23, later).** Matched C that has to read a leftover register or stack slot to match can't
+be fixed in the export, so the port has its own copies: `port/patches/<function>.c` (or `<segment>/<function>.c`
+when overlays share the name) replaces the export's file in the port build only (export_port.find_patches;
+`gen/game_patches.txt` tells tools/ptr32.py to read the patch in place of `../source/<path>`, and CMake depends on
+it). Each starts with a comment block saying what the PS1 does and why the port differs; PORT.md lists them
+("Port patches": name, first comment line) and port.json has them. A patch for a function that is unknown (renamed
+since), in no or several segments, or not matched stops the generator. The port folder is never wiped by `decomp
+port` (only `gen/`, `include/`, `psx/`, `tools/` are rewritten), so `patches/` stays and is committed with the rest.
+
+- `func_8002B68C.c`: the 7th argument passed as 0. The PS1 passes its saved return address there (0x8002xxxx),
+  never 1, so the callee's `== 1` branch (the cursor, func_800DF934) never runs; 0 reproduces that.
+- `func_80026F50.c`: the analysis turned up something else. `jal 0x80028724` reaches whatever overlay is
+  loaded there, and with func_80026F50 (ovl_yguild) running that is ovl_yguild's own func_80028724, a one-argument
+  list menu (`func_800E06BC(D_80038A78, D_801AC4F4, p, 18, 3)`); the C calls it `ovl_yprop_func_80028724`
+  because the address's symbol is ovl_yprop's, which matches on the PS1 (the name is a relocation) and links to
+  another function in the port (ovl_yprop's status page, reading `arg0 + 0xDC`). $a1 at the call is data-dependent
+  garbage, which is a finding about the original code: draw_window_frame's last callee is AddPrim (it leaves the
+  window primitive's address & 0x00FFFFFF) or, with semi-transparency on, enqueue_unit_textured_quad
+  (0xFF000000), and nothing between its return and the jal touches $a1. But no code reads it: ovl_yguild's
+  func_80028724 loads $a1 itself before any use, and func_800E06BC, which gets that as `unused`, zeroes $a1
+  first. The result matters instead: func_80028724 and func_800E06BC are void in C but each ends in a call and
+  leaves $v0 alone, so `result` is func_800DF824's pad code (2 cancel, 1 confirm, 3/4 ...). The patch calls
+  ovl_yguild's func_80028724 and func_80026250 (the export's C names ovl_yprop's 0x80026250 too, another
+  function) and replicates func_800DF824's decode of D_801AC4E2 for the result, without its sound effect.
+- Measured on SLUS-01252 with the disc, from a copy of the 21:19 export, with and without the patches: the same
+  depth (strict stops at func_80156FF0, soft still running at 5 s, 256 frames, reading SJ00.STG; neither patched
+  function is reached that early); dropped-argument calls 32 -> 30.
+- Left as they are: the wrong-overlay names are general. 28 calls in matched overlay C name another overlay's
+  function at the same address; 14 of them have a function of the caller's own overlay there (8 more
+  ovl_yguild callers of ovl_yprop_func_80026250, ovl_yprop's func_800277E0/func_8002790C ->
+  ovl_yshop_func_80027A48, ovl_yend's func_800274F4 -> ovl_yguild_func_800275D4, ...), and the other 14 call an
+  address where the caller's overlay starts no function at all (yguild's func_800287A0 -> yshop's
+  func_800273F0/func_80027460, yshop's func_80027614 -> yseg's func_80026C8C ...: an overlay split worth
+  checking). All of them link to the wrong code in the port; the fix belongs in the symbol naming (the overlay's
+  own symbol at each jal), not in patches.
 
 ## Sound (2026-10-23)
 
