@@ -539,3 +539,26 @@ def test_run_sh_renders_the_shell_as_written():
     text = run_sh("slus-01252", "game.overlays.exe")
     assert text.startswith("#!/bin/sh") and "${PSX_PORT_SOFT:-1}" in text and "{ echo" in text
     assert "../source/game.overlays.exe" in text and "decomp port slus-01252 --build" in text and "@SLUG@" not in text and "@IMAGE@" not in text
+
+
+def test_a_game_function_as_a_plain_pointer_value_becomes_its_ps1_address():
+    """A call with no prototype passes a game function as a host pointer: the callee's 32-bit parameter then holds
+    the host address's low half (SLUS-01252's state dispatcher called 0x00086428, func_80138064's host address
+    truncated, after the intro movie). Every plain-pointer use of a game function is its PS1 address instead."""
+    import importlib.util
+    from pathlib import Path
+    spec = importlib.util.spec_from_file_location(
+        "cc_ptr32", Path(__file__).resolve().parents[1] / "src/decompnet/rom/port_runtime/tools/cc_ptr32.py")
+    cc = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(cc)
+    t = cc.Transform({"func_80138064": 0x80138064, "assert_n": 0x800C3564})
+    one = lambda b: " | ".join(x.strip() for x in t.line(b))
+    assert one("  %1 = call i32 @assert_n(ptr noundef @func_80138064) #2") == \
+        "%1 = call i32 @assert_n(ptr noundef inttoptr (i64 2148761700 to ptr)) #2"
+    assert one("  store ptr @func_80138064, ptr %slot, align 8") == \
+        "store ptr inttoptr (i64 2148761700 to ptr), ptr %slot, align 8"
+    assert one("  %5 = phi ptr [ @func_80138064, %a ], [ null, %b ]") == \
+        "%5 = phi ptr [ inttoptr (i64 2148761700 to ptr), %a ], [ null, %b ]"
+    assert one("  %6 = call i32 @assert_n(ptr noundef @unknown_fn) #2") == "%6 = call i32 @assert_n(ptr noundef @unknown_fn) #2"
+    assert one("  call void @func_80138064(i32 1)") == "call void @func_80138064(i32 1)"  # a direct call stays
+    assert one("declare i32 @assert_n(ptr addrspace(271) noundef) #1") == "declare i32 @assert_n(ptr addrspace(271) noundef) #1"

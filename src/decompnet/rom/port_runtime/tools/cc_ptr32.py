@@ -265,7 +265,7 @@ class Transform:
     def line(self, b: str) -> list[str]:
         """One instruction line: the lines it becomes."""
         if "addrspace(271)" not in b and "inttoptr" not in b and "ptrtoint" not in b:
-            return [b]
+            return [self.fn_values(b)] if "@" in b else [b]
         indent = re.match(r"\s*", b).group(0)
         dbg = re.search(r", !dbg !\d+", b)
         self.dbg = dbg.group(0) if dbg else ""
@@ -275,7 +275,28 @@ class Transform:
         rhs = self._instruction(lhs, rhs, pre, indent)
         if rhs is None:
             return pre
-        return pre + [indent + lhs + self.const(rhs)]
+        return pre + [indent + lhs + self.fn_values(self.const(rhs))]
+
+    # 7. a game function as a plain pointer value: `call @f(ptr noundef @game_fn)` (a call with no prototype passes
+    # the function as a host pointer; the callee reads its 32-bit parameter and gets the host address's low half:
+    # SLUS-01252's state dispatcher then called 0x00086428, func_80138064's host address truncated), a store or a phi
+    # of one, a table of them. Its PS1 address instead, whose low 32 bits are what a 32-bit reader expects.
+    _FN_VALUE = re.compile(r"\bptr((?:\s+(?!@)[\w.]+(?:\([^()]*\))?)*)\s+(@[-\w.$]+|@\"[^\"]+\")(?!\s*\()")
+
+    _PHI_VALUE = re.compile(r"\[ (@[-\w.$]+|@\"[^\"]+\"),")  # phi ptr [ @f, %from ]: the operand has no type
+
+    def fn_values(self, text: str) -> str:
+        def sub(m: re.Match) -> str:
+            addr = self.game_fn(m.group(2))
+            if addr is None:
+                return m.group(0)
+            return f"ptr{m.group(1)} inttoptr (i64 {addr} to ptr)"
+
+        def phi(m: re.Match) -> str:
+            addr = self.game_fn(m.group(1))
+            return m.group(0) if addr is None else f"[ inttoptr (i64 {addr} to ptr),"
+        text = self._FN_VALUE.sub(sub, text)
+        return self._PHI_VALUE.sub(phi, text) if "phi ptr " in text else text
 
     def _instruction(self, lhs: str, rhs: str, pre: list[str], indent: str) -> str | None:
         # 2./3. addrspacecast instructions
