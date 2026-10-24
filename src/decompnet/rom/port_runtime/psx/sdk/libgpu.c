@@ -705,12 +705,37 @@ void psx_gpu_selftest(int frames) {
     psx_log("gpu: self-test drew %d frames\n", frames);
 }
 
+/* PSX_PORT_DUMP_EVERY=N with PSX_PORT_DUMP_SCREEN=path.png: the display area every N vblanks as path-NNNNNN.png
+ * (the vblank's number), from VRAM, so it works headless too */
+static void dump_every(const GpuDisplay *d) {
+    static int every = -1, n;
+    static const char *path;
+    char name[4096];
+    uint32_t *px;
+    size_t len;
+    if (every < 0) {
+        const char *e = getenv("PSX_PORT_DUMP_EVERY");
+        path = getenv("PSX_PORT_DUMP_SCREEN");
+        every = e && path && *path ? atoi(e) : 0;
+    }
+    if (every <= 0 || n++ % every != every - 1 || !d->enabled || d->w <= 0 || d->h <= 0) return;
+    len = strlen(path);
+    if (len > 4 && !strcmp(path + len - 4, ".png")) len -= 4;
+    snprintf(name, sizeof name, "%.*s-%06d.png", (int)len, path, n);
+    px = (uint32_t *)malloc((size_t)d->w * (size_t)d->h * 4);
+    if (!px) return;
+    gpu_display_rgba(gpu_vram, d->x, d->y, d->w, d->h, d->rgb24, px);
+    gpu_write_png(name, px, d->w, d->h);
+    free(px);
+}
+
 /* ---- the frame loop's side */
 void psx_gpu_present(void) {
     GpuDisplay d;
     start();
     gpu_get_display(&d);
     publish_stat();
+    dump_every(&d);
     if (!d.enabled) host_present(NULL, 0, 0, 0, 0, 0); /* display off: black */
     else host_present(gpu_vram, d.x, d.y, d.w, d.h, d.rgb24);
 }

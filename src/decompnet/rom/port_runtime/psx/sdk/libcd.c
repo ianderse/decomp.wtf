@@ -242,11 +242,30 @@ void StSetEmulate(uint32_t addr, uint32_t mode, uint32_t start_frame, uint32_t e
     StSetStream(mode, start_frame, end_frame, func1, func2);
     CDLOG("cd: StSetEmulate (streaming from memory): not emulated, the stream reads the disc\n");
 }
-uint32_t StGetNext(uint32_t addr, uint32_t header) {
+static int st_oldest(void) {
     int i, best = -1;
     for (i = 0; i < ST_FRAMES; i++)
         if (St.f[i].state == StCOMPLETE && (best < 0 || St.f[i].seq < St.f[best].seq)) best = i;
+    return best;
+}
+
+/* The oldest complete frame, in the order its first sector arrived (frames come off the disc in order). A movie
+ * player spins on StGetNext while the CD interrupt fills the ring (SLUS-01252's func_800DE0E8 calls it up to 8M
+ * times with nothing else in the loop), so with nothing ready and the drive streaming this waits for the next
+ * vertical blank (psx_vblank_wait: the frame shown, the drive's 2.5 sectors of that 60th of a second read at double
+ * speed, 150 a second): the movie runs at the disc's pace (A2MV24.STR: 10 sectors a frame, 15 frames a second).
+ * Once 10 s pass with nothing arriving it stops waiting (logged), so a stream that went wrong can't hang the game. */
+uint32_t StGetNext(uint32_t addr, uint32_t header) {
+    static int starved, logged;
+    int best = st_oldest();
+    if (best < 0 && St.ring && C.stream && C.reading && starved < 600) {
+        if (psx_vblank_wait()) starved++;
+        best = st_oldest();
+        if (starved == 600 && !logged++)
+            psx_log("cd: StGetNext: no frame in the ring after 600 vblanks of streaming; not waiting any more\n");
+    }
     if (best < 0) return 1;
+    starved = 0;
     St.f[best].state = StLOCK;
     if (addr) *(uint32_t *)psx_host(addr) = St.ring + St.f[best].off;
     if (header) *(uint32_t *)psx_host(header) = St.ring + St.nsec * ST_DATA + St.f[best].slot * 32;

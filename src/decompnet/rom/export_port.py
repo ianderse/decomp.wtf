@@ -88,9 +88,9 @@ def _weak_sdk(path: Path) -> list[str]:
     return re.findall(r"^PSX_SDK_WEAK\s+[\w\s\*]*?\b(\w+)\s*\(", text, re.M)
 
 
-# the sound stack (psx/sdk/libspu.c over the software SPU in psx/spu.c, psx/sdk/libsnd.c's sequencer): every Sony
-# function those files define
-for _lib in ("libspu", "libsnd"):
+# the sound stack (psx/sdk/libspu.c over the software SPU in psx/spu.c, psx/sdk/libsnd.c's sequencer) and libpress
+# (psx/sdk/libpress.c over the software MDEC in psx/mdec.c): every Sony function those files define
+for _lib in ("libspu", "libsnd", "libpress"):
     for _n in _weak_sdk(Path(__file__).with_name("port_runtime") / "psx" / "sdk" / f"{_lib}.c"):
         IMPLEMENTED.setdefault(_n, _lib)
 
@@ -128,6 +128,23 @@ SDK_IDENTIFIED = {
         "func_8017295C": ("_spu_t", "libspu's transfer/ioctl dispatcher: the SPU registers through D_801A144C, its "
                                     "strings \"SPU:T/O [%s]\" and \"wait (ioctl/IRQ)\""),
         "func_8017233C": ("_spu_FsetRXX", "libspu: a read-modify-write of SPUCNT through D_801A144C (26 insns)"),
+        "func_8017CD70": ("DecDCTinCallback", "`func_8017C554(0, func)`, next to DecDCToutCallback at 0x8017CD94: "
+                                              "`func_8017C554(1, func)` (libetc's DMA-callback setter: channel 0 is "
+                                              "the MDEC's input, 1 its output)"),
+        # libpress, linked into the movie overlay (ovl_sj00, SJ00.STG at 0x8006D800) around the named DecDCTin and
+        # MDEC_* internals: the API's wrappers are matched C (m2c drafts that drop the arguments they pass on) over
+        # the MDEC's registers and DMA, so each is the runtime's function (psx/sdk/libpress.c over psx/mdec.c)
+        "func_8006E4B4": ("DecDCTReset", "matched C: `if (mode == 0) <the DMA callbacks reset>; MDEC_reset(mode)`"),
+        "func_8006E4EC": ("DecDCTBufSize", "matched C: returns the BS header's first halfword (the run-length size)"),
+        "func_8006E4F8": ("DecDCTvlc", "matched C: `if (MDEC_vlc(bs, buf) == 0) MDEC_vlc2(bs, buf)` (the Huffman "
+                                       "decode); the game calls it at 0x8006E4F8 with (frame, buffer)"),
+        "func_8006E5B4": ("DecDCTout", "matched C: `MDEC_out(buf, size)`; the game calls it at 0x8006E5B4 with (strip "
+                                       "buffer, words)"),
+        "func_8006E5D4": ("DecDCTinSync", "matched C: `MDEC_in_sync(mode)`"),
+        "func_8006E5F4": ("DecDCToutSync", "matched C: `MDEC_out_sync(mode)`"),
+        "func_8006E614": ("MDEC_reset", "mode 0: MDEC1 = 0x80000000, the DMA channels stopped, MDEC_in of the quant "
+                                        "table (0x40000001 + 128 bytes at D_8006F360) and the scale matrix "
+                                        "(0x60000000 + 64 halfwords at D_8006F3E4); 1: abort; else the time-out path"),
     },
 }
 # the BIOS's C library calls (A0 table slot -> wrapper signature) the runtime implements behind the game's stub names
@@ -569,13 +586,17 @@ SONY_SHAPES: dict[str, tuple[str, str]] = {
     "26bbd38d41f04c6f:8": ("_getctl", "n << 24 | the saved GP1 word n: slot 10"),
     "9f4018f77f5b2d17:13": ("_param", "GP1 = 0x10000000 | n, returns GPUREAD & 0xFFFFFF: slot 12"),
     "255f730c9bc1b559:6": ("_status", "returns GPUSTAT: slot 14"),
-    # libetc's interrupt table (D_801A153C: {?, VSyncCallbacks, InterruptCallback, ResetCallback, StopCallback,
-    # DMACallback}; slots 1 and 5 are null in the EXE until ResetCallback's intInit fills them)
+    # libetc's interrupt table (D_801A153C: {?, DMACallback, InterruptCallback, ResetCallback, StopCallback,
+    # VSyncCallback}; slots 1 and 5 are null in the EXE until ResetCallback's intInit fills them). Slot 1 takes a DMA
+    # channel: ResetGraph calls its wrapper with (2, the GPU's handler), CdDataCallback with (3, func),
+    # DecDCToutCallback with (1, func); slot 5's wrapper passes its one argument on: _SsStart's
+    # VSyncCallback(SsSeqCalledTbyT)
     "ff47d39e431c6826:12": ("ResetCallback", "calls interrupt-table slot 3 (intInit)"),
     "b1c6029eb5247457:12": ("InterruptCallback", "calls interrupt-table slot 2 (setIntCallback) with (irq, func)"),
-    "ce2db528128895db:12": ("VSyncCallbacks", "calls interrupt-table slot 1 with (ch, func); VSyncCallback(f) is it "
-                                              "with ch 0"),
-    "6af7f4aabe2d1255:12": ("DMACallback", "calls interrupt-table slot 5 with (ch, func)"),
+    "ce2db528128895db:12": ("DMACallback", "calls interrupt-table slot 1 with (ch, func): ResetGraph's (2, ...), "
+                                           "CdDataCallback's (3, func), DecDCToutCallback's (1, func)"),
+    "6af7f4aabe2d1255:12": ("VSyncCallback", "calls interrupt-table slot 5 with (func): _SsStart's "
+                                             "VSyncCallback(SsSeqCalledTbyT)"),
     "33ac02314cce677c:12": ("StopCallback", "calls interrupt-table slot 4 (stopInit)"),
 }
 
@@ -1980,10 +2001,12 @@ def find_patches(pdir: Path, functions: list[dict]) -> list[dict]:
     another segment's function has too) replaces the export's file for that function in the port build only; the
     export and the database stay as they are. For the original game's own bugs that matched C has to keep (it reads
     a leftover register or stack slot: deterministic on the PS1, undefined on the host). Each starts with a comment
-    block saying what the PS1 does and why the port differs. A patch for a function that is unknown (renamed since?),
-    in no or several segments, or not matched, is an error: a stale patch must not be silently ignored.
-    [{name, seg, file (relative to the port), path (the export's file it replaces), note (the first comment line),
-    text}]"""
+    block saying what the PS1 does and why the port differs. A patch for a function still in assembly is that
+    function's C in the port only (the port's stub for it goes; the database still has it unmatched): the movie
+    player's MDEC callback in SLUS-01252, say, written from its MIPS. A patch for a function that is unknown (renamed
+    since?) or in no or several segments is an error: a stale patch must not be silently ignored.
+    [{name, seg, file (relative to the port), path (the export's file it replaces, or src/<seg>/<name>.c for an
+    unmatched function), note (the first comment line), text, unmatched}]"""
     if not pdir.is_dir():
         return []
     by_name: dict[str, list[dict]] = {}
@@ -2006,10 +2029,6 @@ def find_patches(pdir: Path, functions: list[dict]) -> list[dict]:
                           f": put it in patches/<segment>/{name}.c")
             continue
         f = cands[0]
-        if not f.get("c"):
-            errors.append(f"{rel}: {name} is not matched (a patch replaces a matched function's C; an unmatched one "
-                          "is a stub)")
-            continue
         text = pf.read_text(encoding="utf-8", errors="replace")
         note = _patch_note(text)
         if not note:
@@ -2019,12 +2038,14 @@ def find_patches(pdir: Path, functions: list[dict]) -> list[dict]:
         if not re.search(r"\b" + re.escape(name) + r"\s*\(", strip_c(text)):
             errors.append(f"{rel}: doesn't define {name}")
             continue
-        if f["c"] in seen:
-            errors.append(f"{rel}: {seen[f['c']]} patches {name} already")
+        # an unmatched function's patch is its C in the port only, under a path of its own in the tree's layout
+        path = f.get("c") or f"src/{f.get('seg') or 'main'}/{name}.c"
+        if path in seen:
+            errors.append(f"{rel}: {seen[path]} patches {name} already")
             continue
-        seen[f["c"]] = str(rel)
-        out.append({"name": name, "seg": f.get("seg"), "file": "patches/" + rel.as_posix(), "path": f["c"],
-                    "note": note, "text": text})
+        seen[path] = str(rel)
+        out.append({"name": name, "seg": f.get("seg"), "file": "patches/" + rel.as_posix(), "path": path,
+                    "note": note, "text": text, "unmatched": not f.get("c")})
     if errors:
         raise PortError("port patches (" + str(pdir) + "):\n  " + "\n  ".join(errors))
     return out
@@ -2042,12 +2063,14 @@ def patches_md(patches: list[dict]) -> str:
             "(`patches/<function>.c`, or `patches/<segment>/<function>.c`); the export and the database keep the "
             "matched C. They are for the original game's own bugs that the matching C has to keep (it reads a "
             "leftover register or stack slot: deterministic on the PS1, undefined on the host) and for calls the "
-            "port links differently from the PS1. A patch whose function is renamed, unknown or not matched stops "
-            "the generator.\n\n")
+            "port links differently from the PS1. A patch for a function still in assembly is its C in this build "
+            "only (written from its MIPS; the database still has it unmatched). A patch whose function is renamed "
+            "or unknown stops the generator.\n\n")
     if not patches:
         return head + "None.\n\n"
     return head + "| Function | Patch | What it does |\n| :-- | :-- | :-- |\n" + "".join(
-        f"| `{x['name']}` | `{x['file']}` (for `{x['path']}`)" + ("" if x.get("compiled", True) else
+        f"| `{x['name']}` | `{x['file']}` " + ("(its C: still assembly in the export)" if x.get("unmatched") else
+                                              f"(for `{x['path']}`)") + ("" if x.get("compiled", True) else
                                                                   " (not compiled: does nothing)")
         + f" | {x['note'].replace('|', '/')} |\n" for x in patches) + "\n"
 
@@ -2127,9 +2150,9 @@ def sdk_functions(build: dict, sony: dict[str, dict], ranges: list[tuple[int, in
             out[n] = {"lib": lib, "bios": None, "label": label, "objects": [], "vram": f["vram"], "sdk_range": True,
                       "why": why or f"in the SDK range {lo:08X}-{hi:08X}" + (" (matched C, replaced)" if f.get("c")
                                                                              else "")}
-    for f in build["functions"]:
+    for f in build["functions"]:  # matched or not: an alias replaces a matched function's C too
         n = f["name"]
-        if n in identified and n not in out and not f.get("c"):
+        if n in identified and n not in out:
             label, why = identified[n]
             out[n] = {"lib": sony_library(label), "bios": None, "label": label, "objects": [], "vram": f["vram"],
                       "why": why}
@@ -2171,7 +2194,14 @@ def generate(source: Path, port: Path, sony: dict[str, dict], title: str, slug: 
     patches = find_patches(port / "patches", b["functions"])
     for x in patches:
         sources[x["path"]] = x["text"]
-        log(f"patch: {x['file']} replaces {x['path']} ({x['note']})")
+        if x["unmatched"]:  # compiled as if matched, from the patch (gen/game_patches.txt): no stub for it
+            for f in b["functions"]:
+                if f["name"] == x["name"] and f.get("seg") == x["seg"]:
+                    f["c"] = x["path"]
+            paths.append(x["path"])
+            log(f"patch: {x['file']} is {x['name']}'s C in the port (still assembly in the export; {x['note']})")
+        else:
+            log(f"patch: {x['file']} replaces {x['path']} ({x['note']})")
 
     port.mkdir(parents=True, exist_ok=True)
     write_runtime(port)
@@ -2287,7 +2317,8 @@ def generate(source: Path, port: Path, sony: dict[str, dict], title: str, slug: 
         "call_hazards": ch,
         "cross_overlay": xo,
         "patches": [{"name": x["name"], "seg": x["seg"], "file": x["file"], "path": x["path"], "note": x["note"],
-                     "compiled": x["path"] in compiled_set} for x in patches],
+                     "compiled": x["path"] in compiled_set, "unmatched": x.get("unmatched", False)}
+                    for x in patches],
         "generated_in": round(time.time() - t0, 1),
         "disc": disc or "",
         "libcd": {n: a for n, a in sorted(aliases.items())},
@@ -2378,7 +2409,7 @@ def run_game(exe: Path, log_path: Path, seconds: int, soft: bool) -> tuple[int, 
 
 def summarize_run(text: str) -> dict:
     """What a run log says: the game functions entered (in order), the first function still in assembly and the
-    first Sony stub it reached, how it ended."""
+    first Sony stub it reached, the files it read and streamed, the movie frames the MDEC decoded, how it ended."""
     entered = re.findall(r"^trace: enters (\S+)", text, re.M)
     unmatched = re.findall(r"^unmatched: (\S+)", text, re.M)
     sdk = re.findall(r"^sdk: (.+?) \(call 1\)", text, re.M)
@@ -2395,6 +2426,16 @@ def summarize_run(text: str) -> dict:
         story += f"; first function still in assembly: {unmatched[0]}"
     if reads:
         story += f"; reads {', '.join(dict.fromkeys(reads))} from the disc"
+    streams = re.findall(r"^cd: CdRead2\(mode 0x[0-9A-F]+\) from LBA \d+ \(([^)]*?)(?: \+0x[0-9A-F]+)?\): streaming",
+                         text, re.M)
+    if streams:
+        story += f"; streams {', '.join(dict.fromkeys(streams))} (St ring)"
+    mdec = re.search(r"^press: (\d+) frames decoded \(DecDCTvlc\), (\d+) DecDCTin, (\d+) DecDCTout completions "
+                     r"\((\d+) macroblocks\)(?:; the first at vblank (\d+))?", text, re.M)
+    if mdec:
+        story += (f"; the MDEC decoded {mdec.group(1)} movie frames ({mdec.group(3)} DecDCTout completions, "
+                  f"{mdec.group(4)} macroblocks" + (f", the first at vblank {mdec.group(5)}" if mdec.group(5) else "")
+                  + ")")
     if stopped:
         story += f"; stops at {stopped.group(1)} (not decompiled)"
     elif fault:
@@ -2411,7 +2452,10 @@ def summarize_run(text: str) -> dict:
                   + ("" if re.search(r"^etc: first VSync", text, re.M) else ", no VSync reached"))
     keep = [ln for ln in text.splitlines() if not re.match(r"sdk: .* \(call ([2-9]|1\d|20)\)", ln)]
     return {"entered": entered, "unmatched_hit": unmatched, "sdk_hit": sdk, "fault": fault.group(1) if fault else None,
-            "cd_reads": reads,
+            "cd_reads": reads, "cd_streams": streams,
+            "mdec": {"frames": int(mdec.group(1)), "ins": int(mdec.group(2)), "outs": int(mdec.group(3)),
+                     "macroblocks": int(mdec.group(4)), "first_vblank": int(mdec.group(5)) if mdec.group(5) else None}
+            if mdec else None,
             "stopped_at": stopped.group(1) if stopped else None, "story": story, "log_head": "\n".join(keep[:70])}
 
 
@@ -2654,7 +2698,8 @@ function, which keeps the argument registers); `PSX_HEADLESS=1` no window; `PSX_
 saved, {('`' + r['disc'] + '`') if r.get('disc') else 'none saved'}), `PSX_CD_FAST=1` a CdRead's sectors all at once,
 `PSX_CD_LOG=1` every CD command, `PSX_CD_LOAD=FILE@ADDR` a disc file into RAM at CdInit (an overlay, to check it
 resolves), `PSX_NULL_FAULT=1` RAM's KUSEG mirror unmapped (a null PS1 pointer faults); `PSX_PORT_DUMP_VRAM=file.png` the VRAM
-at exit (also after a crash); `PSX_PORT_DUMP_SCREEN=file.png` what the SDL window shows, every 30 frames;
+at exit (also after a crash); `PSX_PORT_DUMP_SCREEN=file.png` what the SDL window shows, every 30 frames
+(with `PSX_PORT_DUMP_EVERY=N` the display area every N vblanks as file-NNNNNN.png instead, headless too);
 `PSX_GPU_SELFTEST=N` N frames drawn through libgpu (environments, an ordering table, polygons, a CLUT sprite, a
 polyline) instead of the game. Keys: arrows (d-pad), Z/X/A/S (cross/circle/square/triangle),
 Return (start), right shift (select), Q/W (L1/R1), 1/2 (L2/R2). CMake options: `-DPSX_PTR32=OFF` (the C as it is,
@@ -2770,7 +2815,13 @@ generated from this game). `port.json` has these numbers.
 - **The CD** is the disc image read in place (`psx/cd.c`: 2352-byte Mode 1/Mode 2 or 2048-byte sectors, a .cue,
   ISO 9660) under libcd (`psx/sdk/libcd.c`, its model in `libcd.h`): commands complete at the next VSync or poll, a
   read moves 2.5 sectors a frame at double speed (one per poll), callbacks fire there. XA ADPCM goes to
-  `psx_cd_xa_sector()`, decoded onto the SPU's CD input (`psx/xa.c`); CD-DA isn't played.
+  `psx_cd_xa_sector()`, decoded onto the SPU's CD input (`psx/xa.c`); CD-DA isn't played. A movie streams with
+  CdRead2 into the St ring: STR video sectors (32-byte header: frame, chunk of n) put back together frame by frame,
+  StGetNext handing out the oldest complete one and waiting a vblank while the drive streams and none is ready.
+- **Movies**: libpress (`psx/sdk/libpress.c`) over a software MDEC (`psx/mdec.c`, from psx-spx): DecDCTvlc decodes
+  a BS v1/v2/v3 frame's Huffman codes into run-length codes, DecDCTin hands them over, DecDCTout writes decoded
+  16x16 macroblocks (15- or 24-bit) into the game's buffer; the out-callback runs at the end of DecDCTout on the
+  main thread, chained transfers queued rather than nested.
 - **Calls nothing answers** (named in the C, but neither matched, a stub nor a symbol):
   {', '.join(f'`{n}`' for n in r['unresolved'][:40]) or 'none'}.
 - **Matched files that don't compile for the host**:{ex_lines or ' none.'}

@@ -34,6 +34,10 @@ const char *psx_host_name(const void *fn);
 /* the entry trace (cmake -DPSX_TRACE=ON): psx/trace.S calls it with the argument registers kept */
 void psx_trace_enter(uint32_t ps1, const void *fn);
 int psx_frames(void); /* vertical blanks since start (sdk/libetc.c) */
+/* wait for the next vertical blank as VSync(0) does (the frame shown, the CD's sectors of that frame read, the
+ * vblank callbacks run), for a library call the PS1 game spins on while interrupts fill a buffer (StGetNext);
+ * returns 0 without waiting when called from a vblank callback */
+int psx_vblank_wait(void);
 
 /* ---- the memory convention: PS1 address A lives at host address PSX_HOST_BASE + A.
  * PS1 RAM (0x80000000) is mapped at 0x4_8000_0000, the scratchpad (0x1F800000) at 0x4_1F80_0000, the game's stack
@@ -101,6 +105,7 @@ int psx_sdk_stub(const char *name, int *calls);
 int psx_soft(void);
 void psx_exit_report(void);
 void psx_gpu_exit(void); /* psx/sdk/libgpu.c: the GPU's counts, and PSX_PORT_DUMP_VRAM */
+void psx_mdec_exit(void); /* psx/sdk/libpress.c: what the MDEC decoded */
 void psx_gpu_selftest(int frames); /* PSX_GPU_SELFTEST=N: N frames drawn through libgpu before the game's main */
 
 /* host window and input (psx/host_*.c) */

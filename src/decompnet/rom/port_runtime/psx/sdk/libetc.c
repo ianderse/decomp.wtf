@@ -66,6 +66,12 @@ static void one_frame(void) {
     in_callback = 0;
 }
 
+int psx_vblank_wait(void) {
+    if (in_callback) return 0;
+    one_frame();
+    return 1;
+}
+
 /* horizontal blanks since the last vertical one, from the clock */
 static int hcount(void) {
     struct timespec now;

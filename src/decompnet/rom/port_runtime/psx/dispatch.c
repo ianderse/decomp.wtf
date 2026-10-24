@@ -191,6 +191,7 @@ void psx_exit_report(void) {
     psx_log("psx: %d frames (vertical blanks)\n", psx_frames());
     for (i = 0; i < n_unmatched; i++) psx_log("  unmatched %s\n", unmatched_hit[i]);
     for (i = 0; i < n_sdk; i++) psx_log("  sdk stub %s x%d\n", sdk_hit[i].name, *sdk_hit[i].calls);
+    psx_mdec_exit(); /* the movie frames the MDEC decoded */
     psx_gpu_exit(); /* what was drawn; PSX_PORT_DUMP_VRAM=path writes the VRAM as a PNG */
 }
 
