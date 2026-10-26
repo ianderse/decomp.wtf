@@ -190,3 +190,31 @@ def test_telemetry_failure_warns_and_preserves_runner_exception(database, monkey
             raise RuntimeError('original runner error')
     assert 'timing has a gap' in caplog.text
     assert 'agent_run_started' in caplog.text and 'agent_run_finished' in caplog.text
+
+
+def test_background_time_separate_from_agent_denominator(database,monkeypatch):
+    path,store=database
+    times=iter([100,3700])
+    monkeypatch.setattr('decompnet.progress_metrics.time.time',lambda:next(times))
+    with measured_run(SimpleNamespace(store=store),'game',1,'permuter:42',kind='worker'):
+        pass
+    monkeypatch.setattr('decompnet.progress_metrics.time.time',lambda:7200)
+    r=report(path,'game',since=0,until=7200)
+    assert r['background_workers']['session_hours']==1
+    assert r['denominator']['agent_hours'] is None
+
+
+def test_consolidated_snapshot_reports_incomplete_and_reviewed_runs(database,tmp_path):
+    from decompnet.runtime_workflow import consolidated,sha
+    path,_=database
+    runs=tmp_path/'runs'; pending=runs/'interrupted';pending.mkdir(parents=True)
+    (pending/'scenario.json').write_text('{}')
+    done=runs/'title';done.mkdir()
+    result=done/'result.json'
+    result.write_text(json.dumps({'scenario':'title','status':'needs_visual_review'}))
+    (done/'review.json').write_text(json.dumps({'verdict':'accepted','result_sha256':sha(result)}))
+    out=tmp_path/'report'
+    r=consolidated(path,'game',out,since=0,runs=runs)
+    assert [s['status'] for s in r['runtime_scenarios']]==['interrupted_or_incomplete','accepted']
+    assert (out/'snapshot.db').exists() and (out/'report.txt').exists()
+    with pytest.raises(FileExistsError):consolidated(path,'game',out)

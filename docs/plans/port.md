@@ -1,5 +1,10 @@
 # PS1 export for port: the game's matched C on the host
 
+Current replay (2026-10-26): see the [runtime workflow evidence](../workflows/runtime-progress.md).
+Intro, title and both card scenarios passed visual review. New Game now survives 2,097
+vblanks with the existing patches but stays black; gameplay acceptance remains open.
+The dated descriptions below preserve earlier observations.
+
 Status (2026-10-24): **the intro movie plays.** The soft run reaches XMV/A2MV24.STR, streams it through the St
 ring and decodes it with libpress over a software MDEC (psx/mdec.c): 385 frames in 30 s, 15.0 a second, the first
 at vblank 260, every frame LoadImage'd strip by strip into VRAM and shown 24-bit; the vblank count goes on climbing
@@ -475,10 +480,14 @@ func_80155B6C's excluded C). The title path (`start@300`, 30 s) is unchanged: th
 
 ## What the next pass needs
 
-1. **The rest of the CPU side:** func_80158ECC (a game function in assembly, the next strict stop), the BIOS wrappers
-   and the Sony functions the C calls, enough that main reaches its first VSync. Sony stubs that return pointers
-   (the CD's file lookups) need real implementations before soft mode means much. More SONY_SHAPES as they turn
-   up: any matched m2c draft that calls through a library's table with `()` loses its arguments on the host.
+Current priorities and repeatable acceptance checks live in
+[the runtime progress workflow](../workflows/runtime-progress.md). The active project's
+`runtime-workflow.json` and frozen progress reports supersede this historical list.
+
+1. **New Game's window construction:** verify the existing `func_80155B6C` declaration-order
+   port patch, then investigate `func_801668AC` with an explicit eight-attempt budget and
+   replay the New Game scenario. `func_80158ECC` is now matched; it is not the next task.
+   Run the strict probe again for its current first stop; strict and soft milestones differ.
 2. **The GPU's next steps.** Dithering (E1h bit 9) and interlace; the game's own frames to compare with an
    emulator's VRAM; an accelerated backend later (PsyCross's renderer, above, or Metal), keeping gpu.c as the
    reference.

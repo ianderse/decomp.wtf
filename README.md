@@ -539,3 +539,5 @@ was made.
 <br>
 
 <p align="center"><sub>Not affiliated with Nintendo or Sony. Nintendo 64 and PlayStation are their trademarks.</sub></p>
+
+Runtime-driven matching priorities, reproducible port scenarios, diagnosis invalidations, and frozen progress reports: [workflow guide](docs/workflows/runtime-progress.md) (`decomp workflow --help`).

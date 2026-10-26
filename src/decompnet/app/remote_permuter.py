@@ -89,6 +89,12 @@ class RemotePermuter:
 
     # -- one round
     def tick(self, slug: str) -> dict:
+        from ..progress_metrics import measured_run
+        agent, _ = self.net.local_agent('remote-permuter-controller')
+        with measured_run(self.net, slug, agent.id, 'remote-permuter-controller', kind='worker'):
+            return self._tick(slug)
+
+    def _tick(self, slug: str) -> dict:
         with self._lock:
             st = self.status.setdefault(slug, {"host": self.host})
             st["host"], st["checked_at"], st["error"] = self.host, time.time(), ""
@@ -102,6 +108,13 @@ class RemotePermuter:
                 st["error"] = f"can't reach {self.host}: {e}"
                 return st
             st["running"] = is_running
+            # Poll evidence, not an invented start/finish time for a remote process.
+            try:
+                with self.net.store.tx() as db:
+                    self.net._event(db, proj['id'], None, 'remote_worker_observed', json.dumps({
+                        'host':self.host, 'running':is_running, 'batch_started':batch.get('started')}))
+            except Exception:
+                log.warning('Remote worker observation unavailable', exc_info=True)
             if local.exists() and batch:
                 got = self._rsync(f"{self.host}:{remote}/", f"{local}/")
                 if got.returncode == 0:

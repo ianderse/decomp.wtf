@@ -247,3 +247,51 @@ def test_local_template_lane_leaves_repeated_stalls_to_strong_agents(setup):
         db.execute("UPDATE functions SET attempts=40 WHERE name='f'")
     assert net.claim_row(a,'game',strategy='templates')['name']=='g'
     assert diagnosis.eligible(net,net._function('f','game'),'strong')
+
+
+def test_unrelated_regions_do_not_reopen_legacy_exhaustion(setup):
+    net, a, _ = setup
+    with net.store.tx() as db:
+        db.execute('UPDATE functions SET vram=4096 WHERE name=\'f\'')
+    diagnosis.record(net,a,'f','stack','measured spill','new compiler evidence',True,'game')
+    row = diagnosis.latest(net,net._function('f','game'))
+    # Legacy records included all regions. Its basis is retained unchanged.
+    details = json.loads(row['details'])
+    details['regions'] = [{'from':8192,'to':12288,'toolchain':'unrelated'}]
+    env = diagnosis.digest(json.dumps(details,sort_keys=True))
+    fn = net._function('f','game')
+    old_basis = diagnosis.digest(env + diagnosis.digest(fn['best_source']) + 'None')
+    with net.store.tx() as db:
+        db.execute('UPDATE function_diagnoses SET details=?,environment=?,basis=? WHERE id=?',
+                   (json.dumps(details),env,old_basis,row['id']))
+        cfg = {'compiler':{'flags':['-O2']},'regions':[{'from':8192,'to':12288,'toolchain':'changed'}]}
+        db.execute('UPDATE projects SET config=? WHERE id=1',(json.dumps(cfg),))
+    assert not diagnosis.eligible(net,fn)
+    assert diagnosis.invalidation_reasons(net,fn) == []
+    cfg['regions'].append({'from':4096,'to':4100,'toolchain':'relevant'})
+    with net.store.tx() as db:
+        db.execute('UPDATE projects SET config=? WHERE id=1',(json.dumps(cfg),))
+    assert diagnosis.invalidation_reasons(net,fn) == ['regions']
+    assert 'Invalidated by: regions' in '\n'.join(diagnosis.brief(net,fn))
+
+
+def test_incumbent_change_explained_and_budget_enforced(setup):
+    from decompnet.runtime_workflow import require_budget, priorities
+    from pathlib import Path
+    net,a,_ = setup
+    diagnosis.record(net,a,'f','stack','spill','investigate',True,'game')
+    with net.store.tx() as db:
+        db.execute("UPDATE functions SET best_source='new source' WHERE name='f'")
+    fn = net._function('f','game')
+    assert diagnosis.invalidation_reasons(net,fn) == ['incumbent_or_review']
+    proj = net._project('game')
+    (Path(proj['root'])/'runtime-workflow.json').write_text(json.dumps({'blockers':[{
+        'function':'f','lane':'exact','milestone':'start','evidence':'run.log','next_hypothesis':'spill',
+        'max_attempts':2,'attempts_at_start':0}]}))
+    assert priorities(net,proj) == ['f']
+    require_budget(net,fn)
+    with net.store.tx() as db:
+        db.execute("UPDATE functions SET attempts=2 WHERE name='f'")
+    assert priorities(net,proj) == []
+    with pytest.raises(NetworkError,match='budget exhausted'):
+        require_budget(net,net._function('f','game'))

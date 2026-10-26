@@ -129,6 +129,13 @@ def main(argv: list[str]) -> int:
     from .engine import RomNetwork
     net = RomNetwork(db_path, Path(workspace))  # in-process loops here: this *is* the worker
 
+    from ..progress_metrics import measured_run
+    agent, _ = net.local_agent(kind)
+    with measured_run(net, slug, agent.id, f"{kind}:{os.getpid()}", kind="worker"):
+        return run_worker(net, kind, slug)
+
+
+def run_worker(net, kind, slug):
     if kind == "autopilot":
         state = net.start_autopilot(slug)
         stop = state["stop"]

@@ -66,6 +66,33 @@ def environment(net, fn):
     return digest(json.dumps(details, sort_keys=True)), details
 
 
+def relevant_regions(regions, vram):
+    """Only the first applicable assignment affects this function's recipe."""
+    return next(([r] for r in regions if vram is not None and r['from'] <= vram < r['to']), [])
+
+
+def invalidation_reasons(net, fn, row=None):
+    """Explain validity without writing during scheduler reads; accept legacy region lists.
+
+    Keep the global symbol stamp: source macros and newly introduced references make
+    a target-relocations-only dependency list unsafe for arbitrary future trials.
+    """
+    row = row or latest(net, fn)
+    if not row:
+        return []
+    _, current = environment(net, fn)
+    current['regions'] = relevant_regions(current.get('regions', []), fn['vram'])
+    old = json.loads(row['details'])
+    old['regions'] = relevant_regions(old.get('regions', []), fn['vram'])
+    reasons = [key for key in sorted(set(old) | set(current)) if old.get(key) != current.get(key)]
+    review = net.store.one('SELECT MAX(id) id FROM candidate_reviews WHERE function_id=?', fn['id'])
+    # Use the recorded environment digest so narrowing unrelated regions does not
+    # reopen every old exhausted diagnosis on deployment.
+    if row['basis'] != digest(row['environment'] + digest(fn['best_source'] or '') + str(review['id'])):
+        reasons.append('incumbent_or_review')
+    return reasons
+
+
 def basis(net, fn):
     env, _ = environment(net, fn)
     review = net.store.one('SELECT MAX(id) id FROM candidate_reviews WHERE function_id=?', fn['id'])
@@ -77,13 +104,16 @@ def latest(net, fn):
 
 
 def eligible(net, fn, strategy='easiest'):
+    from .runtime_workflow import automatic_paused
+    if automatic_paused(net, fn):
+        return False
     # The templates lane is used by local-model helpers. The hard remainder belongs to strong sessions.
     if strategy == 'templates' and (fn['attempts'] >= 30 or fn['abandons'] >= 3):
         return False
     row = latest(net, fn)
     if not row:
         return strategy not in LANES
-    current = row['basis'] == basis(net, fn)
+    current = not invalidation_reasons(net, fn, row)
     if row['exhausted'] and current:
         return False
     return strategy not in LANES or (current and row['category'] == strategy)
@@ -98,6 +128,9 @@ def record(net, agent, function, category, evidence, next_hypothesis, exhausted=
         raise NetworkError('Provide measured evidence and the next hypothesis or evidence needed to resume.')
     fn = net._function(function, project)
     env, details = environment(net, fn)
+    changed = invalidation_reasons(net, fn)
+    if changed:
+        evidence = evidence.strip() + '\nPrevious diagnosis invalidated by: ' + ', '.join(changed)
     with net.store.tx() as db:
         claim = db.execute('SELECT agent_id FROM claims WHERE function_id=?', (fn['id'],)).fetchone()
         if claim and claim['agent_id'] != agent.id:
@@ -127,15 +160,17 @@ def observe(net, fn, agent, diff, problems=()):
     if current['status'] != 'open' or current['best_score'] != diff.score:
         return
     old = latest(net, current)
-    if old and old['basis'] == basis(net, current):
+    if old and not invalidation_reasons(net, current, old):
         return
     category, counts = classify(diff, problems)
+    changed = invalidation_reasons(net, current, old) if old else []
     env, details = environment(net, current)
     with net.store.tx() as db:
         db.execute('INSERT INTO function_diagnoses(function_id,agent_id,category,evidence,next_hypothesis,exhausted,'
                    'basis,environment,details,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)',
                    (fn['id'], agent.id, category, 'Measured diff markers: ' + json.dumps(counts) +
-                    ('; linking: ' + '; '.join(problems) if problems else ''), LANES[category], 0,
+                    ('; linking: ' + '; '.join(problems) if problems else '') +
+                    ('; previous diagnosis invalidated by: ' + ', '.join(changed) if changed else ''), LANES[category], 0,
                     basis(net, current), env, json.dumps(details), time.time()))
 
 
@@ -198,10 +233,12 @@ def brief(net, fn):
     row = latest(net, fn)
     lines = []
     if row:
-        stale = row['basis'] != basis(net, fn)
+        stale = bool(invalidation_reasons(net, fn, row))
         lines += ['', '### Persistent diagnosis' + (' (inputs changed; revalidate)' if stale else ''),
                   f"Lane: {row['category']}. {LANES[row['category']]}", row['evidence'],
                   'Next hypothesis / resume condition: ' + row['next_hypothesis']]
+        if stale:
+            lines += ['Invalidated by: ' + ', '.join(invalidation_reasons(net, fn, row))]
         if row['exhausted'] and not stale:
             lines += ['Automatic rotation is paused. A named claim permits a new evidence-backed investigation.']
     lines += ['Historical attempts are not this claim\'s budget. Stop only on the current claim\'s stall signal; '
@@ -211,6 +248,8 @@ def brief(net, fn):
     if trials:
         lines += ['Recent measured hypotheses:'] + [f"- trial {r['id']}: {r['hypothesis']} [{r['state']}, score {r['score']}]"
                                                   for r in trials]
+    from .runtime_workflow import brief as runtime_brief
+    lines += runtime_brief(net, fn)
     return lines
 
 
@@ -286,7 +325,7 @@ def alternatives(net, agent, function, attempt_id, old, replacements, hypothesis
 def require_hypothesis(net, fn, agent, source):
     from .network import NetworkError
     row = latest(net, fn)
-    if fn['status'] != 'open' or not row or not row['exhausted'] or row['basis'] != basis(net, fn):
+    if fn['status'] != 'open' or not row or not row['exhausted'] or bool(invalidation_reasons(net, fn, row)):
         return
     active = net.store.one("SELECT 1 FROM hypothesis_trials WHERE function_id=? AND agent_id=? AND environment=? "
                            "AND source_hash=? AND state='running'", fn['id'], agent.id,

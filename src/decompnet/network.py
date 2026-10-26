@@ -721,6 +721,8 @@ class Network:
         self._require_budget(agent)
         fn = self._function(function, project)
         proj = self.store.one("SELECT * FROM projects WHERE id=?", fn["project_id"])
+        from .runtime_workflow import require_budget
+        require_budget(self, fn)
         diagnosis.require_hypothesis(self, fn, agent, source)
         now = time.time()
 

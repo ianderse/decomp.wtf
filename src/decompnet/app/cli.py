@@ -477,10 +477,15 @@ def fix_passthrough(args) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if argv and argv[0] == "workflow":
+        from ..runtime_workflow import main as workflow_main
+        return workflow_main(argv[1:])
     ap = argparse.ArgumentParser(prog="decomp", description="decomp.wtf: your AI agents decompile your games, matching byte for byte")
     ap.add_argument("--port", type=int, default=DEFAULT_PORT)
     ap.add_argument("--no-browser", action="store_true", help="don't open the browser")
     sub = ap.add_subparsers(dest="cmd")
+    sub.add_parser("workflow", help="runtime scenarios, blocker queue and frozen progress reports (workflow --help)")
     sub.add_parser("setup", help="install the compilers and tools this computer needs")
     sub.add_parser("stop", help="stop the running app")
     sub.add_parser("shortcut", help="add decomp.wtf to your apps menu / desktop")
@@ -547,6 +552,7 @@ def main(argv: list[str] | None = None) -> int:
                                      "(from the export; sound through a software SPU, no rendering yet)")
     po.add_argument("project", help="the project's name (its slug, e.g. slus-01252)")
     po.add_argument("--build", action="store_true", help="configure, build and run it (5 s strict, then 5 s with PSX_PORT_SOFT=1)")
+    po.add_argument("--scenarios", nargs="*", help="after --build, replay named runtime scenarios (no names: all); retain evidence")
     po.add_argument("--main", help="the game's main function (default: found from the start-up code)")
     po.add_argument("--no-check", action="store_true", help="don't compile each matched file first to leave out "
                                                             "the ones that fail")
@@ -589,6 +595,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.cmd == "fix-passthrough":
         return fix_passthrough(args)
     if args.cmd == "port":
+        if args.scenarios is not None and not args.build:
+            ap.error("--scenarios requires --build")
         from .engine import RomNetwork
         from ..rom.export_port import PortError, export_port
         net = RomNetwork(home_dir() / ".decomp" / "decomp.db", home_dir())
@@ -600,6 +608,22 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         print(f"{res['path']}/PORT.md")
         b = res.get("build")
+        if b and b.get("built") and args.scenarios is not None:
+            from ..runtime_workflow import read_plan, run_scenario
+            root = Path(net.project_row(args.project)['root'])
+            scenarios = read_plan(root).get('scenarios', {})
+            names = args.scenarios or list(scenarios)
+            if not names or any(name not in scenarios for name in names):
+                print('No configured scenarios, or unknown scenario name; see runtime-workflow.json')
+                return 1
+            import uuid
+            destination = root / 'runtime-runs' / (time.strftime('%Y%m%dT%H%M%S') + '-' + uuid.uuid4().hex[:8])
+            failed = False
+            for name in names:
+                check = run_scenario(root, name, destination / name)
+                print(f"{name}: {check['status']} ({destination / name})")
+                failed |= check['status'] == 'failed'
+            return 1 if failed else 0
         return 0 if b is None or b.get("built") else 1
     if args.cmd == "permuter":
         from .engine import RomNetwork

@@ -2355,14 +2355,21 @@ class RomNetwork(Network):
                     "SELECT 1 FROM functions WHERE project_id=? AND status='open' AND vram >= ? AND vram < ? "
                     "AND id NOT IN (SELECT function_id FROM claims)", proj["id"], *region):
                 region = None
-            for name in self.cfg(proj).get("priority", []):
+            from ..runtime_workflow import priorities
+            runtime_names = priorities(self, proj)
+            for name in dict.fromkeys(runtime_names + self.cfg(proj).get("priority", [])):
                 row = self.store.one("SELECT f.* FROM functions f WHERE f.project_id=? AND f.name=?",
                                      proj["id"], name)
                 if row and region and not (row["vram"] is not None and region[0] <= row["vram"] < region[1]):
                     continue  # a session kept to an address range takes the pins in it
+                from ..network import OWN_RELEASE_WINDOW, RELEASE_COOLDOWN
+                if self.store.one("SELECT 1 FROM events WHERE project_id=? AND kind='release' AND detail=? "
+                                  "AND (created_at>? OR (agent_id=? AND created_at>?))", proj["id"], name,
+                                  time.time()-RELEASE_COOLDOWN, agent.id, time.time()-OWN_RELEASE_WINDOW):
+                    continue
                 held = self.store.one("SELECT 1 FROM claims WHERE agent_id=?", agent.id)
                 from .. import diagnosis
-                if row and row["status"] == "open" and diagnosis.eligible(self, row, strategy) and not held and not self.store.one(
+                if row and row["status"] == "open" and (name in runtime_names or diagnosis.eligible(self, row, strategy)) and not held and not self.store.one(
                         "SELECT 1 FROM claims WHERE function_id=?", row["id"]):
                     function = name
                     break

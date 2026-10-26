@@ -593,6 +593,12 @@ def build(net: RomNetwork, home: Path, port: int, secret: str):
         out["sessions"] = [s for s in manager.snapshot(since) if s["slug"] == slug]
         return out
 
+    def p_workflow(slug, request, data):
+        from ..runtime_workflow import read_plan, priorities
+        proj = net.project_row(slug)
+        plan = read_plan(proj['root'])
+        return plan | {'scheduled': priorities(net, proj)}
+
     def p_compiler(slug, request, data):
         net.set_compiler(slug, str(data.get("toolchain", "")), data.get("flags") or None)
         return net.overview(slug)
@@ -711,6 +717,7 @@ def build(net: RomNetwork, home: Path, port: int, secret: str):
         "/api/reopen": (p_reopen, ["POST"]),
         "/api/experiments": (p_experiments, ["GET", "POST"]),
         "/api/priority": (p_priority, ["POST"]), "/api/note": (p_note, ["POST"]), "/api/region": (p_region, ["POST"]),
+        "/api/workflow": (p_workflow, ["GET"]),
         "/api/stats": (lambda s, r, d: net.stats(s) | {"permuter_remote": remote_permuter.status.get(s)}, ["GET"]),
     }
     for path, (fn, methods) in routes.items():

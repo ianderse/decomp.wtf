@@ -136,3 +136,35 @@ def test_a_session_kept_to_an_address_range_claims_in_it(tmp_path):
     text = net.claim(a, "game")
     assert "Nothing open and unclaimed is left in your address range 8016A000-80172000" in text
     assert "pinned_out" in text
+
+
+def test_runtime_queue_respects_claims_cooldown_and_budget(tmp_path):
+    from decompnet import diagnosis
+    net = _project(tmp_path, [('ordinary',0x80100000,None,1,'int f;'),
+                              ('blocker',0x80100040,None,1000,'int g;')])
+    agent,_=net.local_agent('investigator')
+    other,_=net.local_agent('other')
+    plan={'blockers':[{'function':'blocker','lane':'exact','milestone':'New Game','evidence':'fault.log',
+                      'next_hypothesis':'constructor missing return','attempts_at_start':0,'max_attempts':2}]}
+    (tmp_path/'runtime-workflow.json').write_text(json.dumps(plan))
+    diagnosis.record(net,agent,'blocker','structural','old attempt exhausted','runtime caller evidence',True,'game')
+    # An explicitly budgeted runtime investigation may name exhausted work; the
+    # existing compile gate still requires test_hypothesis/new measured diagnosis.
+    assert net.claim_row(agent,'game')['name']=='blocker'
+    assert net.claim_row(other,'game')['name']=='ordinary'
+    net.release(agent,'blocker','new hypothesis needed','game')
+    assert net.claim_row(agent,'game') is None  # priority cannot bypass release cooldown
+    with net.store.tx() as db:
+        db.execute("DELETE FROM events WHERE kind='release'")
+        db.execute("UPDATE functions SET attempts=2 WHERE name='blocker'")
+    assert net.claim_row(agent,'game') is None
+
+
+def test_waiting_runtime_blocker_is_not_reclaimed_by_generic_strategy(tmp_path):
+    net=_project(tmp_path,[('paused',0x80100000,None,1,'int f;')])
+    agent,_=net.local_agent('investigator')
+    (tmp_path/'runtime-workflow.json').write_text(json.dumps({'blockers':[{
+        'function':'paused','lane':'exact','state':'waiting','milestone':'startup','evidence':'trace',
+        'next_hypothesis':'wait for compiler evidence','attempts_at_start':0,'max_attempts':8}]}))
+    assert net.claim_row(agent,'game') is None
+    assert net.claim_row(agent,'game','paused')['name']=='paused'  # explicit work remains possible

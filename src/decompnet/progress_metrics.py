@@ -18,7 +18,7 @@ from pathlib import Path
 
 
 @contextmanager
-def measured_run(net, slug, agent_id, session, model=None, effort=None):
+def measured_run(net, slug, agent_id, session, model=None, effort=None, *, kind="agent"):
     """Persist run bounds around a runner; preserves interrupted/open runs as gaps.
 
     This writer is deliberately separate from report(), which remains read-only.
@@ -32,7 +32,7 @@ def measured_run(net, slug, agent_id, session, model=None, effort=None):
         logging.getLogger(__name__).warning('Agent run timing unavailable for %s; runner will continue', session, exc_info=True)
         yield
         return
-    detail = json.dumps({'run_id': str(uuid.uuid4()), 'session': session, 'model': model, 'effort': effort})
+    detail = json.dumps({'run_id': str(uuid.uuid4()), 'session': session, 'model': model, 'effort': effort, 'kind': kind})
     def event(kind):
         try:
             with net.store.tx() as db:
@@ -42,11 +42,11 @@ def measured_run(net, slug, agent_id, session, model=None, effort=None):
             # Telemetry must not interrupt useful work or replace the runner's exception.
             # A missing finish leaves an open run; a missing start leaves an orphan finish.
             logging.getLogger(__name__).warning('Could not persist %s for %s; timing has a gap', kind, session, exc_info=True)
-    event('agent_run_started')
+    event(f'{kind}_run_started')
     try:
         yield
     finally:
-        event('agent_run_finished')
+        event(f'{kind}_run_finished')
 
 
 @contextmanager
@@ -167,6 +167,15 @@ def _run_intervals(events, start, end):
                 for run, e in starts.items() if run not in finished and e['created_at'] is not None
                 and start <= e['created_at'] < end)
     return intervals, gaps
+
+
+def worker_timing(events, start, end):
+    workers = [dict(e, kind=e['kind'].replace('worker_', 'agent_', 1)) for e in events
+               if e['kind'] in ('worker_run_started', 'worker_run_finished')]
+    intervals, gaps = _run_intervals(workers, start, end)
+    hours, sources = _hours(intervals, start, end)
+    return {'session_hours': hours, 'run_gaps': gaps, 'evidence_sources': sources,
+            'basis': 'background process lifetime, including idle waits; not CPU time or agent hours'}
 
 
 def report(database, project, *, baseline_database=None, since=None, until=None,
@@ -304,6 +313,8 @@ def report(database, project, *, baseline_database=None, since=None, until=None,
                             'basis': 'explicit activity intervals' if activity_intervals is not None else
                             'paired agent run events (session time including tools/waits)' if run_intervals else
                             'unavailable: database records claims and submissions, not active session durations'},
+            'background_workers': worker_timing(cur['events'], start, end),
+            'remote_worker_observations': [e for e in cur['events'] if e['kind'] == 'remote_worker_observed' and inside(e)],
             'current': {'functions': len(funcs), 'exact_functions': len(matched),
                         'exact_bytes': sum(f['size'] or 0 for f in matched), 'suspect_incumbents': suspect_incumbents},
             'activity': {**counts, 'attempts': len(attempts),

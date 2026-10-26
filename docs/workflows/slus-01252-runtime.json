@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "blockers": [
+    {
+      "function": "func_801668AC", "lane": "exact", "milestone": "New Game window construction",
+      "state": "active", "attempts_at_start": 91, "max_attempts": 8,
+      "evidence": "docs/plans/port.md: New Game run stops at vblank 1058; func_801574C8 receives zero from this 124-instruction stub.",
+      "next_hypothesis": "Inspect the constructor's MIPS and caller contract, compare the saved incumbent, then test one structural correction at a time. Stop after eight new compiles; preserve best source and record evidence."
+    },
+    {
+      "function": "func_80155B6C", "lane": "port", "milestone": "New Game window construction",
+      "state": "verification",
+      "evidence": "Existing port/patches/func_80155B6C.c moves func_80155AD4's declaration before the call; port.json marks it compiled.",
+      "next_hypothesis": "Rebuild with the existing patch, verify it is compiled rather than stubbed, and replay New Game. Exact status alone does not establish runtime acceptance."
+    },
+    {
+      "function": "func_80156FF0", "lane": "exact", "milestone": "Strict startup",
+      "state": "waiting", "attempts_at_start": 154, "max_attempts": 8,
+      "evidence": "Latest documented strict run stops here; 154 historical attempts and 24 releases at review.",
+      "next_hypothesis": "Keep paused until a new constructor or compiler hypothesis is supported; do not spend another generic near-miss pass."
+    }
+  ],
+  "scenarios": {
+    "intro": {"seconds": 30, "pad": "", "min_vblanks": 1500, "min_movie_frames": 300, "expected_screen": "Intro movie frames; audible XA soundtrack"},
+    "title": {"seconds": 30, "pad": "start@300", "min_vblanks": 1500, "expected_screen": "Arc the Lad II title: New Game / Continue / Convert"},
+    "card-absent": {"seconds": 30, "pad": "start@300,down@750,cross@900", "min_vblanks": 1500, "required_log": ["card: no memory card"], "expected_screen": "Continue: No Memory Card was found"},
+    "card-fresh": {"seconds": 30, "pad": "start@300,down@750,cross@900", "card": "fresh", "min_vblanks": 1500, "expected_screen": "Continue: No Data Present on a newly formatted disposable card"},
+    "new-game": {"seconds": 35, "pad": "start@300,cross@900", "min_vblanks": 1800, "required_reads": ["SG00.STG"], "expected_screen": "First playable scene beyond the previously observed window-construction fault"}
+  }
+}
