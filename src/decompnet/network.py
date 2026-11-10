@@ -633,7 +633,7 @@ class Network:
             n = self.store.one(f"SELECT * FROM functions f WHERE f.project_id=? AND f.unit=? AND {where} "
                                "AND f.status IN ('matched','open') AND f.id != ? "
                                f"ORDER BY f.vram {order} LIMIT 1",
-                               (fn["project_id"], fn["unit"], fn["vram"], fn["id"]))
+                               fn["project_id"], fn["unit"], fn["vram"], fn["id"])
             if n is None or n["status"] != "matched" or not n["matched_source"]:
                 continue
             out += [f"- {which}: {n['name']} (already matched by earlier agents)"]
