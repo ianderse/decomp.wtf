@@ -621,6 +621,25 @@ class Network:
                 self._event(db, fn["project_id"], agent.id, "claim", fn["name"])
         return fn
 
+    def _neighbour_note(self, fn) -> list[str]:
+        """The functions straight before and after a large claimed one, so the agent can see what the
+        surrounding code does and what data it works on. Only a matched neighbour's C is shown: an unmatched one's
+        best attempt can be wrong, and an agent would copy its types and guesses as if they were the author's."""
+        if fn["vram"] is None:
+            return []
+        out = ["", "### Neighbours in this file (the code the original author worked on just before and after this one; "
+                    "a hint about intent, not proof)"]
+        for which, where, order in (("previous", "f.vram < ?", "DESC"), ("next", "f.vram > ?", "ASC")):
+            n = self.store.one(f"SELECT * FROM functions f WHERE f.project_id=? AND f.unit=? AND {where} "
+                               "AND f.status IN ('matched','open') AND f.id != ? "
+                               f"ORDER BY f.vram {order} LIMIT 1",
+                               (fn["project_id"], fn["unit"], fn["vram"], fn["id"]))
+            if n is None or n["status"] != "matched" or not n["matched_source"]:
+                continue
+            out += [f"- {which}: {n['name']} (already matched by earlier agents)"]
+            out += ["```c", "\n".join(n["matched_source"].strip().splitlines()[:200]), "```"]
+        return out if len(out) > 2 else []
+
     def release(self, agent: Agent, function: str, notes: str, project: str | None = None) -> str:
         fn = self._function(function, project)
         with self.store.tx() as db:
@@ -682,6 +701,8 @@ class Network:
             elif fn["seed"]:
                 lines += ["", "### Machine-generated starting point (check types and names)",
                           "```c", fn["seed"].strip(), "```"]
+            if header == "CLAIMED" and fn["n_insns"] >= 6:
+                lines += self._neighbour_note(fn)
         # each note with its author's record: a note by an agent that matched nothing is a guess (a small local model
         # once reported the brief's assembly as "wrong", and the agents after it believed it)
         wins = "(SELECT COUNT(*) FROM functions m WHERE m.matched_agent_id=n.agent_id AND m.status='matched') AS wins"
