@@ -240,10 +240,12 @@ def starting_point(net, fn):
 
 def machine_source(net, fn):
     reviewed, suspect = starting_point(net, fn)
-    if reviewed:
-        if reviewed['environment'] != environment(net, fn)[0]:
-            return None  # recompile/review under new inputs before automated search
+    if reviewed and reviewed['environment'] == environment(net, fn)[0]:
         return dict(fn) | {'best_source': reviewed['source'], 'best_score': reviewed['measured_score']}
+    # A review measured under other inputs (an older header, other symbols) says nothing about its score now: the
+    # search starts from the incumbent instead, unless that is suspect. Skipping the function until someone reviews
+    # again kept 98 of SLUS-01252's near misses from the permuter, their reviews 3 weeks and many headers old
+    # (2026-11-11)
     return None if suspect else fn
 
 

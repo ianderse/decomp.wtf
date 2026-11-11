@@ -317,3 +317,19 @@ def test_a_helper_learns_there_is_nothing_to_claim_without_claiming(setup):
         db.execute("INSERT INTO context_versions(project_id,version,header,unit) VALUES(1,2,'typedef long s32;','')")
     assert net.can_claim(b, 'game')
     assert net.store.one('SELECT COUNT(*) AS n FROM claims')['n'] == 0  # only asked
+
+
+def test_a_review_under_old_inputs_falls_back_to_the_incumbent(setup, monkeypatch):
+    """A plausible review measured under an older header no longer keeps the function from the permuters (98 of
+    SLUS-01252's near misses waited on 3-week-old reviews): the search starts from the incumbent, unless suspect."""
+    net, a, _ = setup
+    fn = net._function('f', 'game')
+    net._record(fn, a, 40, 'int f(void) { return 3; }', 1)
+    other = net.store.one('SELECT MAX(id) id FROM attempts')['id']
+    monkeypatch.setattr(net, '_compile', lambda *a: SimpleNamespace(ok=True, obj=b''))
+    monkeypatch.setattr(net, '_evaluate', lambda fn, proj, obj: (net._target_obj(fn, proj), False, []))
+    diagnosis.review(net, a, 'f', other, 'plausible', 'every path sets the result', 'game')
+    assert diagnosis.machine_source(net, fn)['best_source'] == 'int f(void) { return 3; }'  # current review first
+    with net.store.tx() as db:
+        db.execute("INSERT INTO context_versions(project_id,version,header,unit) VALUES(1,2,'changed','')")
+    assert diagnosis.machine_source(net, net._function('f', 'game'))['best_source'] == fn['best_source']
