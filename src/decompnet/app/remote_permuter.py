@@ -83,8 +83,15 @@ class RemotePermuter:
     def _local(self, slug: str) -> Path:
         return self.home / ".decomp" / "permuter" / slug
 
+    def _batch_pattern(self, folder: str) -> str:
+        """pgrep/pkill -f's pattern for a batch's decomp-permuter. "[p]" so it can't match the shell ssh runs the
+        command in, whose own command line holds the pattern: with "permuter.py .*<folder>/" it did ("." and "*"
+        match the literal ".*"), so a batch always looked running and a new one came only with the 3-hour rotation,
+        the cores idle after a batch finished early."""
+        return shlex.quote("[p]ermuter.py .*" + folder + "/")
+
     def running(self, slug: str) -> bool:
-        res = self._ssh(f"pgrep -f {shlex.quote('permuter.py .*' + self._remote_folder(slug) + '/')} >/dev/null && echo yes")
+        res = self._ssh(f"pgrep -f {self._batch_pattern(self._remote_folder(slug))} >/dev/null && echo yes")
         return res.stdout.strip() == "yes"
 
     # -- one round
@@ -133,8 +140,8 @@ class RemotePermuter:
             if is_running and not old:
                 return st
             if is_running:  # a fresh batch: what agents and the permuter improved since start from there
-                self._ssh(f"pkill -f {shlex.quote('permuter.py .*' + remote + '/')}")
-            elif self._ssh("pgrep -f 'permuter.py' >/dev/null && echo yes").stdout.strip() == "yes":
+                self._ssh(f"pkill -f {self._batch_pattern(remote)}")
+            elif self._ssh("pgrep -f '[p]ermuter.py' >/dev/null && echo yes").stdout.strip() == "yes":
                 st["error"] = (f"another decomp-permuter run is going on on {self.host} (started by hand?): "
                                "a batch starts once it's done")
                 return st

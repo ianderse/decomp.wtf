@@ -145,3 +145,36 @@ def test_neighbour_notes_follow_the_setting(tmp_path):
     assert "int before(void) { return 7; }" in net._brief(fn, agent, header="CLAIMED")
     net.neighbour_notes = False
     assert "int before(void)" not in net._brief(fn, agent, header="CLAIMED")
+
+
+def test_the_permuter_check_does_not_find_the_ssh_that_asks(tmp_path):
+    """With the permuter machine the app's own, the ssh client asking is on the machine pgrep looks at, its command
+    line holding the pattern: "permuter.py .*<folder>/" matched it, so a batch always looked running and new ones
+    came only with the 3-hour rotation (SLUS-01252, 2026-11-11)."""
+    import shutil
+    import subprocess
+    import sys
+
+    import pytest
+
+    from decompnet.app.remote_permuter import RemotePermuter
+
+    if shutil.which("pgrep") is None:
+        pytest.skip("no pgrep here")
+    folder = f"permuter-test-{time.time_ns()}"  # no permuter runs on it
+    old, new = f"'permuter.py .*{folder}/'", RemotePermuter._batch_pattern(None, folder)
+    check = lambda pattern: subprocess.run(["sh", "-c", f"pgrep -f {pattern} >/dev/null && echo yes || echo no"],
+                                           capture_output=True, text=True).stdout.strip()
+
+    def while_asked(pattern):  # what the check says while the ssh asking it runs on this machine
+        asking = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)", "ssh", "host",
+                                   f"pgrep -f {pattern} >/dev/null && echo yes"])
+        try:
+            time.sleep(0.3)
+            return check(pattern)
+        finally:
+            asking.kill()
+            asking.wait()
+
+    assert while_asked(old) == "yes"  # the old pattern found the ssh asking
+    assert while_asked(new) == "no"
