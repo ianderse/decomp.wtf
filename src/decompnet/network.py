@@ -202,6 +202,9 @@ class Network:
         self.agent_lane: dict[int, str] = {}  # agent id -> this session's claim order, before agent_strategy (agents.py)
         self.agent_region: dict[int, tuple[int, int]] = {}  # agent id -> [from, to): its session claims there
         self.memory = None  # long-term memory across games (memory.Memory: a Hindsight server), when set up
+        # claim briefs carry the matched C just before and after the function (_neighbour_note); Settings turn it off.
+        # Likelier to help early, when most neighbours are plain game code, than on the hard last functions
+        self.neighbour_notes = True
         self.claim_ttl = claim_ttl
         self._pool = ThreadPoolExecutor(max_workers=8)
 
@@ -752,7 +755,7 @@ class Network:
             elif fn["seed"]:
                 lines += ["", "### Machine-generated starting point (check types and names)",
                           "```c", fn["seed"].strip(), "```"]
-            if header == "CLAIMED" and fn["n_insns"] >= 6:
+            if header == "CLAIMED" and fn["n_insns"] >= 6 and self.neighbour_notes:
                 lines += self._neighbour_note(fn)
         # each note with its author's record: a note by an agent that matched nothing is a guess (a small local model
         # once reported the brief's assembly as "wrong", and the agents after it believed it)

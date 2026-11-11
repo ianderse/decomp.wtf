@@ -123,3 +123,25 @@ def test_getting_closer_starts_the_count_again(tmp_path):
                    (fid, 0, 3000, 1, "int f(void) { return 1; }", time.time()))
     _give_up(net, "far", 2, start=20)
     assert net.store.one("SELECT status FROM functions WHERE name='far'")["status"] == "open"
+
+
+def test_neighbour_notes_follow_the_setting(tmp_path):
+    """Settings turn the matched neighbours' C in claim briefs on and off (Network.neighbour_notes)."""
+    from decompnet.network import Network
+
+    net = Network(tmp_path / "app.db")
+    with net.store.tx() as db:
+        pid = db.execute("INSERT INTO projects(slug,name,description,arch,big_endian,root,config) VALUES(?,?,?,?,?,?,?)",
+                         ("game", "Game", "", "mips", 0, str(tmp_path), json.dumps({"kind": "rom"}))).lastrowid
+        db.execute("INSERT INTO functions(project_id,name,size,n_insns,status,unit,vram,matched_source,relocs) "
+                   "VALUES(?,?,?,?,?,?,?,?,?)", (pid, "before", 40, 10, "matched", "main", 0x1000,
+                                                 "int before(void) { return 7; }", "[]"))
+        db.execute("INSERT INTO functions(project_id,name,size,n_insns,status,unit,vram,asm,seed,relocs) "
+                   "VALUES(?,?,?,?,?,?,?,?,?,?)", (pid, "mine", 40, 10, "open", "main", 0x1040, "glabel mine", "", "[]"))  # (no draft to make)
+        db.execute("INSERT INTO context_versions(project_id,version,header,agent_id,message,created_at,unit) "
+                   "VALUES(?,?,?,?,?,?,?)", (pid, 1, "", None, "", 0.0, ""))
+    fn = net.store.one("SELECT * FROM functions WHERE name='mine'")
+    agent = net.authenticate(net.register_agent("a1", "you"))
+    assert "int before(void) { return 7; }" in net._brief(fn, agent, header="CLAIMED")
+    net.neighbour_notes = False
+    assert "int before(void)" not in net._brief(fn, agent, header="CLAIMED")

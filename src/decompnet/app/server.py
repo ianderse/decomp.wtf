@@ -200,6 +200,7 @@ class Settings:
                 "autopilot": self.data.get("autopilot", True), "budget_usd": self.data.get("budget_usd") or 0,
                 "auto_update": bool(self.data.get("auto_update")), "check_updates": self.data.get("check_updates", True) is not False,
                 "memory_url": self.data.get("memory_url") or "", "memory_ab": self.data.get("memory_ab", True) is not False,
+                "neighbour_notes": self.data.get("neighbour_notes", True) is not False,
                 "permuter_host": self.data.get("permuter_host") or "", "permuter_jobs": self.data.get("permuter_jobs") or "",
                 "launcher": _launcher(self.data.get("launcher") or {}), "recent_models": self.data.get("recent_models") or {}}
 
@@ -273,6 +274,7 @@ def build(net: RomNetwork, home: Path, port: int, secret: str):
     jobs = Jobs(home / "logs" / "decomp.log")
     settings = Settings(home / "settings.json")
     use_memory()
+    net.neighbour_notes = settings.data.get("neighbour_notes", True) is not False
     from .remote_permuter import RemotePermuter
     remote_permuter = RemotePermuter(net, getattr(net, "workspace", home.parent), settings)
     manager.budget = lambda: float(settings.data.get("budget_usd") or 0)
@@ -1047,6 +1049,8 @@ def build(net: RomNetwork, home: Path, port: int, secret: str):
             settings.data["memory_ab"] = bool(data["memory_ab"])
         if "memory_url" in data or "memory_ab" in data:
             use_memory()
+        if "neighbour_notes" in data:  # the next brief goes with or without them
+            settings.data["neighbour_notes"] = net.neighbour_notes = bool(data["neighbour_notes"])
         if "permuter_host" in data:
             settings.data["permuter_host"] = str(data["permuter_host"] or "").strip()
         if "permuter_jobs" in data:

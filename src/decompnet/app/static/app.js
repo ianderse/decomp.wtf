@@ -2709,6 +2709,7 @@ async function showSettingsPage() {
     <label class="check"><input type="checkbox" id="autopilotSet" ${st.settings.autopilot !== false ? "checked" : ""}><span><b>Autopilot after each import</b>: try every function's machine draft first, so free matches cost no agent time.</span></label>
     <label class="field"><span>Long-term memory: a Hindsight server's address (e.g. http://my-mac-studio:8888). Every verified match is remembered in a bank per compiler, tagged with its game, and claim briefs carry what it recalls, for every agent. Empty = off.</span><input id="memoryUrl" type="url" placeholder="http://host:8888" value="${esc(st.settings.memory_url || "")}"></label>
     <label class="check"><input type="checkbox" id="memoryAb" ${st.settings.memory_ab !== false ? "checked" : ""}><span><b>Measure it</b>: half the claims, chosen at random, go without memory, so the project page can show whether it helps.</span></label>
+    <label class="check"><input type="checkbox" id="neighbourNotes" ${st.settings.neighbour_notes !== false ? "checked" : ""}><span><b>Neighbour notes</b>: a claimed function's brief carries the matched C just before and after it in its file (the structs, globals and names it likely shares). Most use early on; on the last, hardest functions it mostly adds length.</span></label>
     <label class="field"><span>Permuter machine: an SSH name this computer reaches without a password (e.g. a Mac Studio). PS1 near misses are sent there in batches for decomp-permuter, and what it finds comes back through the judge every 20 minutes. It needs decomp.wtf's compilers and decomp-permuter in ~/decomp-permuter (see docs/plans/permuter-on-m5.md). Empty = off.</span><input id="permHost" placeholder="my-mac-studio" value="${esc(st.settings.permuter_host || "")}"></label>
     <label class="field"><span>Cores the permuter uses there: type any number up to 256 (empty = all of that machine's cores but 6, e.g. 24 of a Mac Studio's 30; the next batch uses it)</span><input id="permJobs" type="number" min="1" max="256" placeholder="automatic: all its cores but 6" value="${st.settings.permuter_jobs || ""}"></label>`;
   const theme = savedTheme();
@@ -2747,6 +2748,7 @@ async function showSettingsPage() {
   $("budgetSet").onchange = () => save({ budget_usd: Number($("budgetSet").value) || 0 }, "Budget saved.");
   $("memoryUrl").onchange = () => save({ memory_url: $("memoryUrl").value.trim() }, $("memoryUrl").value.trim() ? "Memory on." : "Memory off.");
   $("memoryAb").onchange = () => save({ memory_ab: $("memoryAb").checked }, "Saved.");
+  $("neighbourNotes").onchange = () => save({ neighbour_notes: $("neighbourNotes").checked }, $("neighbourNotes").checked ? "Neighbour notes on." : "Neighbour notes off.");
   $("permHost").onchange = () => save({ permuter_host: $("permHost").value.trim() }, $("permHost").value.trim() ? "The permuter runs there: the first batch starts within a minute or so." : "Remote permuter off.");
   $("permJobs").onchange = () => save({ permuter_jobs: Number($("permJobs").value) || "" }, "Saved (the next batch uses it).");
 }
