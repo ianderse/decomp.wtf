@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import collections
 import json
+import logging
 import os
 import re
 import shutil
@@ -163,6 +164,12 @@ _THROTTLED = re.compile(r"too many requests|rate[ _-]?limit|concurrency limit|\b
 _PLAN_LIMIT = re.compile(r"hit your usage limit|usage limit (?:reached|exceeded)|reached your usage limit|"
                          r"\b(?:5-hour|weekly|daily) limit\b|limit reached\W+resets", re.I)
 SILENT_MINUTES = 15  # a CLI session that prints nothing this long is stuck: it's ended and a fresh one starts
+# Three failures in a row pause a helper this long, then it tries again; it stops (and isn't resumed on a restart)
+# only after FAILURE_ROUNDS such pauses. What fails three times is often passing: the local model's server
+# restarting, a provider's outage, a limit the output didn't name. Both Qwen helpers on SLUS-01252 stopped that way
+# within two hours and stayed stopped (2026-11-10)
+FAILURE_PAUSE = 15 * 60
+FAILURE_ROUNDS = 4
 
 
 def no_credit(said: str) -> str | None:
@@ -643,6 +650,8 @@ class Session:
     def push(self, kind: str, text: str) -> None:
         self.seq += 1
         self.feed.append({"seq": self.seq, "t": time.time(), "type": kind, "text": text[:4000]})
+        if kind == "error":  # the feed lives in memory: the app's log keeps why a helper failed past a restart
+            logging.getLogger("decomp.wtf").warning("%s on %s: %s", self.label, self.slug, text[:600])
 
     def snapshot(self, since: int = 0) -> dict:
         return {"id": self.id, "kind": self.kind, "label": self.label, "slug": self.slug, "agent": self.agent_name,
@@ -837,7 +846,7 @@ class Manager:
         self.assignments[agent.id] = s.slug
         workdir = self.home / "agents" / s.id
         workdir.mkdir(parents=True, exist_ok=True)
-        failures = throttles = 0
+        failures = throttles = rounds = 0
         s.push("info", f"{s.label} starting on {s.slug}")
         if (prep := self._prep.get(s.slug)) is not None:
             s.push("info", "first giving the game's code without a source file one (about a minute)")
@@ -929,11 +938,20 @@ class Manager:
                 continue
             throttles = 0 if ok else throttles
             failures = 0 if ok else failures + 1
+            rounds = 0 if ok else rounds
             if failures >= 3:
-                s.state = "error"
-                s.error = s.error or "the agent failed three times in a row"
-                s.push("error", f"stopping: {s.error}. {signin(KINDS[s.kind])}".strip())
-                break
+                rounds += 1
+                if rounds >= FAILURE_ROUNDS:
+                    s.state = "error"
+                    s.error = s.error or "the agent failed three times in a row"
+                    s.push("error", f"stopping: {s.error}. {signin(KINDS[s.kind])}".strip())
+                    break
+                failures = 0
+                s.state = "waiting"
+                s.push("info", f"failed three times in a row{f' ({s.error})' if s.error else ''}: trying again in "
+                               f"{FAILURE_PAUSE // 60} minutes")
+                s.stop.wait(FAILURE_PAUSE)
+                continue
             s.state = "waiting"
             s.stop.wait(3 if ok else min(60, 5 * failures + max(0, 10 - (time.time() - t0))))
         if s.state != "error":
@@ -1129,6 +1147,7 @@ class Manager:
         said: collections.deque = collections.deque(maxlen=20)
         state: dict = {}
         last_error = refused = ""
+        reported: collections.deque = collections.deque(maxlen=20)  # the errors it reported (not what the model said)
         for line in proc.stdout:
             heard[0] = time.time()
             for kind, text in parse_line(s.kind, line, state):
@@ -1138,6 +1157,7 @@ class Manager:
                 saw_tool |= kind == "tool"
                 said.append(text)
                 if kind == "error":
+                    reported.append(text)
                     last_error = text
                     refused = refused or (text if text.startswith("Antigravity refused") else "")
                 s.push(kind, text)
@@ -1152,10 +1172,15 @@ class Manager:
             raise Fatal(why)  # every agent on this account fails the same way until it's topped up
         if s.silent:
             return False  # (not counted as a failure: see _run)
-        if code != 0 and not s.stop.is_set() and _PLAN_LIMIT.search(" ".join([*said, *errors])):
+        # A limit hit partway through a run ends it with exit code 0 (Codex reports it as a failed turn): read then
+        # only what it reported as errors, not the model's own words (which can mention limits) nor stderr (where
+        # a run that went fine logs its retries). Codex helpers counted those runs as failures, stopped after three,
+        # and dropped out of the helpers resumed on restart (SLUS-01252, 2026-11-10)
+        limits = " ".join([*said, *errors]) if code != 0 else " ".join(reported)
+        if not s.stop.is_set() and _PLAN_LIMIT.search(limits):
             s.plan_limited = True
             return False
-        if code != 0 and not s.stop.is_set() and _THROTTLED.search(" ".join([*said, *errors])):
+        if not s.stop.is_set() and _THROTTLED.search(limits):
             s.throttled = True
         if code != 0 and not s.stop.is_set() and _SIGNED_OUT.search(" ".join([*said, *errors])):
             s.signed_out = True

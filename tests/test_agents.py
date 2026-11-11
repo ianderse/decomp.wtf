@@ -176,3 +176,29 @@ def test_worked_over_functions_go_to_the_strongest_tier_whatever_their_score():
     assert agents.tier_for({**near, "attempts": 5, "abandons": 8}, "codex")[0] == "gpt-6.1-sol"
     assert agents.tier_for({"best_score": 50, "n_insns": 150, "attempts": 90, "abandons": 8})[2] == "big"
     assert agents.tier_for({"best_score": None, "n_insns": 20, "attempts": 0, "abandons": 0})[2] == "fresh"
+
+
+def _codex_saying(tmp_path, monkeypatch, events, code=0):
+    """A Codex helper whose CLI prints these JSON events and exits with `code`."""
+    m = _manager(tmp_path, monkeypatch, "codex")
+    exe = tmp_path / "bin" / "codex"
+    body = "".join(f"printf '%s\\n' '{json.dumps(e)}'\n" for e in events)
+    exe.write_text(f"#!/bin/sh\ncat >/dev/null\n{body}exit {code}\n")
+    s = agents.Session("codex-1", "codex", "Codex CLI #1", "demo", "codex-1", {"model": "some-model"})
+    s.runs = 1
+    (tmp_path / "work").mkdir(exist_ok=True)
+    return m, s, m._run_cli(s, "tok", tmp_path / "work")
+
+
+def test_a_usage_limit_partway_through_a_run_waits_even_when_codex_exits_0(tmp_path, monkeypatch):
+    """Codex reports a plan limit hit mid-run as a failed turn and exits 0: three such runs stopped each helper, and
+    a stopped helper isn't resumed on a restart (SLUS-01252, 2026-11-10)."""
+    limit = "You’ve hit your usage limit. Upgrade to Pro or try again at 11:03 PM."
+    _, s, ok = _codex_saying(tmp_path, monkeypatch, [{"type": "turn.failed", "error": {"message": limit}}])
+    assert ok is False and s.plan_limited
+
+
+def test_the_model_mentioning_a_limit_is_not_one(tmp_path, monkeypatch):
+    said = {"type": "item.completed", "item": {"type": "agent_message", "text": "this loop has a usage limit reached check"}}
+    _, s, _ = _codex_saying(tmp_path, monkeypatch, [said])
+    assert not s.plan_limited and not s.throttled
