@@ -83,10 +83,7 @@ class Permuter:
             and experiments.arm(self.net.store, proj["id"], r["id"], "permuter") != "off"]
         selected = []
         for row in rows:
-            if not diagnosis.eligible(self.net, row):
-                continue
-            lane = diagnosis.latest(self.net, row)
-            if lane and lane["basis"] == diagnosis.basis(self.net, row) and lane["category"] in ("stack", "linking", "library"):
+            if not diagnosis.for_permuter(self.net, row):
                 continue
             candidate = diagnosis.machine_source(self.net, row)
             if candidate is not None:

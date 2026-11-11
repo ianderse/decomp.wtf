@@ -170,6 +170,9 @@ SILENT_MINUTES = 15  # a CLI session that prints nothing this long is stuck: it'
 # within two hours and stayed stopped (2026-11-10)
 FAILURE_PAUSE = 15 * 60
 FAILURE_ROUNDS = 4
+# With nothing to claim (every open function claimed, cooling down or waiting for new evidence) a helper checks this
+# often, starting no session until something is claimable: a permuter improvement or a header change reopens work
+IDLE_RECHECK = 10 * 60
 
 
 def no_credit(said: str) -> str | None:
@@ -818,6 +821,15 @@ class Manager:
             agent_id, agent_id)
         return row["n"]
 
+    def _claimable(self, s: Session, agent) -> bool:
+        """Whether this helper's next claim would get a function (Network.can_claim, with the strategy its claims use:
+        tools._claim's). Forks and rooms claim their own way: the session finds out, as before."""
+        if self.net.fork_slug(s.slug) or self.net.links.get(s.slug) is not None:
+            return True
+        strategy = (getattr(self.net, "agent_lane", {}).get(agent.id) or self.net.agent_strategy.get(agent.id)
+                    or "easiest")
+        return self.net.can_claim(agent, s.slug, strategy)
+
     def _left(self, slug: str) -> int:
         proj = self.net.project_row(slug)
         row = self.net.store.one("SELECT COUNT(*) AS n FROM functions WHERE project_id=? AND status='open'", proj["id"])
@@ -878,6 +890,14 @@ class Manager:
                 except Exception:
                     pass
                 s.stop.wait(10)
+                continue
+            if not self._claimable(s, agent):  # a session now would only find that out, at a session's cost
+                if s.state != "waiting" or not s.feed or "nothing to claim" not in s.feed[-1]["text"]:
+                    s.push("info", "nothing to claim right now (every open function is claimed, cooling down or "
+                                   f"waiting for new evidence): checking every {IDLE_RECHECK // 60} minutes without "
+                                   "starting a session")
+                s.state = "waiting"
+                s.stop.wait(IDLE_RECHECK)
                 continue
             s.state = "working"
             s.runs += 1

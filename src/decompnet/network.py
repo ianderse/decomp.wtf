@@ -609,8 +609,9 @@ class Network:
                 "function is from the rest of the game.)\n\n")
 
     def claim_row(self, agent: Agent, project: str | None = None, function: str | None = None,
-                  strategy: str = "easiest"):
-        """Claim (or renew) a function and return its row, or None when nothing is left."""
+                  strategy: str = "easiest", dry_run: bool = False):
+        """Claim (or renew) a function and return its row, or None when nothing is left. dry_run: the row a claim
+        would get, without claiming it (can_claim)."""
         if strategy not in STRATEGIES:
             raise NetworkError(f"strategy must be one of {', '.join(STRATEGIES)}")
         proj = self._project(project) if (project or function is None) else None
@@ -619,6 +620,8 @@ class Network:
             self._expire_claims(db)
             held = db.execute("SELECT f.* FROM claims c JOIN functions f ON f.id=c.function_id WHERE c.agent_id=?",
                               (agent.id,)).fetchone()
+            if held is not None and dry_run:
+                return held
             if held is not None:
                 if function and held["id"] != self._function(function, proj["slug"] if proj else None)["id"]:
                     raise NetworkError(f"you already hold {held['name']}; match it or release_function it first")
@@ -634,6 +637,8 @@ class Network:
                 if other is not None:
                     raise NetworkError(f"{fn['name']} is claimed by {self._agent_name(other['agent_id'])} "
                                        f"for another {int(other['expires_at'] - now) // 60} min")
+                if dry_run:
+                    return fn
                 db.execute("INSERT INTO claims VALUES(?,?,?,?)", (fn["id"], agent.id, now, now + self.claim_ttl))
                 self._event(db, fn["project_id"], agent.id, "claim", fn["name"])
             else:
@@ -664,11 +669,20 @@ class Network:
                         candidates.close()
                     if fn is not None:
                         break
-                if fn is None:
-                    return None
+                if fn is None or dry_run:
+                    return fn
                 db.execute("INSERT INTO claims VALUES(?,?,?,?)", (fn["id"], agent.id, now, now + self.claim_ttl))
                 self._event(db, fn["project_id"], agent.id, "claim", fn["name"])
         return fn
+
+    def can_claim(self, agent: Agent, project: str, strategy: str = "easiest") -> bool:
+        """Whether a claim by this agent would get a function now (claim_row's own rules, nothing claimed). A helper
+        asks before each session: one started with nothing to claim spends its tokens saying so (SLUS-01252: a
+        Claude Code helper did that for hours, every function waiting for new evidence, 2026-11-11)."""
+        try:
+            return self.claim_row(agent, project, None, strategy, dry_run=True) is not None
+        except NetworkError:
+            return True  # (can't tell: the session finds out, as before)
 
     def _neighbour_note(self, fn) -> list[str]:
         """The functions straight before and after a large claimed one, so the agent can see what the

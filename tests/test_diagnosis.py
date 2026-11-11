@@ -295,3 +295,25 @@ def test_incumbent_change_explained_and_budget_enforced(setup):
     assert priorities(net,proj) == []
     with pytest.raises(NetworkError,match='budget exhausted'):
         require_budget(net,net._function('f','game'))
+
+
+def test_permuters_search_exhausted_allocation_but_not_stack(setup):
+    """An exhausted diagnosis keeps agents out, not the permuters: SLUS-01252's last 186 open functions waited on
+    each other, agents with nothing to claim and the permuter given 2 functions a batch (2026-11-11)."""
+    net, a, _ = setup
+    diagnosis.record(net, a, 'f', 'allocation', 'two registers swapped', 'register lifetimes', True, 'game')
+    diagnosis.record(net, a, 'g', 'stack', 'one frame offset', 'frame layout', True, 'game')
+    f, g = net._function('f', 'game'), net._function('g', 'game')
+    assert not diagnosis.eligible(net, f)  # agents wait for new evidence
+    assert diagnosis.for_permuter(net, f) and not diagnosis.for_permuter(net, g)
+
+
+def test_a_helper_learns_there_is_nothing_to_claim_without_claiming(setup):
+    net, a, b = setup
+    for name in ('f', 'g'):
+        diagnosis.record(net, a, name, 'allocation', 'registers', 'a permuter run', True, 'game')
+    assert not net.can_claim(b, 'game')
+    with net.store.tx() as db:  # new evidence: a changed header reopens both
+        db.execute("INSERT INTO context_versions(project_id,version,header,unit) VALUES(1,2,'typedef long s32;','')")
+    assert net.can_claim(b, 'game')
+    assert net.store.one('SELECT COUNT(*) AS n FROM claims')['n'] == 0  # only asked

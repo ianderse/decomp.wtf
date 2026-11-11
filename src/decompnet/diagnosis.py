@@ -119,6 +119,24 @@ def eligible(net, fn, strategy='easiest'):
     return strategy not in LANES or (current and row['category'] == strategy)
 
 
+# lanes whose functions a permuter is no use for while the diagnosis stands: what's wrong isn't in the C it varies
+NOT_PERMUTER = ('stack', 'linking', 'library')
+
+
+def for_permuter(net, fn):
+    """Whether a permuter (app/permute.py, the remote one through permuter_bridge.export) should search this function.
+    An exhausted diagnosis does not keep it out, as it keeps agents out: agents mark a function exhausted when
+    reasoning has run out, and in the allocation and structural lanes that is what a random search is for. It is the
+    one source of new evidence then: kept out too, SLUS-01252's last 186 open functions waited on each other, agents
+    with nothing to claim and the permuter given 2 functions a batch of 123 within its range (2026-11-11). A
+    person's pause (runtime workflow) still holds."""
+    from .runtime_workflow import automatic_paused
+    if automatic_paused(net, fn):
+        return False
+    row = latest(net, fn)
+    return not (row and row['basis'] == basis(net, fn) and row['category'] in NOT_PERMUTER)
+
+
 def record(net, agent, function, category, evidence, next_hypothesis, exhausted=False, project=None):
     from .network import NetworkError
     net._require_level(agent, 'Changing a function work plan')

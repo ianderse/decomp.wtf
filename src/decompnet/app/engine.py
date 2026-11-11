@@ -2413,7 +2413,8 @@ class RomNetwork(Network):
                 return g["toolchain"], f"{g['from']:08X}-{g['to']:08X}"
         return None
 
-    def claim_row(self, agent: Agent, project: str | None = None, function: str | None = None, strategy: str = "easiest"):
+    def claim_row(self, agent: Agent, project: str | None = None, function: str | None = None, strategy: str = "easiest",
+                  dry_run: bool = False):
         if function is None and project and not self.fork_slug(project):
             proj = self._project(project)
             region = self.agent_region.get(agent.id)
@@ -2439,8 +2440,9 @@ class RomNetwork(Network):
                         "SELECT 1 FROM claims WHERE function_id=?", row["id"]):
                     function = name
                     break
-        self._yield_autopilot(function, project)
-        return Network.claim_row(self, agent, project, function, strategy)
+        if not dry_run:
+            self._yield_autopilot(function, project)
+        return Network.claim_row(self, agent, project, function, strategy, dry_run=dry_run)
 
     # ------------------------------------------------------------------ autopilot
 

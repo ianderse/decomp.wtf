@@ -137,10 +137,7 @@ def export(net, slug: str, out: Path, max_miss: float = 0.05, limit: int = 400, 
     out.mkdir(parents=True, exist_ok=True)
     written = 0
     for fn in rows:
-        if not diagnosis.eligible(net, fn):
-            continue
-        lane = diagnosis.latest(net, fn)
-        if lane and lane["basis"] == diagnosis.basis(net, fn) and lane["category"] in ("stack", "linking", "library"):
+        if not diagnosis.for_permuter(net, fn):
             continue
         fn = diagnosis.machine_source(net, fn)
         if fn is None:
