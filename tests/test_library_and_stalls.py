@@ -1,0 +1,125 @@
+"""Attempts that can't pay off go elsewhere: Sony's library code the exact signatures miss (rom/psyq_near.py), and
+functions agents keep giving up on without getting closer (Network._stall_check). On SLUS-01252, 48 open functions in
+libsnd's address range had taken 5,613 agent attempts (2026-11-10)."""
+
+import json
+import struct
+import time
+
+from decompnet.app.engine import RomNetwork
+from decompnet.network import STALL_ABANDONS
+from decompnet.rom import psyq_near as near
+from decompnet.rom.psyq import Signature
+
+
+def _code(words):
+    return b"".join(struct.pack("<I", w) for w in words)
+
+
+def _sig(obj, functions):
+    """A signature for one object holding functions [(name, words)], word values None where the linker fills in."""
+    pattern, labels = [], []
+    for name, words in functions:
+        labels.append((name, len(pattern)))
+        for w in words:
+            pattern += [None] * 4 if w is None else list(struct.pack("<I", w))
+    pattern = tuple(pattern)
+    return Signature(obj, "300", pattern, tuple(labels), b"", 0, obj)
+
+
+BODY = [0x27BDFFE0 + i for i in range(20)]  # 20 distinct instruction words
+
+
+def test_a_copy_differing_only_where_the_linker_fills_in_is_the_library_function():
+    linked = list(BODY)
+    linked[3] = None  # a jal target, say
+    pats = near.patterns([_sig("SSPLAY.OBJ", [("SsSeqPlay", linked)])])
+    game = list(BODY)
+    game[3] = 0x0C012345  # whatever the game's link put there
+    [hit] = near.near_hits([(1, _code(game))], pats)
+    assert hit["similarity"] == 1.0 and hit["name"] == "SsSeqPlay"
+
+
+def test_another_revision_is_likely_not_sure_and_a_tie_names_nothing():
+    pats = near.patterns([_sig("A.OBJ", [("SsUtGetVagAtr", BODY)]), _sig("B.OBJ", [("SsSepClose", [w ^ 1 for w in BODY])])])
+    revised = list(BODY)
+    revised[5] ^= 0xFF  # two instructions changed in a later SDK
+    revised[9] ^= 0xFF
+    [hit] = near.near_hits([(1, _code(revised))], pats)
+    assert near.LIKELY <= hit["similarity"] < near.SURE and hit["name"] == "SsUtGetVagAtr"
+    pats = near.patterns([_sig("SSCLOSE.OBJ", [("SsSeqClose", BODY)]), _sig("SEPCLOSE.OBJ", [("SsSepClose", BODY)])])
+    [tie] = near.near_hits([(2, _code(BODY))], pats)
+    assert tie["similarity"] == 1.0 and tie["name"] is None  # identical code under two names: for a person
+    assert near.near_hits([(3, _code([0x1000 + i for i in range(20)]))], pats) == []  # the game's own code
+
+
+def test_an_object_is_cut_at_its_labels():
+    pats = near.patterns([_sig("LIBGPU.OBJ", [("LoadImage", BODY[:10]), ("StoreImage", BODY[10:])])])
+    assert {p.name: len(p.words) for p in pats} == {"LoadImage": 10, "StoreImage": 10}
+
+
+def test_open_functions_between_found_library_functions_are_in_a_library_block():
+    rows, vram = [], 0x80010000
+    for i in range(40):  # the game's own code first: nothing found there
+        rows.append((len(rows), "main", vram, False)); vram += 0x40
+    for i in range(30):  # then Sony's libraries: mostly found, with unfound stretches up to 20 long
+        rows.append((len(rows), "main", vram, i % 10 < 3 or i == 29)); vram += 0x40
+    [(unit, first, last)] = near.library_blocks(rows)
+    assert unit == "main" and first == 0x80010000 + 40 * 0x40 and last == vram - 0x40
+    assert near.library_blocks([(i, "main", 0x80010000 + 4 * i, i < 3) for i in range(10)]) == []  # too few found
+
+
+def _project(tmp_path):
+    net = RomNetwork(tmp_path / "app.db", tmp_path)
+    with net.store.tx() as db:
+        pid = db.execute("INSERT INTO projects(slug,name,description,arch,big_endian,root,config) VALUES(?,?,?,?,?,?,?)",
+                         ("game", "Game", "", "mips", 0, str(tmp_path), json.dumps({"kind": "rom"}))).lastrowid
+        for name, best, meta in [("far", 4000, None), ("near_miss", 300, None), ("given_back", 4000, {"for_agents": True})]:
+            fid = db.execute("INSERT INTO functions(project_id,name,size,n_insns,status,unit,best_score,meta) "
+                             "VALUES(?,?,?,?,?,?,?,?)", (pid, name, 400, 100, "open", "main", best,
+                                                         json.dumps(meta) if meta else None)).lastrowid
+            db.execute("INSERT INTO attempts(function_id,agent_id,score,compiled,source,created_at) VALUES(?,?,?,?,?,?)",
+                       (fid, 0, best, 1, "int f(void) { return 0; }", 1.0))
+    return net
+
+
+def _give_up(net, name, times, start=0):
+    out = None
+    for k in range(start, start + times):
+        agent, _ = net.local_agent(f"agent{k}")
+        net.claim_row(agent, "game", name, "finish")
+        out = net.release(agent, name, "")
+    return out
+
+
+def test_a_function_agents_keep_giving_up_on_goes_to_a_person(tmp_path):
+    net = _project(tmp_path)
+    _give_up(net, "far", STALL_ABANDONS - 1)
+    assert net.store.one("SELECT status FROM functions WHERE name='far'")["status"] == "open"
+    said = _give_up(net, "far", 1, start=STALL_ABANDONS)
+    row = net.store.one("SELECT status, meta FROM functions WHERE name='far'")
+    meta = json.loads(row["meta"])
+    assert row["status"] == "asm" and f"{STALL_ABANDONS} agents gave up on it" in meta["review"]
+    assert meta["asm_code"].startswith("set aside for a person") and "goes to a person" in said
+    net.return_to_agents("game", "far")  # a person gives it back: no rule takes it again
+    _give_up(net, "far", STALL_ABANDONS, start=100)
+    assert net.store.one("SELECT status FROM functions WHERE name='far'")["status"] == "open"
+
+
+def test_near_misses_and_functions_given_back_stay_with_agents(tmp_path):
+    net = _project(tmp_path)
+    _give_up(net, "near_miss", STALL_ABANDONS + 2)  # 3% off: the permuter's to find
+    _give_up(net, "given_back", STALL_ABANDONS + 2, start=50)
+    assert {r["status"] for r in net.store.all("SELECT status FROM functions WHERE name IN ('near_miss', 'given_back')")} == {"open"}
+
+
+def test_getting_closer_starts_the_count_again(tmp_path):
+    net = _project(tmp_path)
+    _give_up(net, "far", STALL_ABANDONS - 1)
+    with net.store.tx() as db:  # someone improves it
+        fid = db.execute("SELECT id FROM functions WHERE name='far'").fetchone()["id"]
+        db.execute("UPDATE functions SET best_score=3000 WHERE id=?", (fid,))
+        db.execute("INSERT INTO attempts(function_id,agent_id,score,compiled,source,created_at) VALUES(?,?,?,?,?,?)",
+                   (fid, 0, 3000, 1, "int f(void) { return 1; }", time.time()))
+    _give_up(net, "far", 2, start=20)
+    assert net.store.one("SELECT status FROM functions WHERE name='far'")["status"] == "open"

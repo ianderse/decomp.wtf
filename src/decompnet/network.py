@@ -48,6 +48,14 @@ _PSX_26 = ("gcc-2.6.3-psx", "gcc-2.6.0-psx")
 ALTERNATES = {"gcc-2.7.2-psx": ("gcc-2.8.1-psx", *_PSX_26, "gcc-2.7.2-psx:gnu-as", "gcc-2.8.1-psx:gnu-as", *_PSX_OLDER),
               "gcc-2.8.1-psx": ("gcc-2.7.2-psx", *_PSX_26, "gcc-2.8.1-psx:gnu-as", "gcc-2.7.2-psx:gnu-as", *_PSX_OLDER)}
 MACHINE_AGENTS = ("autopilot", "permuter")  # decomp.wtf's own workers: their claims never mean "given up on"
+# Agents giving up on a function this many times since its best score last improved: it goes to a person (set aside
+# for review, with why) instead of to the next agent. On SLUS-01252, functions in Sony's libsnd had outlasted 12-25
+# agents each without getting closer (5,613 attempts on 48 of them, 2026-11-10); counted that way, 6 would have
+# stopped 25 of the 270 open functions then (10 of them Sony's), 4 would have stopped 52.
+STALL_ABANDONS = 6
+# best_score / (instructions * 100) at or under which a stalled function stays open anyway: the remote permuter
+# takes near misses that close (app/remote_permuter.MAX_MISS) and finds what agents don't
+STALL_NEAR_MISS = 0.08
 # Twins first (see app/twins.py): a function whose code the game has more than once (boost: how many more times)
 # and isn't too big or given up on, best value per instruction first; its twins (boost -1) last, as they match for
 # free once it does.
@@ -297,13 +305,51 @@ class Network:
     def _expire_claims(self, db) -> None:
         now = time.time()
         own = {r["id"] for r in db.execute("SELECT id FROM agents WHERE name IN (?, ?)", MACHINE_AGENTS)}
+        expired = []
         for row in db.execute("SELECT c.function_id, c.agent_id, f.project_id, f.name FROM claims c "
                               "JOIN functions f ON f.id=c.function_id WHERE c.expires_at < ?", (now,)).fetchall():
             if row["agent_id"] in own:  # decomp.wtf's own tries (cut short by a restart): nobody gave up on it
                 continue
+            expired.append(row)
             db.execute("UPDATE functions SET abandons=abandons+1 WHERE id=?", (row["function_id"],))
             self._event(db, row["project_id"], row["agent_id"], "expired", row["name"])
         db.execute("DELETE FROM claims WHERE expires_at < ?", (now,))
+        for row in expired:
+            self._stall_check(db, row["function_id"])
+
+    def _stall_check(self, db, function_id: int) -> bool:
+        """After an agent gave up on a function (released it, or let its claim run out): when STALL_ABANDONS have
+        since its best score last improved, it is set aside for a person, who sees why on the project page and can
+        give it back to agents (then no rule takes it again). Nothing is lost: its best attempt and notes stay."""
+        fn = db.execute("SELECT id, name, project_id, status, best_score, n_insns, meta FROM functions WHERE id=?",
+                        (function_id,)).fetchone()
+        if fn is None or fn["status"] != "open":
+            return False
+        meta = json.loads(fn["meta"] or "{}")
+        if meta.get("for_agents") or meta.get("review"):
+            return False  # a person's decision stands
+        best, size = fn["best_score"], max(int(fn["n_insns"] or 0), 1)
+        if best is not None and best <= STALL_NEAR_MISS * size * 100:
+            return False  # the permuter's to find
+        since = None
+        if best is not None:  # when the best score was first reached
+            since = db.execute("SELECT MIN(created_at) AS t FROM attempts WHERE function_id=? AND score=?",
+                               (fn["id"], best)).fetchone()["t"]
+        gave_up = db.execute("SELECT COUNT(*) AS n FROM events WHERE project_id=? AND detail=? "
+                             "AND kind IN ('release', 'expired') AND created_at > ?",
+                             (fn["project_id"], fn["name"], since or 0)).fetchone()["n"]
+        if gave_up < STALL_ABANDONS:
+            return False
+        meta["review"] = (f"{gave_up} agents gave up on it since its best score "
+                          + (f"({best}) last improved" if best is not None else "(it has never compiled)")
+                          + ": something may stop it coming from C as it stands (a wrong boundary, data split as code, "
+                            "hand-written assembly, library code, a missing type); look, then give it back to agents "
+                            "or leave it set aside")
+        meta["asm_code"] = f"set aside for a person by decomp.wtf: {meta['review']}"
+        db.execute("UPDATE functions SET status='asm', meta=? WHERE id=? AND status='open'", (json.dumps(meta), fn["id"]))
+        db.execute("DELETE FROM claims WHERE function_id=?", (fn["id"],))
+        self._event(db, fn["project_id"], None, "review", fn["name"])
+        return True
 
     def _event(self, db, project_id, agent_id, kind, detail) -> None:
         db.execute("INSERT INTO events(project_id,agent_id,kind,detail,created_at) VALUES(?,?,?,?,?)",
@@ -652,6 +698,11 @@ class Network:
                 db.execute("INSERT INTO notes(project_id,function_id,agent_id,text,created_at) VALUES(?,?,?,?,?)",
                            (fn["project_id"], fn["id"], agent.id, notes.strip(), time.time()))
             self._event(db, fn["project_id"], agent.id, "release", fn["name"])
+            stalled = self._stall_check(db, fn["id"])
+        if stalled:
+            return (f"Released {fn['name']}. Agents have given up on it {STALL_ABANDONS} times or more without getting "
+                    f"closer, so it goes to a person now; your best attempt and notes are saved. Call claim_function "
+                    f"for a new one.")
         return (f"Released {fn['name']}. Your best attempt and notes are saved so the next agent starts "
                 f"where you left off. Call claim_function for a new one.")
 

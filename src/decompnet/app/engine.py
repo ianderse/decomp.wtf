@@ -1671,6 +1671,8 @@ class RomNetwork(Network):
         sdk = psyq_sdk.prepare(self.workspace / "psyq-sdk", made, log=logging.getLogger("decomp.wtf").info)
         if sdk:
             stamp += f" + SDK libraries {sdk}"
+        from ..rom import psyq_near
+        stamp += f" + near {psyq_near.VERSION}"  # (a new near-match or block rule: every project looked at again)
         if not force and (cfg.get("psyq") or {}).get("stamp") == stamp:
             return cfg["psyq"]
         if getattr(self, "_psyq_sigs", None) is None or getattr(self, "_psyq_stamp", None) != stamp:
@@ -1698,18 +1700,82 @@ class RomNetwork(Network):
                    "sdk": [v for v, _ in res["versions"][:3]], "truncated": res["truncated"]}
         with self.store.tx() as db:
             db.executemany("UPDATE functions SET status='asm', meta=? WHERE id=? AND status='open'", aside)
-            c = json.loads(db.execute("SELECT config FROM projects WHERE id=?", (proj["id"],)).fetchone()["config"])
-            c["psyq"] = summary
-            db.execute("UPDATE projects SET config=? WHERE id=?", (json.dumps(c), proj["id"]))
             if aside:
                 self._event(db, proj["id"], None, "autopilot", f"{len(aside)} of Sony's library functions set aside "
                             f"(PSY-Q signatures; the SDK looks like {', '.join(summary['sdk'][:2])})")
-        if aside:  # and named as Sony named them
+        summary |= self._psyq_near(proj, psyq_near)
+        with self.store.tx() as db:  # (the stamp last: a scan cut short by an error runs again)
+            c = json.loads(db.execute("SELECT config FROM projects WHERE id=?", (proj["id"],)).fetchone()["config"])
+            c["psyq"] = summary
+            db.execute("UPDATE projects SET config=? WHERE id=?", (json.dumps(c), proj["id"]))
+        if aside or summary["near_set_aside"]:  # and named as Sony named them
             try:
                 summary["named"] = len(self.name_library_functions(slug)["renamed"])
             except Exception as e:  # names are a nicety: the functions are set aside either way
                 logging.getLogger("decomp.wtf").info("naming %s's library functions: %s", slug, e)
         return summary
+
+    def _psyq_near(self, proj, near) -> dict:
+        """After the exact signatures (identify_psyq): Sony's code they missed (rom/psyq_near.py). A function nearly
+        identical to exactly one library function is set aside with its name, as an exact hit is; one less alike, or
+        alike to two, and the open functions inside a stretch of library code, are set aside for a person, who sees
+        why on the project page and can give each back to agents. A person's decision is never overridden."""
+        if getattr(self, "_psyq_pats", None) is None or self._psyq_pats[0] != self._psyq_stamp:
+            self._psyq_pats = (self._psyq_stamp, near.patterns(self._psyq_sigs))
+        rows = self.store.all("SELECT id, name, unit, vram, status, meta, target FROM functions WHERE project_id=?",
+                              proj["id"])
+        metas = {r["id"]: json.loads(r["meta"] or "{}") for r in rows}
+        free = {r["id"] for r in rows if r["status"] == "open" and not metas[r["id"]].get("for_agents")
+                and not metas[r["id"]].get("review")}
+
+        def for_person(meta: dict, why: str) -> str:
+            meta["review"] = why
+            meta["asm_code"] = f"set aside for a person by decomp.wtf: {why}"
+            return json.dumps(meta)
+
+        sure, review = [], []
+        hits = near.near_hits([(r["id"], bytes(r["target"])) for r in rows if r["id"] in free and r["target"]],
+                              self._psyq_pats[1])
+        for h in hits:
+            meta = metas[h["id"]]
+            objects = sorted({p.object for p in h["candidates"]})
+            versions = sorted({p.version for p in h["candidates"]})
+            alike = (f"{h['similarity']:.0%} the same instructions as {', '.join(objects[:2])} in PSY-Q "
+                     f"{'/'.join(versions[:4])}, leaving out what the linker fills in")
+            if h["name"] and h["similarity"] >= near.SURE:
+                meta["library"] = {"name": h["name"], "objects": objects[:4], "sdk": versions[:6],
+                                   "similarity": round(h["similarity"], 3)}
+                meta["asm_code"] = (f"a Sony library function, {h['name']} ({alike}): linked from Sony's precompiled "
+                                    "libraries, not the game's code")
+                sure.append((json.dumps(meta), h["id"]))
+            else:
+                names = " or ".join(sorted({p.name for p in h["candidates"]})[:3])
+                review.append((for_person(meta, f"probably Sony's {names} from another SDK revision ({alike}): set it "
+                                                "aside as Sony's, or give it back to agents if it's the game's own"), h["id"]))
+        taken = {i for _, i in sure + review}
+        found = {i for _, i in sure}
+        blocks = near.library_blocks([(r["id"], r["unit"], r["vram"],
+                                       (r["status"] == "asm" and "library" in metas[r["id"]]) or r["id"] in found)
+                                      for r in rows])
+        inside = []
+        for r in rows:
+            if r["id"] not in free or r["id"] in taken or r["vram"] is None:
+                continue
+            block = next(((a, z) for u, a, z in blocks if u == r["unit"] and a < r["vram"] < z), None)
+            if block:
+                inside.append((for_person(metas[r["id"]], (
+                    f"inside a stretch of Sony's library code ({r['unit']} {block[0]:08X}-{block[1]:08X}, between "
+                    "library functions the signatures found): probably a library function from an SDK revision not in "
+                    "psyq-sdk/; set it aside as Sony's, or give it back to agents if it's the game's own")), r["id"]))
+        with self.store.tx() as db:
+            for batch in (sure, review, inside):
+                db.executemany("UPDATE functions SET status='asm', meta=? WHERE id=? AND status='open'", batch)
+                db.executemany("DELETE FROM claims WHERE function_id=?", [(i,) for _, i in batch])
+            if sure or review or inside:
+                self._event(db, proj["id"], None, "autopilot",
+                            f"Sony's code the signatures missed: {len(sure)} near-identical library functions set "
+                            f"aside, {len(review) + len(inside)} more set aside for a person to confirm")
+        return {"near_set_aside": len(sure), "near_review": len(review), "block_review": len(inside)}
 
     def flag_for_review(self, agent: Agent, function: str, reason: str, project: str | None = None) -> str:
         """An agent sets a function aside for a person: it can't come from C as it stands (data split as code, a wrong
