@@ -164,7 +164,7 @@ def test_the_permuter_check_does_not_find_the_ssh_that_asks(tmp_path):
     folder = f"permuter-test-{time.time_ns()}"  # no permuter runs on it
     old, new = f"'permuter.py .*{folder}/'", RemotePermuter._batch_pattern(None, folder)
     check = lambda pattern: subprocess.run(["sh", "-c", f"pgrep -f {pattern} >/dev/null && echo yes || echo no"],
-                                           capture_output=True, text=True).stdout.strip()
+                                           capture_output=True, text=True, check=False).stdout.strip()
 
     def while_asked(pattern):  # what the check says while the ssh asking it runs on this machine
         asking = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)", "ssh", "host",
