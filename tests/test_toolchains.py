@@ -43,6 +43,16 @@ def test_an_arm_computer_is_told_why_nothing_compiles(tc_root, monkeypatch):
     assert toolchains.unsupported_cpu() is None
 
 
+
+def test_macos_is_apple_silicon_only(tc_root, monkeypatch):
+    """The macOS toolchains are Apple Silicon builds: an Intel Mac is told so, and no part is for one."""
+    monkeypatch.setattr(toolchains.sys, "platform", "darwin")
+    monkeypatch.setattr(toolchains._platform, "machine", lambda: "arm64")
+    assert toolchains.current_platform() == "macos-arm64" and toolchains.unsupported_cpu() is None
+    monkeypatch.setattr(toolchains._platform, "machine", lambda: "x86_64")
+    assert "an Intel Mac isn't supported" in toolchains.unsupported_cpu()
+    assert not [t.id for t in toolchains.registry().values() for p in t.parts if "macos-x86_64" in p.get("platforms", [])]
+
 def _fake(monkeypatch, tc_root, sha):
     src = tc_root / "src"
     src.mkdir()

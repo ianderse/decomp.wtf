@@ -374,23 +374,27 @@ class Network:
         return res
 
     def _explain_crash(self, proj, tid: str, header: str, source: str, res):
-        """The compiler crashed instead of saying what's wrong (the arm64 macOS builds of the old PS1 GCCs do, on
-        some messages): the same GCC version, built for Intel, reads the source and says it."""
+        """The compiler crashed instead of saying what's wrong (the Apple Silicon builds of GCC 2.6-2.8.1 do on some
+        messages: their varargs fix isn't complete): another GCC whose build doesn't (explain_with, GCC 2.95.2)
+        compiles the source and says it. It used to be the same version built for Intel, run by Rosetta; macOS
+        builds are Apple Silicon only now. A message 2.95.2 gives can be worded a little differently from 2.7.2's."""
         try:
             other = toolchains.get(toolchain_id(tid)).explain_with
             if not other or toolchains.current_platform() not in toolchains.get(toolchain_id(tid)).no_warnings_on:
                 return res
             toolchains.ensure(other, log=lambda *_: None)
+            # a whole compile: with -fsyntax-only the toolchain's later steps fail on the assembly it didn't write
             said = compile_source(compiler_config(Path(proj["root"]), {"compiler": {"toolchain": other, "flags": [
-                "-O2", "-fsyntax-only"]}}), header, source)
+                "-O2"]}}), header, source)
         except Exception:
             return res
-        why = "\n".join(ln for ln in said.log.splitlines() if "func.o" not in ln).strip()
-        if not why:
-            return CompileResult(False, None, res.log.strip() + "\nThe compiler crashed on code it accepts (GCC 2.7.2 "
+        name = toolchains.get(other).name.split(" for ")[0].split(" + ")[0]
+        why = "\n".join(ln for ln in said.log.splitlines() if "func.o" not in ln and "psx-cc:" not in ln).strip()
+        if said.ok or not why:
+            return CompileResult(False, None, res.log.strip() + f"\nThe compiler crashed on code it accepts ({name} "
                                  "finds nothing wrong with it): write that statement another way.")
-        return CompileResult(False, None, f"{why}\n(the PS1 compiler's macOS build crashed printing this; the same "
-                                          "GCC version built for Intel says it)")
+        return CompileResult(False, None, f"{why}\n(the PS1 compiler's macOS build crashed printing this; {name} "
+                                          "says it)")
 
     def _alternates_on(self, proj, fn, d) -> bool:
         """Whether a miss gets tried with the other compiler setups: a near miss (ALTERNATES_FROM), or a small

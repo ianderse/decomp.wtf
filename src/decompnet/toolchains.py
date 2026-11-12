@@ -97,13 +97,17 @@ def current_platform() -> str:
 
 
 def unsupported_cpu() -> str | None:
-    """Why this computer can't run the games' compilers, or None: they're x86 programs, which an ARM computer
-    (a Raspberry Pi, an ARM laptop or server) doesn't run."""
-    machine = current_platform().split("-", 1)[1]
-    if machine == "x86_64":
+    """Why this computer can't run the games' compilers, or None. On Linux and Windows they're x86 programs, which
+    an ARM computer (a Raspberry Pi, an ARM laptop or server) doesn't run; on macOS they're Apple Silicon builds, and
+    an Intel Mac isn't supported."""
+    plat = current_platform()
+    if plat == "macos-arm64" or plat.endswith("-x86_64") and not plat.startswith("macos"):
         return None
-    return (f"decomp.wtf needs a 64-bit Intel or AMD PC for now (the games' compilers are x86 programs; this "
-            f"computer's processor is {machine})")
+    if plat == "macos-x86_64":
+        return ("an Intel Mac isn't supported: decomp.wtf's macOS compilers and tools are Apple Silicon builds "
+                "(on an Intel Mac, run it in Linux or Windows)")
+    return (f"decomp.wtf needs a 64-bit Intel or AMD PC here (the games' compilers are x86 programs on "
+            f"{plat.split('-', 1)[0]}; this computer's processor is {plat.split('-', 1)[1]})")
 
 
 @functools.cache

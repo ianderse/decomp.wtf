@@ -8,8 +8,8 @@
 # `decompnet toolchain install <id> --accept-license`: running them is the operator's decision.
 # An empty sha256 means "pin on first install" (trust on first use); the installer records it.
 #
-# Each part lists the platforms it is for (linux-x86_64, linux-aarch64, macos-x86_64, macos-arm64,
-# windows-x86_64). Apple Silicon Macs run the x86_64 builds through Rosetta 2.
+# Each part lists the platforms it is for (linux-x86_64, linux-aarch64, macos-arm64, windows-x86_64). On macOS
+# only Apple Silicon is supported, with native builds; gcc-2.7.2-kmc's is still an Intel one (Rosetta 2).
 # On Windows, a toolchain with only a linux-x86_64 build is installed from that build and runs inside
 # WSL 2 (wsl.py); a part for wsl-x86_64 replaces the Linux one there.
 
@@ -51,11 +51,11 @@ platforms = ["linux-x86_64"]
 [["gcc-2.7.2-kmc".parts]]
 url = "https://github.com/decompals/mips-gcc-2.7.2/releases/download/v0.1/gcc-2.7.2-mac.tar.gz"
 sha256 = "5923ea59b97d39d65d684a3ef2f25cd1cbcaf2fd0b5cf6a7f1a4804500a770e0"
-platforms = ["macos-x86_64", "macos-arm64"]
+platforms = ["macos-arm64"]
 [["gcc-2.7.2-kmc".parts]]
 url = "https://github.com/ianderse/mips-binutils-2.6/releases/download/v0.4/binutils-2.6-mac.tar.gz"
 sha256 = "f219c92664584336648e29a36d4063ba934a25b30d62acc79fda1eb5bee5b0bd"
-platforms = ["macos-x86_64", "macos-arm64"]
+platforms = ["macos-arm64"]
 
 ["gcc-2.7.2-psx"]
 name = "GCC 2.7.2 for PlayStation + binutils 2.6"
@@ -68,7 +68,7 @@ cc = ["{tc}/gcc", "-B{tc}/", "-c", "-Wa,-EL"]
 flags = ["-O2", "-G8"]
 # its arm64 macOS build crashes ("cc1 got fatal signal 10") on warnings such as "makes integer from pointer"
 no_warnings_on = ["macos-arm64"]
-explain_with = "gcc-2.7.2-kmc"
+explain_with = "gcc-2.95.2-psx"
 # GCC writes assembly, maspsx makes it what Sony's assembler (ASPSX) would have assembled (delay slots, nops, div
 # checks; globals without a value stay common symbols, as with ccpsx), modern GNU as assembles it: how PS1 decomps build. Plain GNU as schedules differently, and functions
 # then miss by a nop or the stack restore's place. {aspsx}: the ASPSX version (the project's compiler.aspsx)
@@ -85,11 +85,11 @@ platforms = ["linux-x86_64"]
 [["gcc-2.7.2-psx".parts]]
 url = "https://github.com/ianderse/old-gcc/releases/download/0.18/gcc-2.7.2-psx-macos.tar.gz"
 sha256 = "95b1e8b5f43c94476738a2240955832aac9c68f3e40bd77600e35dd624893b8c"
-platforms = ["macos-x86_64", "macos-arm64"]
+platforms = ["macos-arm64"]
 [["gcc-2.7.2-psx".parts]]
 url = "https://github.com/ianderse/mips-binutils-2.6/releases/download/v0.4/binutils-2.6-mac.tar.gz"
 sha256 = "f219c92664584336648e29a36d4063ba934a25b30d62acc79fda1eb5bee5b0bd"
-platforms = ["macos-x86_64", "macos-arm64"]
+platforms = ["macos-arm64"]
 
 ["gcc-2.6.0-psx"]
 name = "GCC 2.6.0 for PlayStation + binutils 2.6"
@@ -103,7 +103,7 @@ flags = ["-O2", "-G8"]
 # its arm64 macOS build crashes ("cc1 got fatal signal 10") on warnings such as "makes integer from pointer"
 line_comments = false  # // comments came after GCC 2.6: they're turned into /* */ ones first
 no_warnings_on = ["macos-arm64"]
-explain_with = "gcc-2.7.2-kmc"
+explain_with = "gcc-2.95.2-psx"
 # GCC writes assembly, maspsx makes it what Sony's assembler (ASPSX) would have assembled (delay slots, nops, div
 # checks; globals without a value stay common symbols, as with ccpsx), modern GNU as assembles it: how PS1 decomps build. Plain GNU as schedules differently, and functions
 # then miss by a nop or the stack restore's place. {aspsx}: the ASPSX version (the project's compiler.aspsx)
@@ -122,13 +122,9 @@ url = "https://github.com/ianderse/old-gcc/releases/download/0.18/gcc-2.6.0-psx-
 sha256 = "1ee152688a8a9340bce4d9a0bd333e3685be1a897c3ab7540ebddee8a285d64b"
 platforms = ["macos-arm64"]
 [["gcc-2.6.0-psx".parts]]
-url = "https://raw.githubusercontent.com/ianderse/decomp.wtf/main/toolchain-builds/gcc-2.6.0-psx-macos-x86_64.tar.gz"
-sha256 = "3a42d454e21d659106d3373022ec693956336881b4665ade7f965bdb46cdf685"
-platforms = ["macos-x86_64"]
-[["gcc-2.6.0-psx".parts]]
 url = "https://github.com/ianderse/mips-binutils-2.6/releases/download/v0.4/binutils-2.6-mac.tar.gz"
 sha256 = "f219c92664584336648e29a36d4063ba934a25b30d62acc79fda1eb5bee5b0bd"
-platforms = ["macos-x86_64", "macos-arm64"]
+platforms = ["macos-arm64"]
 
 
 ["gcc-2.6.3-psx"]
@@ -143,7 +139,7 @@ flags = ["-O2", "-G8"]
 # its arm64 macOS build crashes ("cc1 got fatal signal 10") on warnings such as "makes integer from pointer"
 line_comments = false  # // comments came after GCC 2.6: they're turned into /* */ ones first
 no_warnings_on = ["macos-arm64"]
-explain_with = "gcc-2.7.2-kmc"
+explain_with = "gcc-2.95.2-psx"
 # GCC writes assembly, maspsx makes it what Sony's assembler (ASPSX) would have assembled (delay slots, nops, div
 # checks; globals without a value stay common symbols, as with ccpsx), modern GNU as assembles it: how PS1 decomps build. Plain GNU as schedules differently, and functions
 # then miss by a nop or the stack restore's place. {aspsx}: the ASPSX version (the project's compiler.aspsx)
@@ -162,13 +158,9 @@ url = "https://github.com/ianderse/old-gcc/releases/download/0.18/gcc-2.6.3-psx-
 sha256 = "ef4e93c9e0ce7ab9cc8147b19e495aab2309f783b2471c6a2361a66f0b8cd734"
 platforms = ["macos-arm64"]
 [["gcc-2.6.3-psx".parts]]
-url = "https://raw.githubusercontent.com/ianderse/decomp.wtf/main/toolchain-builds/gcc-2.6.3-psx-macos-x86_64.tar.gz"
-sha256 = "5cb92ba1b156f0d4c36d301b976bd475f52cf85271b741270a6383a4499accbd"
-platforms = ["macos-x86_64"]
-[["gcc-2.6.3-psx".parts]]
 url = "https://github.com/ianderse/mips-binutils-2.6/releases/download/v0.4/binutils-2.6-mac.tar.gz"
 sha256 = "f219c92664584336648e29a36d4063ba934a25b30d62acc79fda1eb5bee5b0bd"
-platforms = ["macos-x86_64", "macos-arm64"]
+platforms = ["macos-arm64"]
 
 
 ["gcc-2.8.1-psx"]
@@ -182,7 +174,7 @@ cc = ["{tc}/gcc", "-B{tc}/", "-c", "-Wa,-EL"]
 flags = ["-O2", "-G8"]
 # its arm64 macOS build crashes ("cc1 got fatal signal 10") on warnings such as "makes integer from pointer"
 no_warnings_on = ["macos-arm64"]
-explain_with = "gcc-2.7.2-kmc"
+explain_with = "gcc-2.95.2-psx"
 # GCC writes assembly, maspsx makes it what Sony's assembler (ASPSX) would have assembled (delay slots, nops, div
 # checks; globals without a value stay common symbols, as with ccpsx), modern GNU as assembles it: how PS1 decomps build. Plain GNU as schedules differently, and functions
 # then miss by a nop or the stack restore's place. {aspsx}: the ASPSX version (the project's compiler.aspsx)
@@ -199,11 +191,11 @@ platforms = ["linux-x86_64"]
 [["gcc-2.8.1-psx".parts]]
 url = "https://github.com/ianderse/old-gcc/releases/download/0.18/gcc-2.8.1-psx-macos.tar.gz"
 sha256 = "f4a3b9731645a26d97e57fd2b4b3a6be82801da5333773f01093a8550318fbe1"
-platforms = ["macos-x86_64", "macos-arm64"]
+platforms = ["macos-arm64"]
 [["gcc-2.8.1-psx".parts]]
 url = "https://github.com/ianderse/mips-binutils-2.6/releases/download/v0.4/binutils-2.6-mac.tar.gz"
 sha256 = "f219c92664584336648e29a36d4063ba934a25b30d62acc79fda1eb5bee5b0bd"
-platforms = ["macos-x86_64", "macos-arm64"]
+platforms = ["macos-arm64"]
 
 ["gcc-2.8.0-psx"]
 name = "GCC 2.8.0 for PlayStation + binutils 2.6"
@@ -216,7 +208,7 @@ cc = ["{tc}/gcc", "-B{tc}/", "-c", "-Wa,-EL"]
 flags = ["-O2", "-G8"]
 # its arm64 macOS build crashes ("cc1 got fatal signal 10") on warnings such as "makes integer from pointer"
 no_warnings_on = ["macos-arm64"]
-explain_with = "gcc-2.7.2-kmc"
+explain_with = "gcc-2.95.2-psx"
 # GCC writes assembly, maspsx makes it what Sony's assembler (ASPSX) would have assembled (delay slots, nops, div
 # checks; globals without a value stay common symbols, as with ccpsx), modern GNU as assembles it: how PS1 decomps build. Plain GNU as schedules differently, and functions
 # then miss by a nop or the stack restore's place. {aspsx}: the ASPSX version (the project's compiler.aspsx)
@@ -235,13 +227,9 @@ url = "https://github.com/ianderse/old-gcc/releases/download/0.18/gcc-2.8.0-psx-
 sha256 = "3634ce5bfafa6020f1882b329acc145039d155b8b4d8f515e934c64b18e05306"
 platforms = ["macos-arm64"]
 [["gcc-2.8.0-psx".parts]]
-url = "https://raw.githubusercontent.com/ianderse/decomp.wtf/main/toolchain-builds/gcc-2.8.0-psx-macos-x86_64.tar.gz"
-sha256 = "4b13835d702e9c41b2f9935a4ec2a67e01d92fe3b4677eac301adb96d7d61867"
-platforms = ["macos-x86_64"]
-[["gcc-2.8.0-psx".parts]]
 url = "https://github.com/ianderse/mips-binutils-2.6/releases/download/v0.4/binutils-2.6-mac.tar.gz"
 sha256 = "f219c92664584336648e29a36d4063ba934a25b30d62acc79fda1eb5bee5b0bd"
-platforms = ["macos-x86_64", "macos-arm64"]
+platforms = ["macos-arm64"]
 
 
 ["gcc-2.91.66-psx"]
@@ -271,13 +259,9 @@ url = "https://github.com/ianderse/old-gcc/releases/download/0.18/gcc-2.91.66-ps
 sha256 = "254b81cb9489dd043c2c2ccb82741d7e532a9b3785332b18bb4b519090f6139b"
 platforms = ["macos-arm64"]
 [["gcc-2.91.66-psx".parts]]
-url = "https://raw.githubusercontent.com/ianderse/decomp.wtf/main/toolchain-builds/gcc-2.91.66-psx-macos-x86_64.tar.gz"
-sha256 = "f4ede3b05c28f696abd90c6a609d09573a233416d14bf55588b355e38e8c3d11"
-platforms = ["macos-x86_64"]
-[["gcc-2.91.66-psx".parts]]
 url = "https://github.com/ianderse/mips-binutils-2.6/releases/download/v0.4/binutils-2.6-mac.tar.gz"
 sha256 = "f219c92664584336648e29a36d4063ba934a25b30d62acc79fda1eb5bee5b0bd"
-platforms = ["macos-x86_64", "macos-arm64"]
+platforms = ["macos-arm64"]
 
 ["gcc-2.95.2-psx"]
 name = "GCC 2.95.2 for PlayStation + binutils 2.6"
@@ -306,13 +290,9 @@ url = "https://github.com/ianderse/old-gcc/releases/download/0.18/gcc-2.95.2-psx
 sha256 = "5599efbe789558c4c55cf970e461ab03c2f48ad3f8d371035af161e288675799"
 platforms = ["macos-arm64"]
 [["gcc-2.95.2-psx".parts]]
-url = "https://raw.githubusercontent.com/ianderse/decomp.wtf/main/toolchain-builds/gcc-2.95.2-psx-macos-x86_64.tar.gz"
-sha256 = "62d9b66d19ccdf10a12cca964dc373b7764d1d609a66670300840cceb91fbfa8"
-platforms = ["macos-x86_64"]
-[["gcc-2.95.2-psx".parts]]
 url = "https://github.com/ianderse/mips-binutils-2.6/releases/download/v0.4/binutils-2.6-mac.tar.gz"
 sha256 = "f219c92664584336648e29a36d4063ba934a25b30d62acc79fda1eb5bee5b0bd"
-platforms = ["macos-x86_64", "macos-arm64"]
+platforms = ["macos-arm64"]
 
 ["ee-gcc-2.96"]
 name = "EE-GCC 2.96"
@@ -345,7 +325,7 @@ platforms = ["linux-x86_64"]
 [["ido-7.1".parts]]
 url = "https://github.com/decompals/ido-static-recomp/releases/download/v1.2/ido-7.1-recomp-macos.tar.gz"
 sha256 = "7f75570ed1ca14e6161b84b10743d440c685f27291bfbfaf87c6a82236553bc6"
-platforms = ["macos-x86_64", "macos-arm64"]
+platforms = ["macos-arm64"]
 [["ido-7.1".parts]]
 url = "https://github.com/decompals/ido-static-recomp/releases/download/v1.2/ido-7.1-recomp-windows.tar.gz"
 sha256 = "28487a90a47d2565d8c38235750500f6fbd3479b758e966b529166825804c926"
@@ -367,7 +347,7 @@ platforms = ["linux-x86_64"]
 [["ido-5.3".parts]]
 url = "https://github.com/decompals/ido-static-recomp/releases/download/v1.2/ido-5.3-recomp-macos.tar.gz"
 sha256 = "5b1ca006ee4b158ffba0422fc3f00b9b330f9036f279bae2ea1b4703317ad9c0"
-platforms = ["macos-x86_64", "macos-arm64"]
+platforms = ["macos-arm64"]
 [["ido-5.3".parts]]
 url = "https://github.com/decompals/ido-static-recomp/releases/download/v1.2/ido-5.3-recomp-windows.tar.gz"
 sha256 = "2268f64cab973750e78bdf7aa2ff3cccf78ad1d181507da6faeb61f3d22c2e1e"
@@ -398,10 +378,6 @@ url = "https://github.com/cloudflare/cloudflared/releases/download/2026.10.0/clo
 sha256 = "e6422b9d4f72d3194bc5a38676f13667c06666523217b842a877d72a80b5ac08"
 binary = "cloudflared"
 platforms = ["linux-aarch64"]
-[[cloudflared.parts]]
-url = "https://github.com/cloudflare/cloudflared/releases/download/2026.10.0/cloudflared-darwin-amd64.tgz"
-sha256 = "903845b81828c8cb3c5d13d816a2de71c06a3da5785469df8eb0e1b736d92f9f"
-platforms = ["macos-x86_64"]
 [[cloudflared.parts]]
 url = "https://github.com/cloudflare/cloudflared/releases/download/2026.10.0/cloudflared-darwin-arm64.tgz"
 sha256 = "a2f79ff7b9420aa537d74af239f376da170bbabeb529aec416002adac6a72e70"
@@ -439,11 +415,6 @@ sha256 = "767c67e13b7b5e6ca545e7d2235e47c7bceac07d47a52776f74a52914cb4085a"
 binary = "objdiff-cli"
 platforms = ["macos-arm64"]
 [[objdiff-cli.parts]]
-url = "https://github.com/encounter/objdiff/releases/download/v3.8.2/objdiff-cli-macos-x86_64"
-sha256 = "2cfe0f46fc84cef7d96813f100a0f01fbf99ac7e423b7fda1d314aada4d5ff72"
-binary = "objdiff-cli"
-platforms = ["macos-x86_64"]
-[[objdiff-cli.parts]]
 url = "https://github.com/encounter/objdiff/releases/download/v3.8.2/objdiff-cli-windows-x86_64.exe"
 sha256 = "36d229ac6ce74a26b47f42cf86ea8e808d8cd834a54aa62d7ed3f47b765d971b"
 binary = "objdiff-cli.exe"
@@ -472,11 +443,6 @@ sha256 = "5ba1fd76adf937847277a1ebe2238b698df0020c3dbbde23ecb126f00fb10353"
 binary = "dtk"
 platforms = ["macos-arm64"]
 [[dtk.parts]]
-url = "https://github.com/encounter/decomp-toolkit/releases/download/v1.8.4/dtk-macos-x86_64"
-sha256 = "84bcab745a070bb970cf4bc0d69ddce9f6a58d5de257999ccc8adfa1567d17c9"
-binary = "dtk"
-platforms = ["macos-x86_64"]
-[[dtk.parts]]
 url = "https://github.com/encounter/decomp-toolkit/releases/download/v1.8.4/dtk-windows-x86_64.exe"
 sha256 = "6a693e95aa4d30acccc673343302a4abdfa3146bd0fb15cb1a2bce924cbc782a"
 binary = "dtk.exe"
@@ -498,7 +464,7 @@ platforms = ["linux-x86_64"]
 url = "https://github.com/decompals/wibo/releases/download/1.2.0/wibo-macos"
 sha256 = "2b3000ef6a7a490c24ccd71967735ae0005e218922e51806cca1b8d77fd3cf7c"
 binary = "wibo"
-platforms = ["macos-x86_64", "macos-arm64"]
+platforms = ["macos-arm64"]
 
 [coddog]
 name = "coddog"
@@ -517,11 +483,6 @@ url = "https://github.com/ethteck/coddog/releases/download/0.6.3/coddog-cli-aarc
 sha256 = "b040cf68cd673795ae95336dbadb045255b7d4d100f98cba32360ce1a64a0d0b"
 subdir = "coddog-cli-aarch64-apple-darwin"
 platforms = ["macos-arm64"]
-[[coddog.parts]]
-url = "https://github.com/ethteck/coddog/releases/download/0.6.3/coddog-cli-x86_64-apple-darwin.tar.xz"
-sha256 = "40d8f12c67a852e5716c1c2c1181673fc81bcd505e656111775c1d3b38094ed3"
-subdir = "coddog-cli-x86_64-apple-darwin"
-platforms = ["macos-x86_64"]
 [[coddog.parts]]
 url = "https://github.com/ethteck/coddog/releases/download/0.6.3/coddog-cli-x86_64-pc-windows-msvc.zip"
 sha256 = "ce49cda2f01acbfcb1fea165ef3cbe4db06d7b5ea3738676069149a74d8e9ea3"
@@ -542,7 +503,7 @@ platforms = ["linux-x86_64"]
 url = "https://github.com/encounter/gc-wii-binutils/releases/download/2.42-2/macos-universal.zip"
 sha256 = "c40bad23fd7d9eb22d4533875922fc19785ed067978b605804e345bc6e62449d"
 executable = true
-platforms = ["macos-x86_64", "macos-arm64"]
+platforms = ["macos-arm64"]
 [["gc-wii-binutils".parts]]
 url = "https://github.com/encounter/gc-wii-binutils/releases/download/2.42-2/windows-x86_64.zip"
 sha256 = "bd95bd57607efb45c437e97b77ec199073e242869027eb72196b0720611bb1c1"
@@ -647,11 +608,6 @@ url = "https://github.com/AetiasHax/ds-decomp/releases/download/v0.12.1/dsd-maco
 sha256 = "1bbb57fe66a37123a7e9a64459b174956ea69ea103ad3dfd2766f18ca63057c7"
 binary = "dsd"
 platforms = ["macos-arm64"]
-[[dsd.parts]]
-url = "https://github.com/AetiasHax/ds-decomp/releases/download/v0.12.1/dsd-macos-x86_64"
-sha256 = "21adcef119d6e9b6bb853b0e5cc626bc4c086d28d45abc9a91b715c78631a044"
-binary = "dsd"
-platforms = ["macos-x86_64"]
 [[dsd.parts]]
 url = "https://github.com/AetiasHax/ds-decomp/releases/download/v0.12.1/dsd-windows-x86_64.exe"
 sha256 = "5917df26bffc05d4752276a2e0b1edd21bd6e920aabe1992be8a50efc9d10932"

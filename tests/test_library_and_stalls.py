@@ -178,3 +178,29 @@ def test_the_permuter_check_does_not_find_the_ssh_that_asks(tmp_path):
 
     assert while_asked(old) == "yes"  # the old pattern found the ssh asking
     assert while_asked(new) == "no"
+
+
+def test_a_crash_of_the_arm64_ps1_gcc_is_explained_by_a_native_gcc(tmp_path):
+    """macOS builds are Apple Silicon only: what 2.7.2's crashes mean comes from GCC 2.95.2's native build, not
+    from the same version built for Intel under Rosetta."""
+    import pytest
+
+    from decompnet import toolchains
+    from decompnet.compiler import compile_source
+    from decompnet.network import Network
+    from decompnet.project import compiler_config
+
+    if toolchains.current_platform() != "macos-arm64" or not all(
+            toolchains.installed(t) for t in ("gcc-2.7.2-psx", "gcc-2.95.2-psx", "maspsx", "binutils-mips")):
+        pytest.skip("needs the PS1 GCCs on an Apple Silicon Mac")
+    net = Network(tmp_path / "app.db")
+    proj = {"root": str(tmp_path)}
+
+    def explained(src):
+        crashed = compile_source(compiler_config(tmp_path, {"compiler": {"toolchain": "gcc-2.7.2-psx",
+                                                                         "flags": ["-O2", "-G8"]}}), "", src)
+        assert "got fatal signal" in crashed.log  # (the crash this is about)
+        return net._explain_crash(proj, "gcc-2.7.2-psx", "", src, crashed).log
+
+    said = explained("int f(int a) { return a + undeclared_thing; }\n")
+    assert "`undeclared_thing' undeclared" in said and "GCC 2.95.2 says it" in said and "psx-cc" not in said
