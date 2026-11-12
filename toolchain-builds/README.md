@@ -1,4 +1,8 @@
-# Compilers built for macOS
+# Compilers built for macOS (Intel)
+
+The Apple Silicon builds are released from https://github.com/ianderse/old-gcc (0.18 and later), with the 2.7.2 and
+2.8.1 ones and the float/double constant fix; the toolchains take them from there. What's left here are the Intel
+(`-x86_64`) builds, until that fork releases them too.
 
 GCC is GPL-2.0. These are builds of decompals/old-gcc's patched GCC sources (https://github.com/decompals/old-gcc,
 patches in its `patches/` folder; the gcc.gnu.org / ftp.gnu.org / egcs source tarballs it names), built by

@@ -44,6 +44,13 @@ produces, and respect the rules of projects that don't want AI-made contribution
 - **Compiler hints from assembler fingerprints.** A function whose code has an older ASPSX's `ori` for small
   constants compiles, from the first try, with the setup its nearest matched neighbours with the same fingerprint
   used (when its best attempt agrees); its brief says which and why.
+- **Native on Apple Silicon, no Rosetta.** The PS1 GCCs come from [ianderse/old-gcc](https://github.com/ianderse/old-gcc)
+  (2.6.0 to 2.95.2, built for arm64, with a fix for the wrong float and double constants in upstream's macOS 2.7.2
+  and 2.8.1), and the binutils 2.6 they assemble with from
+  [ianderse/mips-binutils-2.6](https://github.com/ianderse/mips-binutils-2.6) (universal). Upstream's macOS binutils
+  is Intel-only: without Rosetta every `:gnu-as` setup failed with "Bad CPU type in executable", and matched functions
+  built with one were reopened. Both builds give the same code as the ones they replace on every compiling C file
+  of SLUS-01252's export (3,898).
 - **Compiler crashes explained.** The Apple Silicon builds of the old PS1 GCCs crash on some warnings and errors.
   Warnings are turned off there (they never change the code), and when an error still crashes the compiler, the
   same GCC version built for Intel reports the real message.
