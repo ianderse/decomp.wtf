@@ -51,8 +51,9 @@ produces, and respect the rules of projects that don't want AI-made contribution
   [ianderse/mips-binutils-2.6](https://github.com/ianderse/mips-binutils-2.6). Upstream's macOS binutils is
   Intel-only: without Rosetta every `:gnu-as` setup failed with "Bad CPU type in executable", and matched functions
   built with one were reopened. Both builds give the same code as the ones they replace on every compiling C file of
-  SLUS-01252's export (3,898). The one exception is the N64 KMC GCC (`gcc-2.7.2-kmc`, which builds the demo ROM),
-  whose only macOS build is still an Intel one and needs Rosetta.
+  SLUS-01252's export (3,898). The N64 KMC GCC (`gcc-2.7.2-kmc`, which builds the demo ROM) comes from
+  [ianderse/mips-gcc-2.7.2](https://github.com/ianderse/mips-gcc-2.7.2), whose Apple Silicon build gives the same
+  assembly as upstream's Intel one on all 4,040 of those files.
 - **Compiler crashes explained.** The Apple Silicon builds of GCC 2.6-2.8.1 crash on some warnings and errors.
   Warnings are turned off there (they never change the code). When an error still crashes the compiler, GCC 2.95.2's
   native build, which doesn't crash, compiles the source and reports the real message.
