@@ -13,6 +13,12 @@ password, e.g. a Mac Studio over Tailscale):
 Nothing here is required: no host, or a host that doesn't answer, and the app works as before. What it needs there:
 decomp.wtf's toolchains installed (its Compilers & tools page, or `uv run decomp setup`) and decomp-permuter cloned
 with its packages (docs/plans/permuter-on-m5.md).
+
+Local mode: when the host is this computer ("local", "localhost", or its own name), there's nothing to copy and no
+one to reach over SSH. decomp-permuter runs on the batch where the export writes it (.decomp/permuter/<slug>), its
+commands run in a local shell, and the results are read where it writes them. The app moved onto the Mac Studio that
+was its permuter machine, and SSHing into itself (its own key in authorized_keys) and rsyncing between two folders on
+one disk broke when macOS's rsync did (2026-11-12).
 """
 
 from __future__ import annotations
@@ -64,12 +70,25 @@ class RemotePermuter:
     def permuter_dir(self) -> str:
         return str(self.settings.data.get("permuter_dir") or "~/decomp-permuter").strip()
 
+    @property
+    def is_local(self) -> bool:
+        """The permuter machine is this computer: "local", "localhost", or one of this computer's own names."""
+        return is_this_computer(self.host)
+
+    @property
+    def where(self) -> str:
+        """The permuter machine, as the events and status name it."""
+        return "this computer" if self.is_local else self.host
+
     # -- plumbing
     def _ssh_argv(self, command: str) -> list[str]:
-        return [*SSH, self.host, command]
+        """A shell command on the permuter machine: over ssh, or in a local shell (local mode), from the home folder
+        either way (the commands' relative paths are)."""
+        return ["/bin/sh", "-c", command] if self.is_local else [*SSH, self.host, command]
 
     def _ssh(self, command: str, timeout: float = 120) -> subprocess.CompletedProcess:
-        return subprocess.run(self._ssh_argv(command), capture_output=True, text=True, timeout=timeout)
+        return subprocess.run(self._ssh_argv(command), capture_output=True, text=True, timeout=timeout,
+                              cwd=str(Path.home()))
 
     def _rsync(self, src: str, dst: str, delete: bool = False, exclude: tuple[str, ...] = ()) -> subprocess.CompletedProcess:
         args = (["rsync", "-a", "--timeout=60", "-e", " ".join(SSH)] + (["--delete"] if delete else [])
@@ -80,7 +99,9 @@ class RemotePermuter:
         """A batch's results back from the permuter machine: rsync, or else tar over ssh. macOS's rsync (openrsync)
         pulling over ssh died on the first file's data on the Mac Studio ("unexpected end of file", while pushing
         and a local copy worked), and no result came back for 7 hours (2026-11-12). permuter.log stays there: the
-        import doesn't read it, and it grows by tens of MB a batch."""
+        import doesn't read it, and it grows by tens of MB a batch. Local mode: they're where the import reads them."""
+        if self.is_local:
+            return subprocess.CompletedProcess(["local"], 0, "", "")
         got = self._rsync(f"{self.host}:{remote}/", f"{local}/", exclude=("permuter.log",))
         if got.returncode == 0:
             return got
@@ -101,7 +122,13 @@ class RemotePermuter:
                               text=True, timeout=3600, env={**__import__("os").environ, "DECOMP_HOME": str(self.home)})
 
     def _remote_folder(self, slug: str) -> str:
-        return f"permuter-{slug}"
+        """The batch's folder on the permuter machine, for pgrep and pkill: relative to its home folder, or (local
+        mode) the export's own folder."""
+        return str(self._local(slug)) if self.is_local else f"permuter-{slug}"
+
+    def _folder(self, slug: str) -> str:
+        """The batch's folder as a shell path, for the commands that run there."""
+        return shlex.quote(str(self._local(slug))) if self.is_local else f"$HOME/permuter-{slug}"
 
     def _local(self, slug: str) -> Path:
         return self.home / ".decomp" / "permuter" / slug
@@ -135,7 +162,7 @@ class RemotePermuter:
             try:
                 is_running = self.running(slug)
             except (OSError, subprocess.SubprocessError) as e:
-                st["error"] = f"can't reach {self.host}: {e}"
+                st["error"] = f"can't reach {self.where}: {e}"
                 return st
             st["running"] = is_running
             # Poll evidence, not an invented start/finish time for a remote process.
@@ -155,7 +182,7 @@ class RemotePermuter:
                         if stats.get("matched") or stats.get("improved"):
                             with self.net.store.tx() as db:
                                 self.net._event(db, proj["id"], None, "autopilot",
-                                                f"permuter on {self.host}: {stats.get('matched', 0)} matched, "
+                                                f"permuter on {self.where}: {stats.get('matched', 0)} matched, "
                                                 f"{stats.get('improved', 0)} improved")
                 else:
                     st["error"] = f"copying the results back failed: {got.stderr.strip()[-200:]}"
@@ -165,13 +192,13 @@ class RemotePermuter:
             if is_running:  # a fresh batch: what agents and the permuter improved since start from there
                 self._ssh(f"pkill -f {self._batch_pattern(remote)}")
             elif self._ssh("pgrep -f '[p]ermuter.py' >/dev/null && echo yes").stdout.strip() == "yes":
-                st["error"] = (f"another decomp-permuter run is going on on {self.host} (started by hand?): "
+                st["error"] = (f"another decomp-permuter run is going on on {self.where} (started by hand?): "
                                "a batch starts once it's done")
                 return st
             return self._start(slug, proj, st)
 
     def _start(self, slug: str, proj, st: dict) -> dict:
-        local, remote = self._local(slug), self._remote_folder(slug)
+        local, remote, folder = self._local(slug), self._remote_folder(slug), self._folder(slug)
         if local.exists():
             import shutil
             shutil.rmtree(local)
@@ -180,31 +207,32 @@ class RemotePermuter:
         if n == 0:
             st["error"] = "no near misses to permute" if res.returncode == 0 else f"export failed: {res.stderr[-200:]}"
             return st
-        sent = self._rsync(f"{local}/", f"{self.host}:{remote}/", delete=True)
-        if sent.returncode != 0:
-            st["error"] = f"copying the batch failed: {sent.stderr.strip()[-200:]}"
-            return st
+        if not self.is_local:  # (local mode: decomp-permuter runs on the export where it is)
+            sent = self._rsync(f"{local}/", f"{self.host}:{remote}/", delete=True)
+            if sent.returncode != 0:
+                st["error"] = f"copying the batch failed: {sent.stderr.strip()[-200:]}"
+                return st
         start = ('export PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin:$PATH"; '  # (ssh's PATH is bare)
-                 f"sh {remote}/setup.sh >/dev/null && cd {self.permuter_dir} && "
-                 f"(nohup .venv/bin/python permuter.py $HOME/{remote}/*/ -j {self.jobs} --best-only --stack-diffs "
-                 f"> $HOME/{remote}/permuter.log 2>&1 &) && echo started")
+                 f"sh {folder}/setup.sh >/dev/null && cd {self.permuter_dir} && "
+                 f"(nohup .venv/bin/python permuter.py {folder}/*/ -j {self.jobs} --best-only --stack-diffs "
+                 f"> {folder}/permuter.log 2>&1 &) && echo started")
         res = self._ssh(start)
         if "started" not in res.stdout:
             st["error"] = f"starting the permuter failed: {(res.stderr or res.stdout).strip()[-300:]}"
             return st
         time.sleep(STARTUP_CHECK)  # it started: still running a little later? (a bad directory ends it at once)
         if not self.running(slug):
-            tail = self._ssh(f"tail -5 $HOME/{remote}/permuter.log").stdout.strip()
+            tail = self._ssh(f"tail -5 {folder}/permuter.log").stdout.strip()
             st["error"] = f"the permuter stopped right after starting: {tail[-300:]}"
             with self.net.store.tx() as db:
-                self.net._event(db, proj["id"], None, "autopilot", f"permuter on {self.host}: stopped right after "
+                self.net._event(db, proj["id"], None, "autopilot", f"permuter on {self.where}: stopped right after "
                                 f"starting ({tail.splitlines()[0][:120] if tail else 'no log'})")
             return st
         with self.net.store.tx() as db:
             c = json.loads(db.execute("SELECT config FROM projects WHERE id=?", (proj["id"],)).fetchone()["config"])
             c["permuter_remote"] = {"started": time.time(), "functions": n, "host": self.host}
             db.execute("UPDATE projects SET config=? WHERE id=?", (json.dumps(c), proj["id"]))
-            self.net._event(db, proj["id"], None, "autopilot", f"permuter on {self.host}: started on {n} near misses")
+            self.net._event(db, proj["id"], None, "autopilot", f"permuter on {self.where}: started on {n} near misses")
         st["running"], st["batch"] = True, {"started": time.time(), "functions": n}
         return st
 
@@ -233,3 +261,26 @@ def _stats(text: str) -> dict | None:
             except (ValueError, SyntaxError):
                 return None
     return None
+
+
+def is_this_computer(host: str) -> bool:
+    """Whether a permuter machine named in Settings is the computer the app runs on: "local", "localhost", an
+    address of this computer's loopback, or one of its own names (hostname, with or without .local; macOS's
+    LocalHostName and ComputerName)."""
+    import socket
+    h = host.strip().lower().rstrip(".")
+    if not h:
+        return False
+    if h in ("local", "localhost", "127.0.0.1", "::1"):
+        return True
+    names = {socket.gethostname().lower()}
+    if sys.platform == "darwin":
+        for key in ("LocalHostName", "ComputerName"):
+            try:
+                got = subprocess.run(["scutil", "--get", key], capture_output=True, text=True, timeout=5)
+                if got.returncode == 0 and got.stdout.strip():
+                    names.add(got.stdout.strip().lower())
+            except (OSError, subprocess.SubprocessError):
+                pass
+    names |= {n.removesuffix(".local") for n in names} | {n.removesuffix(".local") + ".local" for n in names}
+    return h in names

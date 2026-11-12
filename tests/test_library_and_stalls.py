@@ -256,3 +256,34 @@ def test_permuter_results_come_back_by_tar_when_rsync_fails(tmp_path, monkeypatc
     assert got.returncode == 0, got.stderr
     assert (local / "func_a" / "output-10-1" / "source.c").read_text().startswith("int a")
     assert not (local / "permuter.log").exists()
+
+
+def test_local_mode_runs_the_permuter_here_without_ssh_or_copies(tmp_path):
+    """The permuter machine is this computer: commands run in a local shell, the batch is the export's own folder
+    (nothing to copy back), and the running check finds decomp-permuter working on that folder."""
+    import socket
+    import subprocess
+    import sys
+    import time as _time
+    from pathlib import Path
+
+    from decompnet.app.remote_permuter import RemotePermuter, is_this_computer
+
+    assert is_this_computer("local") and is_this_computer(socket.gethostname())
+    assert not is_this_computer("some-other-machine") and not is_this_computer("")
+    rp = RemotePermuter.__new__(RemotePermuter)
+    rp.home = tmp_path
+    rp.settings = type("S", (), {"data": {"permuter_host": "local"}})()
+    assert rp.is_local and rp.where == "this computer"
+    assert rp._ssh("pwd").stdout.strip() == str(Path.home().resolve()) or rp._ssh("pwd").stdout.strip() == str(Path.home())
+    folder = rp._local("game")
+    assert rp._remote_folder("game") == str(folder) and rp._pull("ignored", folder).returncode == 0
+    assert not folder.exists()  # (the pull touched nothing)
+    assert not rp.running("game")
+    fake = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)", "permuter.py", f"{folder}/func_a/"])
+    try:
+        _time.sleep(0.3)
+        assert rp.running("game")
+    finally:
+        fake.kill()
+        fake.wait()
