@@ -36,7 +36,7 @@ name = "GCC 2.7.2 (KMC-compatible) + binutils 2.6"
 platform = "N64"
 arch = "mips"
 license = "GPL-2.0"
-source = "decompals/mips-gcc-2.7.2 v0.1, decompals/mips-binutils-2.6 v0.3"
+source = "decompals/mips-gcc-2.7.2 v0.1, decompals/mips-binutils-2.6 v0.3 (Linux), ianderse/mips-binutils-2.6 v0.4 (macOS, universal)"
 description = "GCC 2.7.2 built to reproduce the KMC compiler used by many N64 games, with the matching assembler."
 cc = ["{tc}/gcc", "-B{tc}/", "-c"]
 flags = ["-G0", "-mips3", "-mgp32", "-mfp32", "-O2"]
@@ -53,8 +53,8 @@ url = "https://github.com/decompals/mips-gcc-2.7.2/releases/download/v0.1/gcc-2.
 sha256 = "5923ea59b97d39d65d684a3ef2f25cd1cbcaf2fd0b5cf6a7f1a4804500a770e0"
 platforms = ["macos-x86_64", "macos-arm64"]
 [["gcc-2.7.2-kmc".parts]]
-url = "https://github.com/decompals/mips-binutils-2.6/releases/download/v0.3/binutils-2.6-mac.tar.gz"
-sha256 = "ab21ad5908fb7776a4b0c596cc82f216876e3b5d108c7c7c1f33543b3f3fce4c"
+url = "https://github.com/ianderse/mips-binutils-2.6/releases/download/v0.4/binutils-2.6-mac.tar.gz"
+sha256 = "f219c92664584336648e29a36d4063ba934a25b30d62acc79fda1eb5bee5b0bd"
 platforms = ["macos-x86_64", "macos-arm64"]
 
 ["gcc-2.7.2-psx"]
@@ -62,7 +62,7 @@ name = "GCC 2.7.2 for PlayStation + binutils 2.6"
 platform = "PS1"
 arch = "mipsel"
 license = "GPL-2.0"
-source = "decompals/old-gcc 0.17 (gcc-2.7.2-psx), decompals/mips-binutils-2.6 v0.3"
+source = "decompals/old-gcc 0.17 (gcc-2.7.2-psx), decompals/mips-binutils-2.6 v0.3 (Linux), ianderse/mips-binutils-2.6 v0.4 (macOS, universal)"
 description = "GCC 2.7.2 with the PlayStation patches, the C compiler family behind PSY-Q, with the GNU assembler."
 cc = ["{tc}/gcc", "-B{tc}/", "-c", "-Wa,-EL"]
 flags = ["-O2", "-G8"]
@@ -87,8 +87,8 @@ url = "https://github.com/decompals/old-gcc/releases/download/0.17/gcc-2.7.2-psx
 sha256 = "4280894661c9792bc19f5c970c283d35381937fb44e479a91d0c044c95fcd208"
 platforms = ["macos-x86_64", "macos-arm64"]
 [["gcc-2.7.2-psx".parts]]
-url = "https://github.com/decompals/mips-binutils-2.6/releases/download/v0.3/binutils-2.6-mac.tar.gz"
-sha256 = "ab21ad5908fb7776a4b0c596cc82f216876e3b5d108c7c7c1f33543b3f3fce4c"
+url = "https://github.com/ianderse/mips-binutils-2.6/releases/download/v0.4/binutils-2.6-mac.tar.gz"
+sha256 = "f219c92664584336648e29a36d4063ba934a25b30d62acc79fda1eb5bee5b0bd"
 platforms = ["macos-x86_64", "macos-arm64"]
 
 ["gcc-2.6.0-psx"]
@@ -96,7 +96,7 @@ name = "GCC 2.6.0 for PlayStation + binutils 2.6"
 platform = "PS1"
 arch = "mipsel"
 license = "GPL-2.0"
-source = "decompals/old-gcc 0.17 (gcc-2.6.0-psx), its macOS build: docs/plans/psx-gcc-macos.sh, decompals/mips-binutils-2.6 v0.3"
+source = "decompals/old-gcc 0.17 (gcc-2.6.0-psx), its macOS build: docs/plans/psx-gcc-macos.sh, decompals/mips-binutils-2.6 v0.3 (Linux), ianderse/mips-binutils-2.6 v0.4 (macOS, universal)"
 description = "GCC 2.6.0 with the PlayStation patches (an earlier PSY-Q version), with the GNU assembler."
 cc = ["{tc}/gcc", "-B{tc}/", "-c", "-Wa,-EL"]
 flags = ["-O2", "-G8"]
@@ -126,8 +126,8 @@ url = "https://raw.githubusercontent.com/ianderse/decomp.wtf/main/toolchain-buil
 sha256 = "3a42d454e21d659106d3373022ec693956336881b4665ade7f965bdb46cdf685"
 platforms = ["macos-x86_64"]
 [["gcc-2.6.0-psx".parts]]
-url = "https://github.com/decompals/mips-binutils-2.6/releases/download/v0.3/binutils-2.6-mac.tar.gz"
-sha256 = "ab21ad5908fb7776a4b0c596cc82f216876e3b5d108c7c7c1f33543b3f3fce4c"
+url = "https://github.com/ianderse/mips-binutils-2.6/releases/download/v0.4/binutils-2.6-mac.tar.gz"
+sha256 = "f219c92664584336648e29a36d4063ba934a25b30d62acc79fda1eb5bee5b0bd"
 platforms = ["macos-x86_64", "macos-arm64"]
 
 
@@ -136,7 +136,7 @@ name = "GCC 2.6.3 for PlayStation + binutils 2.6"
 platform = "PS1"
 arch = "mipsel"
 license = "GPL-2.0"
-source = "decompals/old-gcc 0.17 (gcc-2.6.3-psx), its macOS build: docs/plans/psx-gcc-macos.sh, decompals/mips-binutils-2.6 v0.3"
+source = "decompals/old-gcc 0.17 (gcc-2.6.3-psx), its macOS build: docs/plans/psx-gcc-macos.sh, decompals/mips-binutils-2.6 v0.3 (Linux), ianderse/mips-binutils-2.6 v0.4 (macOS, universal)"
 description = "GCC 2.6.3 with the PlayStation patches (an earlier PSY-Q version), with the GNU assembler."
 cc = ["{tc}/gcc", "-B{tc}/", "-c", "-Wa,-EL"]
 flags = ["-O2", "-G8"]
@@ -166,8 +166,8 @@ url = "https://raw.githubusercontent.com/ianderse/decomp.wtf/main/toolchain-buil
 sha256 = "5cb92ba1b156f0d4c36d301b976bd475f52cf85271b741270a6383a4499accbd"
 platforms = ["macos-x86_64"]
 [["gcc-2.6.3-psx".parts]]
-url = "https://github.com/decompals/mips-binutils-2.6/releases/download/v0.3/binutils-2.6-mac.tar.gz"
-sha256 = "ab21ad5908fb7776a4b0c596cc82f216876e3b5d108c7c7c1f33543b3f3fce4c"
+url = "https://github.com/ianderse/mips-binutils-2.6/releases/download/v0.4/binutils-2.6-mac.tar.gz"
+sha256 = "f219c92664584336648e29a36d4063ba934a25b30d62acc79fda1eb5bee5b0bd"
 platforms = ["macos-x86_64", "macos-arm64"]
 
 
@@ -176,7 +176,7 @@ name = "GCC 2.8.1 for PlayStation + binutils 2.6"
 platform = "PS1"
 arch = "mipsel"
 license = "GPL-2.0"
-source = "decompals/old-gcc 0.17 (gcc-2.8.1-psx), decompals/mips-binutils-2.6 v0.3"
+source = "decompals/old-gcc 0.17 (gcc-2.8.1-psx), decompals/mips-binutils-2.6 v0.3 (Linux), ianderse/mips-binutils-2.6 v0.4 (macOS, universal)"
 description = "GCC 2.8.1 with the PlayStation patches (later PSY-Q versions), with the GNU assembler."
 cc = ["{tc}/gcc", "-B{tc}/", "-c", "-Wa,-EL"]
 flags = ["-O2", "-G8"]
@@ -201,8 +201,8 @@ url = "https://github.com/decompals/old-gcc/releases/download/0.17/gcc-2.8.1-psx
 sha256 = "bab0c6ea1f394573d5aabbdd7b37e36aceeb83c522141d946a87a9f58c199ea0"
 platforms = ["macos-x86_64", "macos-arm64"]
 [["gcc-2.8.1-psx".parts]]
-url = "https://github.com/decompals/mips-binutils-2.6/releases/download/v0.3/binutils-2.6-mac.tar.gz"
-sha256 = "ab21ad5908fb7776a4b0c596cc82f216876e3b5d108c7c7c1f33543b3f3fce4c"
+url = "https://github.com/ianderse/mips-binutils-2.6/releases/download/v0.4/binutils-2.6-mac.tar.gz"
+sha256 = "f219c92664584336648e29a36d4063ba934a25b30d62acc79fda1eb5bee5b0bd"
 platforms = ["macos-x86_64", "macos-arm64"]
 
 ["gcc-2.8.0-psx"]
@@ -210,7 +210,7 @@ name = "GCC 2.8.0 for PlayStation + binutils 2.6"
 platform = "PS1"
 arch = "mipsel"
 license = "GPL-2.0"
-source = "decompals/old-gcc 0.17 (gcc-2.8.0-psx), its macOS build: docs/plans/psx-gcc-macos.sh, decompals/mips-binutils-2.6 v0.3"
+source = "decompals/old-gcc 0.17 (gcc-2.8.0-psx), its macOS build: docs/plans/psx-gcc-macos.sh, decompals/mips-binutils-2.6 v0.3 (Linux), ianderse/mips-binutils-2.6 v0.4 (macOS, universal)"
 description = "GCC 2.8.0 with the PlayStation patches (between PSY-Q's 2.7.2 and 2.8.1), with the GNU assembler."
 cc = ["{tc}/gcc", "-B{tc}/", "-c", "-Wa,-EL"]
 flags = ["-O2", "-G8"]
@@ -239,8 +239,8 @@ url = "https://raw.githubusercontent.com/ianderse/decomp.wtf/main/toolchain-buil
 sha256 = "4b13835d702e9c41b2f9935a4ec2a67e01d92fe3b4677eac301adb96d7d61867"
 platforms = ["macos-x86_64"]
 [["gcc-2.8.0-psx".parts]]
-url = "https://github.com/decompals/mips-binutils-2.6/releases/download/v0.3/binutils-2.6-mac.tar.gz"
-sha256 = "ab21ad5908fb7776a4b0c596cc82f216876e3b5d108c7c7c1f33543b3f3fce4c"
+url = "https://github.com/ianderse/mips-binutils-2.6/releases/download/v0.4/binutils-2.6-mac.tar.gz"
+sha256 = "f219c92664584336648e29a36d4063ba934a25b30d62acc79fda1eb5bee5b0bd"
 platforms = ["macos-x86_64", "macos-arm64"]
 
 
@@ -249,7 +249,7 @@ name = "GCC 2.91.66 for PlayStation + binutils 2.6"
 platform = "PS1"
 arch = "mipsel"
 license = "GPL-2.0"
-source = "decompals/old-gcc 0.17 (gcc-2.91.66-psx), its macOS build: docs/plans/psx-gcc-macos-egcs.sh and arm64-varargs.h, decompals/mips-binutils-2.6 v0.3"
+source = "decompals/old-gcc 0.17 (gcc-2.91.66-psx), its macOS build: docs/plans/psx-gcc-macos-egcs.sh and arm64-varargs.h, decompals/mips-binutils-2.6 v0.3 (Linux), ianderse/mips-binutils-2.6 v0.4 (macOS, universal)"
 description = "GCC 2.91.66 with the PlayStation patches (egcs 1.1.2, in the PSY-Q SDKs of the late 1990s), with the GNU assembler."
 cc = ["{tc}/gcc", "-B{tc}/", "-c", "-Wa,-EL"]
 flags = ["-O2", "-G8"]
@@ -275,8 +275,8 @@ url = "https://raw.githubusercontent.com/ianderse/decomp.wtf/main/toolchain-buil
 sha256 = "f4ede3b05c28f696abd90c6a609d09573a233416d14bf55588b355e38e8c3d11"
 platforms = ["macos-x86_64"]
 [["gcc-2.91.66-psx".parts]]
-url = "https://github.com/decompals/mips-binutils-2.6/releases/download/v0.3/binutils-2.6-mac.tar.gz"
-sha256 = "ab21ad5908fb7776a4b0c596cc82f216876e3b5d108c7c7c1f33543b3f3fce4c"
+url = "https://github.com/ianderse/mips-binutils-2.6/releases/download/v0.4/binutils-2.6-mac.tar.gz"
+sha256 = "f219c92664584336648e29a36d4063ba934a25b30d62acc79fda1eb5bee5b0bd"
 platforms = ["macos-x86_64", "macos-arm64"]
 
 ["gcc-2.95.2-psx"]
@@ -284,7 +284,7 @@ name = "GCC 2.95.2 for PlayStation + binutils 2.6"
 platform = "PS1"
 arch = "mipsel"
 license = "GPL-2.0"
-source = "decompals/old-gcc 0.17 (gcc-2.95.2-psx), its macOS build: docs/plans/psx-gcc-macos-egcs.sh and arm64-varargs.h, decompals/mips-binutils-2.6 v0.3"
+source = "decompals/old-gcc 0.17 (gcc-2.95.2-psx), its macOS build: docs/plans/psx-gcc-macos-egcs.sh and arm64-varargs.h, decompals/mips-binutils-2.6 v0.3 (Linux), ianderse/mips-binutils-2.6 v0.4 (macOS, universal)"
 description = "GCC 2.95.2 with the PlayStation patches (a later PSY-Q version), with the GNU assembler."
 cc = ["{tc}/gcc", "-B{tc}/", "-c", "-Wa,-EL"]
 flags = ["-O2", "-G8"]
@@ -310,8 +310,8 @@ url = "https://raw.githubusercontent.com/ianderse/decomp.wtf/main/toolchain-buil
 sha256 = "62d9b66d19ccdf10a12cca964dc373b7764d1d609a66670300840cceb91fbfa8"
 platforms = ["macos-x86_64"]
 [["gcc-2.95.2-psx".parts]]
-url = "https://github.com/decompals/mips-binutils-2.6/releases/download/v0.3/binutils-2.6-mac.tar.gz"
-sha256 = "ab21ad5908fb7776a4b0c596cc82f216876e3b5d108c7c7c1f33543b3f3fce4c"
+url = "https://github.com/ianderse/mips-binutils-2.6/releases/download/v0.4/binutils-2.6-mac.tar.gz"
+sha256 = "f219c92664584336648e29a36d4063ba934a25b30d62acc79fda1eb5bee5b0bd"
 platforms = ["macos-x86_64", "macos-arm64"]
 
 ["ee-gcc-2.96"]
