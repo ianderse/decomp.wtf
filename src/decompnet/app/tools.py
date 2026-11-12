@@ -237,6 +237,8 @@ HANDLERS: dict[str, Callable[..., str]] = {
         _claim(net, agent, slug, function, strategy, count),
     "get_function": lambda net, agent, slug, function: net.get_function(function, slug, agent),
     "compile_and_diff": lambda net, agent, slug, function, source: _compile(net, agent, slug, function, source),
+    "compiler_dump": lambda net, agent, slug, function, source, passes="":
+        net.compiler_dump(agent, function, source, passes, slug),
     "release_function": lambda net, agent, slug, function, notes: net.release(agent, function, notes, slug),
     "flag_for_review": lambda net, agent, slug, function, reason: net.flag_for_review(agent, function, reason, slug),
     "get_context": lambda net, agent, slug, function="": net.get_context(slug, function or None),
@@ -263,7 +265,7 @@ HANDLERS: dict[str, Callable[..., str]] = {
         net.forks.split_file(agent, _fork(net, slug, "split_file"), path, at, new_name, data),
 }
 
-ROM_ONLY = {"find_reference_examples", "audit_call_boundaries", "progress_report", "test_alternatives", "inspect_candidate", "record_diagnosis", "review_candidate", "test_hypothesis", "get_context", "edit_context", "rename_symbol", "split_function", "merge_functions", "flag_for_review"}
+ROM_ONLY = {"compiler_dump", "find_reference_examples", "audit_call_boundaries", "progress_report", "test_alternatives", "inspect_candidate", "record_diagnosis", "review_candidate", "test_hypothesis", "get_context", "edit_context", "rename_symbol", "split_function", "merge_functions", "flag_for_review"}
 FORK_ONLY = {"read_file", "search_code", "edit_file", "file_status", "split_file"}
 
 
@@ -351,6 +353,15 @@ def build_mcp(net: RomNetwork, agent_of: Callable[[Context], tuple[Agent, str]])
         built with the project's build system and diffed with objdiff. Several functions ("a, b, c"): send all
         their definitions in one source; each is judged on its own."""
         return await run(ctx, "compile_and_diff", function=function, source=source)
+
+    @mcp.tool(meta=ALWAYS_LOAD)
+    async def compiler_dump(ctx: Context, function: str, source: str, passes: str = "") -> str:
+        """What GCC made of your source, for when the diff alone doesn't say why: GCC's own assembly, the assembly
+        after the assembler step's rewrite (maspsx), and the RTL dump of each GCC pass named in `passes`
+        (comma-separated: rtl, jump, cse, loop, cse2, flow, combine, sched, lreg, greg, sched2, jump2, dbr;
+        default greg,dbr: register allocation and delay slots). Compiled exactly as
+        compile_and_diff compiles it; nothing is recorded or scored. ROM projects with a GCC compiler."""
+        return await run(ctx, "compiler_dump", function=function, source=source, passes=passes)
 
     @mcp.tool(meta=ALWAYS_LOAD)
     async def test_alternatives(ctx: Context, function: str, attempt_id: int, old: str,

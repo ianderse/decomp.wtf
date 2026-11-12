@@ -56,6 +56,13 @@ STALL_ABANDONS = 6
 # best_score / (instructions * 100) at or under which a stalled function stays open anyway: the remote permuter
 # takes near misses that close (app/remote_permuter.MAX_MISS) and finds what agents don't
 STALL_NEAR_MISS = 0.08
+# compiler_dump: GCC's passes, as old GCC's -d letters and dump file suffixes name them (toplev.c, 2.6-2.95)
+GCC_DUMPS = {"rtl": ("r", ".rtl"), "jump": ("j", ".jump"), "cse": ("s", ".cse"), "loop": ("L", ".loop"),
+             "cse2": ("t", ".cse2"), "flow": ("f", ".flow"), "combine": ("c", ".combine"), "sched": ("S", ".sched"),
+             "lreg": ("l", ".lreg"), "greg": ("g", ".greg"), "sched2": ("R", ".sched2"), "jump2": ("J", ".jump2"),
+             "dbr": ("d", ".dbr")}
+DUMP_DEFAULT = "greg,dbr"  # register allocation and delay slots: where the hard tail differs most often
+DUMP_BUDGET = 60000  # characters of dumps per call, shared between the files
 # Twins first (see app/twins.py): a function whose code the game has more than once (boost: how many more times)
 # and isn't too big or given up on, best value per instruction first; its twins (boost -1) last, as they match for
 # free once it does.
@@ -362,16 +369,62 @@ class Network:
         row = self.store.one("SELECT name FROM agents WHERE id=?", agent_id) if agent_id else None
         return row["name"] if row else "?"
 
-    def _compile(self, proj, header: str, source: str, fn=None, toolchain: str | None = None):
-        """With `fn`: that function's own compiler when it has one (a game built with two compiler versions)."""
+    def _compile(self, proj, header: str, source: str, fn=None, toolchain: str | None = None,
+                 extra: tuple[str, ...] = (), collect=None):
+        """With `fn`: that function's own compiler when it has one (a game built with two compiler versions).
+        extra, collect: see compiler.compile_source (compiler_dump uses them)."""
         cfg = json.loads(proj["config"])
         tc = toolchain or (self.fn_toolchain(fn) if fn is not None else None)
         if tc and "toolchain" in cfg.get("compiler", {}):
             cfg = {**cfg, "compiler": with_toolchain(cfg["compiler"], tc)}
-        res = compile_source(compiler_config(Path(proj["root"]), cfg), header, source)
+        res = compile_source(compiler_config(Path(proj["root"]), cfg), header, source, extra=extra, collect=collect)
         if not res.ok and "got fatal signal" in res.log and (tid := cfg.get("compiler", {}).get("toolchain")):
             res = self._explain_crash(proj, tid, header, source, res)
         return res
+
+    def compiler_dump(self, agent: Agent, function: str, source: str, passes: str = "", project: str | None = None) -> str:
+        """What GCC made of a source, for the hard tail where a diff isn't enough: compiled exactly as the judge
+        compiles it (the function's own compiler setup, the current context.h), it returns GCC's own assembly, the
+        assembly after the assembler step's rewrite (maspsx on PS1), and the RTL dump of each GCC pass asked for.
+        Nothing is recorded: no attempt, no score. Exhausted diagnoses on SLUS-01252 asked for exactly this ("resume
+        with same-recipe GCC RTL / raw generated assembly / reorg evidence") again and again (2026-11-11)."""
+        fn = self._function(function, project)
+        proj = self.store.one("SELECT * FROM projects WHERE id=?", fn["project_id"])
+        wanted = [p.strip().lower() for p in (passes or DUMP_DEFAULT).split(",") if p.strip()]
+        unknown = [p for p in wanted if p not in GCC_DUMPS]
+        if unknown:
+            raise NetworkError(f"unknown pass {', '.join(unknown)}: passes are {', '.join(GCC_DUMPS)}")
+        letters = "".join(GCC_DUMPS[p][0] for p in wanted)
+        found: dict[str, str] = {}
+
+        def collect(work: Path) -> None:
+            for name, path in (("GCC's assembly", "func.o.s"), ("GCC's assembly", "func.s"),
+                               ("after the assembler step (maspsx)", "func.o.ms")):
+                if (work / path).exists() and name not in found:
+                    # without the .comm line of every global context.h declares, blank lines and the temp path
+                    found[name] = "\n".join(
+                        ln for ln in (work / path).read_text(encoding="latin-1").splitlines()
+                        if ln.strip() and not ln.lstrip().startswith((".comm", ".lcomm", ".file")))
+            for p in wanted:
+                if (work / f"func.c{GCC_DUMPS[p][1]}").exists():
+                    found[f"pass {p}"] = (work / f"func.c{GCC_DUMPS[p][1]}").read_text(encoding="latin-1")
+
+        res = self._compile(proj, self._context(proj["id"], fn["unit"])["header"], source, fn,
+                            extra=(f"-d{letters}",) if letters else (), collect=collect)
+        if not found:
+            return ("No GCC output to show: " + (res.log.strip()[-1500:] or "this project's compiler isn't GCC, or "
+                    "it writes no assembly or dumps"))
+        out = [f"compiler_dump {fn['name']}: " + ("compiles" if res.ok else "doesn't compile: " + res.log.strip()[-600:])]
+        # the assembly in full (it's short once the declarations are out), the pass dumps sharing what's left
+        budget = DUMP_BUDGET - sum(len(t) for k, t in found.items() if not k.startswith("pass "))
+        dumps = [k for k in found if k.startswith("pass ")]
+        for title, text in found.items():
+            text = text.strip()
+            room = len(text) if title not in dumps else max(4000, budget // max(1, len(dumps)))
+            cut = len(text) > room
+            out += ["", f"### {title}" + (f" (first {room} of {len(text)} characters: ask for fewer passes to see "
+                                          "more of each)" if cut else ""), text[:room]]
+        return "\n".join(out)
 
     def _explain_crash(self, proj, tid: str, header: str, source: str, res):
         """The compiler crashed instead of saying what's wrong (the Apple Silicon builds of GCC 2.6-2.8.1 do on some

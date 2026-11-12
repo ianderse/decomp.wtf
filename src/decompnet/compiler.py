@@ -143,7 +143,10 @@ def run_in(cfg: CompilerConfig, work: Path, argv: list[str], timeout: float = 30
                  **({} if outputs is None else {"inputs": inputs, "outputs": outputs}))
 
 
-def compile_source(cfg: CompilerConfig, context_header: str, source: str, trusted: bool = False) -> CompileResult:
+def compile_source(cfg: CompilerConfig, context_header: str, source: str, trusted: bool = False,
+                   extra: tuple[str, ...] = (), collect=None) -> CompileResult:
+    """extra: more compiler arguments, after the project's flags. collect(work_dir): called once the compile has run,
+    whatever its result, while its files still exist (Network.compiler_dump reads GCC's assembly and pass dumps)."""
     if not trusted:
         try:
             check_source(source)
@@ -174,13 +177,15 @@ def compile_source(cfg: CompilerConfig, context_header: str, source: str, truste
         root = _root(cfg, work)
         subst = {"{src}": f"{root}/func.c", "{obj}": f"{root}/func.o", "{include}": f"{root}/include"}
         argv = [subst.get(a, a) for a in cfg.cmd]
-        argv = [a.replace("{include}", subst["{include}"]) for a in argv]
+        argv = [a.replace("{include}", subst["{include}"]) for a in argv] + list(extra)
         try:
             with _SLOTS:
                 proc = _exec(cfg, work, argv, cfg.timeout,
                              **({"outputs": ["func.o"], "stage": root} if _sandbox_mode(cfg) == "wsl" else {}))
         except subprocess.TimeoutExpired:
             return CompileResult(False, None, f"compiler timed out after {cfg.timeout}s")
+        if collect is not None:
+            collect(work)
         log = (proc.stdout + proc.stderr).replace(root + "/", "")
         obj = work / "func.o"
         if proc.returncode != 0 or not obj.exists():

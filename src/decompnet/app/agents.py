@@ -1408,6 +1408,11 @@ def api_tool_schemas(fork: bool = False) -> list[dict]:
         "compile_and_diff": ("Compile C for the function, link it at its address and diff against the ROM. "
                              "Score 0 = matched. Several functions: names comma-separated, all definitions in source.",
                              s(function=st("function name, or several: a, b, c", True), source=st("C source", True))),
+        "compiler_dump": ("GCC's own assembly, the assembly after maspsx, and RTL dumps of the GCC passes named "
+                          "(rtl, jump, cse, loop, cse2, flow, combine, sched, lreg, greg, sched2, jump2, dbr; default "
+                          "greg,dbr), for a source compiled as compile_and_diff would. Not scored or recorded.",
+                          s(function=st("function", True), source=st("C source", True),
+                            passes=st("comma-separated GCC passes (optional)"))),
         "release_function": ("Give up a function you can't match yet, with notes for the next agent: the best score, "
                              "what you tried and what the diff still shows. Use this for every hard function.",
                              s(function=st("function", True), notes=st("what you tried, what is left", True))),

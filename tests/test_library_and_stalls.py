@@ -204,3 +204,33 @@ def test_a_crash_of_the_arm64_ps1_gcc_is_explained_by_a_native_gcc(tmp_path):
 
     said = explained("int f(int a) { return a + undeclared_thing; }\n")
     assert "`undeclared_thing' undeclared" in said and "GCC 2.95.2 says it" in said and "psx-cc" not in said
+
+
+def test_compiler_dump_shows_what_gcc_made_of_a_source(tmp_path):
+    """The hard tail's diagnoses kept asking for "same-recipe GCC RTL / raw generated assembly": compiler_dump
+    compiles as the judge does and returns GCC's assembly, maspsx's, and the pass dumps asked for; nothing recorded."""
+    import pytest
+
+    from decompnet import toolchains
+    from decompnet.network import Network, NetworkError
+
+    if not all(toolchains.installed(t) for t in ("gcc-2.7.2-psx", "maspsx", "binutils-mips")):
+        pytest.skip("needs the PS1 GCC 2.7.2 toolchain")
+    net = Network(tmp_path / "app.db")
+    with net.store.tx() as db:
+        pid = db.execute("INSERT INTO projects(slug,name,description,arch,big_endian,root,config) VALUES(?,?,?,?,?,?,?)",
+                         ("game", "Game", "", "mipsel", 0, str(tmp_path),
+                          json.dumps({"kind": "rom", "compiler": {"toolchain": "gcc-2.7.2-psx", "flags": ["-O2", "-G8"]}}))).lastrowid
+        db.execute("INSERT INTO functions(project_id,name,size,n_insns,status,unit,relocs) VALUES(?,?,?,?,?,?,?)",
+                   (pid, "add3", 12, 3, "open", "", "[]"))
+        db.execute("INSERT INTO context_versions(project_id,version,header,agent_id,message,created_at,unit) "
+                   "VALUES(?,?,?,?,?,?,?)", (pid, 1, "typedef int s32;", None, "", 0.0, ""))
+    agent = net.authenticate(net.register_agent("a1", "you"))
+    out = net.compiler_dump(agent, "add3", "s32 add3(s32 a) { return a + 3; }", "greg,dbr", "game")
+    assert "compiles" in out.splitlines()[0]
+    for part in ("### GCC's assembly", "### after the assembler step (maspsx)", "### pass greg", "### pass dbr"):
+        assert part in out, part
+    assert "addu" in out or "addiu" in out
+    assert net.store.one("SELECT COUNT(*) AS n FROM attempts")["n"] == 0
+    with pytest.raises(NetworkError, match="unknown pass"):
+        net.compiler_dump(agent, "add3", "s32 add3(s32 a) { return a; }", "nonsense", "game")
