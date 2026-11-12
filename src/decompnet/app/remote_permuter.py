@@ -65,12 +65,35 @@ class RemotePermuter:
         return str(self.settings.data.get("permuter_dir") or "~/decomp-permuter").strip()
 
     # -- plumbing
-    def _ssh(self, command: str, timeout: float = 120) -> subprocess.CompletedProcess:
-        return subprocess.run([*SSH, self.host, command], capture_output=True, text=True, timeout=timeout)
+    def _ssh_argv(self, command: str) -> list[str]:
+        return [*SSH, self.host, command]
 
-    def _rsync(self, src: str, dst: str, delete: bool = False) -> subprocess.CompletedProcess:
-        args = ["rsync", "-a", "--timeout=60", "-e", " ".join(SSH)] + (["--delete"] if delete else []) + [src, dst]
+    def _ssh(self, command: str, timeout: float = 120) -> subprocess.CompletedProcess:
+        return subprocess.run(self._ssh_argv(command), capture_output=True, text=True, timeout=timeout)
+
+    def _rsync(self, src: str, dst: str, delete: bool = False, exclude: tuple[str, ...] = ()) -> subprocess.CompletedProcess:
+        args = (["rsync", "-a", "--timeout=60", "-e", " ".join(SSH)] + (["--delete"] if delete else [])
+                + [f"--exclude={e}" for e in exclude] + [src, dst])
         return subprocess.run(args, capture_output=True, text=True, timeout=1800)
+
+    def _pull(self, remote: str, local: Path) -> subprocess.CompletedProcess:
+        """A batch's results back from the permuter machine: rsync, or else tar over ssh. macOS's rsync (openrsync)
+        pulling over ssh died on the first file's data on the Mac Studio ("unexpected end of file", while pushing
+        and a local copy worked), and no result came back for 7 hours (2026-11-12). permuter.log stays there: the
+        import doesn't read it, and it grows by tens of MB a batch."""
+        got = self._rsync(f"{self.host}:{remote}/", f"{local}/", exclude=("permuter.log",))
+        if got.returncode == 0:
+            return got
+        local.mkdir(parents=True, exist_ok=True)
+        send = subprocess.Popen(self._ssh_argv(f"tar -C {shlex.quote(remote)} --exclude ./permuter.log -cf - ."),
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        recv = subprocess.run(["tar", "-xf", "-", "-C", str(local)], stdin=send.stdout, capture_output=True, timeout=1800)
+        send.stdout.close()
+        sent_err = send.stderr.read().decode(errors="replace")
+        code = send.wait(timeout=60) or recv.returncode
+        why = (sent_err + recv.stderr.decode(errors="replace")).strip()
+        return subprocess.CompletedProcess(["tar over ssh"], code, "", (f"rsync: {got.stderr.strip()[-200:]}; tar: {why}"
+                                                                        if code else ""))
 
     def _cli(self, *args: str) -> subprocess.CompletedProcess:
         """`decomp permuter ...` in a process of its own (exporting and judging are busy work)."""
@@ -123,7 +146,7 @@ class RemotePermuter:
             except Exception:
                 log.warning('Remote worker observation unavailable', exc_info=True)
             if local.exists() and batch:
-                got = self._rsync(f"{self.host}:{remote}/", f"{local}/")
+                got = self._pull(remote, local)
                 if got.returncode == 0:
                     res = self._cli("import", slug, str(local))
                     stats = _stats(res.stdout)

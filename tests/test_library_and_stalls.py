@@ -234,3 +234,25 @@ def test_compiler_dump_shows_what_gcc_made_of_a_source(tmp_path):
     assert net.store.one("SELECT COUNT(*) AS n FROM attempts")["n"] == 0
     with pytest.raises(NetworkError, match="unknown pass"):
         net.compiler_dump(agent, "add3", "s32 add3(s32 a) { return a; }", "nonsense", "game")
+
+
+def test_permuter_results_come_back_by_tar_when_rsync_fails(tmp_path, monkeypatch):
+    """macOS's rsync pulling over ssh died on the first file ("unexpected end of file") and no permuter result came
+    back for 7 hours (2026-11-12): the pull falls back to tar over ssh, leaving the big permuter.log behind."""
+    import subprocess
+
+    from decompnet.app.remote_permuter import RemotePermuter
+
+    remote = tmp_path / "remote"
+    (remote / "func_a" / "output-10-1").mkdir(parents=True)
+    (remote / "func_a" / "output-10-1" / "source.c").write_text("int a(void) { return 1; }\n")
+    (remote / "permuter.log").write_text("iteration 1\n" * 1000)
+    rp = RemotePermuter.__new__(RemotePermuter)
+    rp.settings = type("S", (), {"data": {"permuter_host": "studio"}})()
+    monkeypatch.setattr(rp, "_rsync", lambda *a, **k: subprocess.CompletedProcess(["rsync"], 1, "", "unexpected end of file"))
+    monkeypatch.setattr(rp, "_ssh_argv", lambda command: ["sh", "-c", f"cd {tmp_path} && {command}"])
+    local = tmp_path / "local"
+    got = rp._pull("remote", local)
+    assert got.returncode == 0, got.stderr
+    assert (local / "func_a" / "output-10-1" / "source.c").read_text().startswith("int a")
+    assert not (local / "permuter.log").exists()
